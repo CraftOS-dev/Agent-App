@@ -1,11 +1,31 @@
 {
-  "name": "agent-app",
-  "version": "0.1.0",
-  "description": "Agent App Framework for OpenClaw — build/evolve/operate Agent Apps, with the app rendered in a Control-UI tab.",
+  "id": "a2app",
+  "name": "Agent App Framework",
+  "description": "Build and operate full Agent Apps over the A2App protocol via the a2app CLI.",
+  "icon": "https://cdn.simpleicons.org/probot",
+  "enabledByDefault": false,
   "skills": ["./skills"],
-  "tools": ["agent_app"],
-  "controlUiTabs": [
-    { "id": "agent-app", "label": "Agent App", "group": "agent", "path": "/__agent-app__/" }
+  "cliCommands": [
+    { "name": "agent-app", "description": "Run the a2app CLI (build/evolve/operate an Agent App)", "hasSubcommands": true }
   ],
-  "cli": ["agent-app"]
+  "activation": {
+    "onStartup": false,
+    "onCommands": ["agent-app"],
+    "onCapabilities": ["tool"]
+  },
+  "contracts": {
+    "tools": [
+      "agent_app_describe",
+      "agent_app_list",
+      "agent_app_get",
+      "agent_app_create",
+      "agent_app_update",
+      "agent_app_delete",
+      "agent_app_operations",
+      "agent_app_run_operation",
+      "agent_app_poll_tasks",
+      "agent_app_build",
+      "agent_app_validate"
+    ]
+  }
 }

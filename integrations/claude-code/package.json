@@ -1,12 +1,12 @@
 {
-  "name": "@a2app/integration-hermes",
+  "name": "@a2app/integration-claude-code",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework plugin for Hermes (tools + CLI + dashboard tab / desktop preview + shipped skills)",
+  "description": "Agent App Framework MCP server for Claude Code: exposes the a2app build+operate tools over the Model Context Protocol",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "bin": { "a2app-mcp": "./dist/index.js" },
   "engines": { "node": ">=20" },
   "dependencies": {
     "@a2app/integration-starter": "workspace:*"
@@ -17,6 +17,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "echo \"no tests\" && exit 0"
   }
 }

@@ -62,3 +62,6 @@ CLAUDE.md
 
 # standalone documentation — kept on disk, not part of the distribution
 docs/
+
+# dogfooding proof run (self-validation of the framework lifecycle)
+.a2app-proof/

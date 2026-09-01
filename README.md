@@ -100,13 +100,13 @@ Agents use the app programmatically via the A2App protocol, while continuing to 
 | [integrations/](integrations/) | Per-harness plugins (plugins are Hosts in spec terms) — CraftBot, OpenClaw, Hermes, dsh |
 | [skills/](skills/) | Framework skills per the pinned skill contract (creator, modify, importer, operator, walk-verify, connect) |
 | [sdks/](sdks/) | Protocol client SDKs (TypeScript first, Python next) |
-| [apps/](apps/), [docs/](docs/) | The runnable playground Agent App and explanatory docs |
+| [apps/](apps/) | The runnable playground Agent App |
 
 ## Getting started
 
 > **v0.1 is not yet published to npm/PyPI** — run from source: `pnpm install && pnpm -r build && pnpm -r test`. The `a2app` CLI shown above is available as `node framework/cli/dist/cli.js …` until the packages are published.
 
-Start with [docs/getting-started.md](docs/getting-started.md) and [docs/architecture.md](docs/architecture.md); the protocol reference is [docs/protocol.md](docs/protocol.md). The normative machine contracts are the JSON Schemas in [spec/](spec/), and the [conformance/](conformance/) suite is how an implementation proves it conforms. To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+The normative machine contracts are the JSON Schemas in [spec/](spec/), and the [conformance/](conformance/) suite is how an implementation proves it conforms. Each area documents itself: [framework/](framework/) (the CLI), [adapters/](adapters/) (the A2App adapter layers), [toolkits/](toolkits/) (blueprints), [skills/](skills/) (the agent-facing method), and [apps/playground/](apps/playground/) (a runnable example app). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 > **Security:** v0.1 is **loopback-trust only** — do not expose an Agent App to a network.
 

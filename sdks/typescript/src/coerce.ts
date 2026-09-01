@@ -148,7 +148,16 @@ export async function resolveRef(
   targetName: string,
   value: string,
 ): Promise<{ id?: string; error?: string }> {
-  if (/^[a-z0-9]{15}$/.test(value)) return { id: value };
+  // Definitive, stack-agnostic id check: if a record with this exact id already
+  // exists, the value IS an id — use it as-is (works for any backend's id
+  // format, not just one). Only if no such record exists do we treat it as a
+  // human label to resolve.
+  try {
+    const direct = await client.getRecord(targetName, value);
+    if (direct.ok) return { id: value };
+  } catch {
+    /* fall through to label resolution */
+  }
   const target = schema.get(targetName);
   if (target === undefined || target.label === null) return { id: value };
   const label = target.label;

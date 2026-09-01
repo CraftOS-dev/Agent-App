@@ -26,6 +26,8 @@ const COMMANDS: Record<string, CommandMeta> = {
   validate: { summary: "Run the validation + security gate", group: "build/evolve" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", group: "build/evolve" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", group: "build/evolve" },
+  serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", group: "build/evolve" },
+  stop: { summary: "Stop an app launched with `a2app serve`", group: "build/evolve" },
   dev: { summary: "Boot a dev copy on a hidden port with a fresh, migration-replayed database", group: "build/evolve" },
   promote: { summary: "Pre-promote backup, then apply the dev copy's migrations to live", group: "build/evolve" },
   backup: { summary: "Take an explicit backup of the live database", group: "build/evolve" },

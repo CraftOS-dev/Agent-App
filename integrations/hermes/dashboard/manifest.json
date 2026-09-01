@@ -1,7 +1,0 @@
-{
-  "id": "agent-app",
-  "label": "Agent App",
-  "kind": "iframe",
-  "route": "/__agent-app__/",
-  "description": "Renders the launched Agent App inside the Hermes dashboard."
-}

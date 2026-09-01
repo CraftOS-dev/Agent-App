@@ -1,10 +1,20 @@
 name: agent-app
 version: 0.1.0
-description: Agent App Framework for deepseek-harness (dsh) — build/evolve/operate Agent Apps; a client module iframes the app in its own slot.
+description: Agent App Framework for deepseek-harness (dsh) — build, evolve, and operate Agent Apps over the A2App protocol; a client module renders a launched app in its own slot.
 host: dist/index.js
 client: dist/client.js
 skills:
   - .agents/skills
 provides:
   tools:
-    - agent_app
+    - agent_app_describe
+    - agent_app_list
+    - agent_app_get
+    - agent_app_create
+    - agent_app_update
+    - agent_app_delete
+    - agent_app_operations
+    - agent_app_run_operation
+    - agent_app_poll_tasks
+    - agent_app_build
+    - agent_app_validate

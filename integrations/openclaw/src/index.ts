@@ -1,52 +1,141 @@
 /**
  * Agent App Framework plugin for OpenClaw.
  *
- * OpenClaw loads a plugin via `definePluginEntry` and exposes an `api` that can
- * register tools, CLI subcommands, HTTP routes, and Control-UI tabs; it ships
- * folder-per-skill skills via `"skills": ["./skills"]` in the manifest. This
- * entry adapts that `api` to the framework's generic {@link HarnessContext} and
- * wires the framework in once — the same wiring as every other harness, only the
- * context shape differs.
+ * A real OpenClaw plugin: it registers agent tools that build and operate Agent
+ * Apps through the `a2app` CLI, an `agent-app` CLI passthrough, and a Control UI
+ * tab for a launched app. Every tool shells the real CLI via the shared engine
+ * (`@a2app/integration-starter`), so nothing here is simulated.
  *
- * The deep route embeds the app in a Control-UI tab; the universal route (the
- * shipped `skills/`) works with zero code on any harness that reads SKILL.md.
+ * This package is built by the OpenClaw plugin toolchain, which provides
+ * `openclaw` and `typebox` as peer dependencies; it is not part of the framework
+ * monorepo's own `tsc` build. Drop it in an OpenClaw plugins directory with the
+ * accompanying `openclaw.plugin.json`.
  */
-import { registerA2AppPlugin, showAgentApp, type HarnessContext } from "@a2app/integration-starter";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { jsonResult, textResult } from "openclaw/plugin-sdk/tool-results";
+import { Type } from "typebox";
+import { runA2App } from "@a2app/integration-starter";
 
-/** The subset of OpenClaw's plugin `api` we use (loosely typed — map to the real
- *  `@openclaw/plugin-sdk` types in your build). */
-export interface OpenClawApi {
-  registerTool(t: { name: string; description: string; parameters: unknown; handler: (a: Record<string, unknown>) => Promise<unknown> }): void;
-  registerNodeCliFeature?(c: { name: string; run: (argv: string[]) => Promise<number> }): void;
-  registerSkillsDir?(dir: string): void;
-  session?: { controls?: { registerControlUiDescriptor(d: { surface: string; id: string; label: string; group: string; path: string }): void } };
-  log?: (line: string) => void;
-}
+/** The a2app binary (or JS entry) to shell. Override with A2APP_CLI. */
+const CLI = process.env.A2APP_CLI ?? "a2app";
 
-export function activate(api: OpenClawApi, opts: { skillsDir?: string; cliBin?: string } = {}): void {
-  const ctx: HarnessContext = {
-    registerTool: (t) => api.registerTool(t),
-    ...(api.registerNodeCliFeature ? { registerCommand: (c) => api.registerNodeCliFeature!(c) } : {}),
-    ...(api.registerSkillsDir ? { registerSkillsDir: (d) => api.registerSkillsDir!(d) } : {}),
-    registerDisplay: (tab) =>
-      api.session?.controls?.registerControlUiDescriptor({
-        surface: "tab",
-        id: tab.id,
-        label: tab.label,
-        group: "agent",
-        path: `/__agent-app__/${encodeURIComponent(tab.id)}/`,
-      }),
-    ...(api.log ? { log: api.log } : {}),
-  };
-  registerA2AppPlugin(ctx, opts);
-}
+type Args = Record<string, unknown>;
+const s = (v: unknown) => String(v);
 
-/** Call once an app is healthy to render it in a sandboxed Control-UI tab. */
-export function display(api: OpenClawApi, app: { id: string; name: string; url: string }): void {
-  const ctx: HarnessContext = {
-    registerTool: () => {},
-    registerDisplay: (tab) =>
-      api.session?.controls?.registerControlUiDescriptor({ surface: "tab", id: tab.id, label: tab.label, group: "agent", path: tab.url }),
-  };
-  showAgentApp(ctx, app);
+export default definePluginEntry({
+  id: "a2app",
+  name: "Agent App Framework",
+  description: "Build and operate full Agent Apps over the A2App protocol via the a2app CLI.",
+  register(api) {
+    const DIR = Type.String({ description: "Agent App project directory" });
+    const ENTITY = Type.String({ description: "entity / collection name" });
+
+    // Register one tool: run the CLI and return its output (a guard rejection is
+    // useful data, so a non-zero exit still returns the message to the agent).
+    const tool = (
+      name: string,
+      description: string,
+      schema: unknown,
+      toArgv: (p: Args) => string[],
+    ): void => {
+      api.registerTool(() => ({
+        name,
+        description,
+        parameters: schema,
+        async execute(_toolCallId: string, params: unknown) {
+          const r = await runA2App(CLI, toArgv((params ?? {}) as Args));
+          return r.json != null ? jsonResult(r.json) : textResult(r.stdout || r.stderr || `exit ${r.code}`);
+        },
+      }));
+    };
+
+    tool("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
+      Type.Object({ dir: DIR }),
+      (p) => ["data", s(p.dir), "schema"]);
+
+    tool("agent_app_list", "List records of an entity (optional filter/sort/limit).",
+      Type.Object({ dir: DIR, entity: ENTITY, filter: Type.Optional(Type.String()), sort: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
+      (p) => {
+        const a = ["data", s(p.dir), s(p.entity), "list"];
+        if (p.filter != null) a.push("--filter", s(p.filter));
+        if (p.sort != null) a.push("--sort", s(p.sort));
+        if (p.limit != null) a.push("--limit", s(p.limit));
+        return a;
+      });
+
+    tool("agent_app_get", "Fetch one record by id.",
+      Type.Object({ dir: DIR, entity: ENTITY, id: Type.String() }),
+      (p) => ["data", s(p.dir), s(p.entity), "get", s(p.id)]);
+
+    tool("agent_app_create", "Create a record; the app's guard validates it and rejections are returned verbatim.",
+      Type.Object({ dir: DIR, entity: ENTITY, fields: Type.Record(Type.String(), Type.Unknown()) }),
+      (p) => ["data", s(p.dir), s(p.entity), "create", "--json", JSON.stringify(p.fields ?? {})]);
+
+    tool("agent_app_update", "Update a record by id.",
+      Type.Object({ dir: DIR, entity: ENTITY, id: Type.String(), fields: Type.Record(Type.String(), Type.Unknown()) }),
+      (p) => ["data", s(p.dir), s(p.entity), "update", s(p.id), "--json", JSON.stringify(p.fields ?? {})]);
+
+    tool("agent_app_delete", "Delete a record by id.",
+      Type.Object({ dir: DIR, entity: ENTITY, id: Type.String() }),
+      (p) => ["data", s(p.dir), s(p.entity), "delete", s(p.id)]);
+
+    tool("agent_app_operations", "List the app's declared operations.",
+      Type.Object({ dir: DIR }),
+      (p) => ["ops", s(p.dir)]);
+
+    tool("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
+      Type.Object({ dir: DIR, operation: Type.String(), fields: Type.Optional(Type.Record(Type.String(), Type.Unknown())), approve: Type.Optional(Type.String()) }),
+      (p) => {
+        const a = ["run", s(p.dir), s(p.operation)];
+        for (const [k, v] of Object.entries((p.fields as Args) ?? {})) a.push(`--${k}`, s(v));
+        if (p.approve != null) a.push("--approve", s(p.approve));
+        return a;
+      });
+
+    tool("agent_app_poll_tasks", "Poll the app→agent task queue (default status: submitted).",
+      Type.Object({ dir: DIR, status: Type.Optional(Type.String()) }),
+      (p) => (p.status != null ? ["tasks", s(p.dir), "--status", s(p.status)] : ["tasks", s(p.dir)]));
+
+    tool("agent_app_build", "Scaffold a new Agent App from a blueprint.",
+      Type.Object({ dir: DIR, blueprint: Type.Optional(Type.String()), name: Type.Optional(Type.String()) }),
+      (p) => {
+        const a = ["create", s(p.dir)];
+        if (p.blueprint != null) a.push("--blueprint", s(p.blueprint));
+        if (p.name != null) a.push("--name", s(p.name));
+        return a;
+      });
+
+    tool("agent_app_validate", "Run the validation + security gate.",
+      Type.Object({ dir: DIR, noBuild: Type.Optional(Type.Boolean()) }),
+      (p) => (p.noBuild ? ["validate", s(p.dir), "--no-build"] : ["validate", s(p.dir)]));
+
+    // A CLI passthrough: `openclaw agent-app <args...>`.
+    api.registerCli((program: { command: (name: string) => { description: (d: string) => { action: (fn: (argv: string[]) => Promise<void>) => unknown } } }) => {
+      program
+        .command("agent-app")
+        .description("Run the a2app CLI (build/evolve/operate an Agent App)")
+        .action(async (argv: string[]) => {
+          const r = await runA2App(CLI, argv);
+          process.stdout.write(r.stdout);
+          if (r.stderr) process.stderr.write(r.stderr);
+        });
+    });
+  },
+});
+
+/**
+ * Contribute a Control UI tab for a launched app. Call once the app is healthy.
+ * OpenClaw renders the tab in a sandboxed frame; `path` is the app's own URL.
+ */
+export function showAgentApp(
+  api: { session: { controls: { registerControlUiDescriptor: (d: Record<string, unknown>) => void } } },
+  app: { id: string; name: string; url: string },
+): void {
+  api.session.controls.registerControlUiDescriptor({
+    surface: "tab",
+    id: `agent-app-${app.id}`,
+    label: app.name,
+    icon: "layout",
+    path: app.url,
+  });
 }

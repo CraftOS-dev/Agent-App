@@ -1,13 +1,17 @@
-name: agent-app
+name: agent_app
 version: 0.1.0
-description: Agent App Framework for Hermes — build/evolve/operate Agent Apps, with the app shown in a dashboard tab or the desktop preview pane.
-entry: dist/index.js
-capabilities:
-  - tools.register
-skills:
-  dir: ./skills
-dashboard:
-  plugins:
-    - id: agent-app
-      label: Agent App
-      manifest: ./dashboard/manifest.json
+description: "Build and operate Agent Apps over the A2App protocol via the a2app CLI. Registers tools that wrap the framework CLI: describe, records CRUD, declared operations, task polling, scaffold, and the validation gate."
+author: Agent App Framework
+kind: backend
+provides_tools:
+  - agent_app_describe
+  - agent_app_list
+  - agent_app_get
+  - agent_app_create
+  - agent_app_update
+  - agent_app_delete
+  - agent_app_operations
+  - agent_app_run_operation
+  - agent_app_poll_tasks
+  - agent_app_build
+  - agent_app_validate

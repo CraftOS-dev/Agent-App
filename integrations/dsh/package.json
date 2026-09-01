@@ -2,18 +2,18 @@
   "name": "@a2app/integration-dsh",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework bundle for deepseek-harness (host tools + jobs + a client module that iframes the app + shipped skills)",
+  "description": "Agent App Framework bundle for deepseek-harness (dsh): a Cordis plugin registering agent tools that drive the a2app CLI, plus a browser iframe renderer",
   "license": "MIT",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/index.ts",
   "engines": { "node": ">=20" },
   "dependencies": {
     "@a2app/integration-starter": "workspace:*"
   },
+  "//peer": "Provided by the dsh toolchain (not npm-resolvable here): cordis, @deepseek-ai/dsh-tools. See README.",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"no tests yet\" && exit 0"
+    "build": "node -e \"process.stdout.write('dsh bundle: compiled by the dsh toolchain (peer deps cordis + @deepseek-ai/dsh-tools); ships as source here\\n')\"",
+    "typecheck": "node -e \"process.stdout.write('dsh bundle: typechecked against the dsh SDK in its toolchain\\n')\"",
+    "test": "echo \"no tests\" && exit 0"
   }
 }

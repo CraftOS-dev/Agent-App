@@ -9,19 +9,25 @@
  * derived from the live schema, an agent always sees the true model.
  */
 import { createA2App, createA2AppServer } from "@a2app/adapter-core";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize } from "node:path";
 import { schema } from "./a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DATA_FILE = join(HERE, "a2app.data.json");
+// Records live inside the toolkit's declared `lifecycle.dataDir` ("data"), so
+// `a2app backup` / `restore` / `promote` capture the live database, and the
+// template .gitignore keeps it out of the repo.
+const DATA_DIR = join(HERE, "data");
+const DATA_FILE = join(DATA_DIR, "db.json");
 const TOKEN_FILE = join(HERE, ".agent-token");
 const PUBLIC_DIR = join(HERE, "public");
 
 const manifest = JSON.parse(readFileSync(join(HERE, "manifest.json"), "utf8"));
-const PORT = Number(process.env.PORT ?? 8091);
+// The CLI reaches a running app at manifest.port; bind the same port so the two
+// always agree. PORT env overrides (a host may assign one), then manifest.port.
+const PORT = Number(process.env.PORT ?? manifest.port ?? 8091);
 
 /* ----------------------------------------------------------- persistence */
 
@@ -66,6 +72,7 @@ const db = existsSync(DATA_FILE) ? JSON.parse(readFileSync(DATA_FILE, "utf8")) :
 /** Persist the whole store atomically (temp file + rename). Operation runners
  *  call this synchronously, so it must complete before they return. */
 function persist() {
+  mkdirSync(DATA_DIR, { recursive: true });
   const tmp = DATA_FILE + ".tmp";
   writeFileSync(tmp, JSON.stringify(db, null, 2) + "\n");
   renameSync(tmp, DATA_FILE);
@@ -79,6 +86,23 @@ function cmp(a, b) {
   if (a === undefined || a === null) return -1;
   if (b === undefined || b === null) return 1;
   return String(a) < String(b) ? -1 : 1;
+}
+
+/** A minimal single-clause equality filter — `field = "value"`, `field != "value"`,
+ *  or `field ~ "value"` (contains). Enough for label→id resolution; a richer
+ *  backend exposes its own query language. */
+function matchFilter(expr) {
+  const m = /^\s*([A-Za-z_][\w]*)\s*(=|!=|~)\s*(.*?)\s*$/.exec(expr);
+  if (!m) return () => true;
+  const [, field, op, raw] = m;
+  const val = raw.replace(/^["']|["']$/g, "").replace(/\\"/g, '"');
+  return (r) => {
+    const cur = r[field];
+    const s = cur === undefined || cur === null ? "" : String(cur);
+    if (op === "=") return s === val;
+    if (op === "!=") return s !== val;
+    return s.includes(val);
+  };
 }
 
 /** The back face: maps the JSON store onto protocol types. The served surface
@@ -97,6 +121,7 @@ const binding = {
 
   listRecords(entity, query) {
     let items = Object.values(db[entity] ?? {});
+    if (query.filter) items = items.filter(matchFilter(query.filter));
     if (query.sort) {
       const desc = query.sort.startsWith("-");
       const key = desc ? query.sort.slice(1) : query.sort;

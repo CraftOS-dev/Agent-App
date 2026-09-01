@@ -23,11 +23,11 @@ Run the conformance suite alone: `pnpm --filter @a2app/conformance test`.
 # scaffold and gate an app from a blueprint:
 node framework/cli/dist/cli.js create ./my-app --blueprint blueprint-react-node
 node framework/cli/dist/cli.js validate ./my-app --no-build
-# a live example app + boot test:
-pnpm --filter @a2app/playground test
+# launch it and operate it over A2App:
+node framework/cli/dist/cli.js serve ./my-app
+node framework/cli/dist/cli.js data ./my-app schema
+node framework/cli/dist/cli.js stop ./my-app
 ```
-See [docs/getting-started.md](docs/getting-started.md) and
-[docs/architecture.md](docs/architecture.md).
 
 ## Ground rules
 - **Spec + schema move together.** The JSON Schemas in `spec/v0_1/schema/` are the

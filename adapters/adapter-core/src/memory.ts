@@ -96,6 +96,7 @@ export class MemoryBinding implements Binding {
     const map = this.rows[entity];
     if (!map) return { items: [] };
     let items = [...map.values()];
+    if (query.filter) items = items.filter(matchFilter(query.filter));
     if (query.sort) {
       const desc = query.sort.startsWith("-");
       const key = desc ? query.sort.slice(1) : query.sort;
@@ -169,4 +170,25 @@ function cmp(a: unknown, b: unknown): number {
   if (a === undefined || a === null) return -1;
   if (b === undefined || b === null) return 1;
   return String(a) < String(b) ? -1 : 1;
+}
+
+/**
+ * A minimal single-clause equality filter — `field = "value"`, `field != "value"`,
+ * or `field ~ "value"` (contains). The A2App filter grammar is the backend's own;
+ * this is the simple in-memory grammar, enough for label→id resolution. A backend
+ * with a richer query language exposes it instead.
+ */
+function matchFilter(expr: string): (r: StoredRecord) => boolean {
+  const m = /^\s*([A-Za-z_][\w]*)\s*(=|!=|~)\s*(.*?)\s*$/.exec(expr);
+  if (!m) return () => true;
+  const field = m[1]!;
+  const op = m[2]!;
+  const val = m[3]!.replace(/^["']|["']$/g, "").replace(/\\"/g, '"');
+  return (r) => {
+    const cur = r[field];
+    const s = cur === undefined || cur === null ? "" : String(cur);
+    if (op === "=") return s === val;
+    if (op === "!=") return s !== val;
+    return s.includes(val);
+  };
 }

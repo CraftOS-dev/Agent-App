@@ -25,6 +25,16 @@
         "start": { "type": "string" },
         "health": { "type": "string", "description": "URL path polled for readiness" }
       }
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "the app's launch port: the app binds it (an env override such as PORT may take precedence) and every operate command reaches the app there (framework section 5.5)"
+    },
+    "env": {
+      "enum": ["dev", "live"],
+      "description": "non-normative safe-evolve marker stamped by `a2app dev` (framework section 7.2)"
     }
   }
 }

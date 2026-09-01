@@ -105,19 +105,7 @@ importers:
         specifier: ^20.19.0
         version: 20.19.43
 
-  integrations/craftbot:
-    dependencies:
-      '@a2app/integration-starter':
-        specifier: workspace:*
-        version: link:../integration-starter
-
-  integrations/dsh:
-    dependencies:
-      '@a2app/integration-starter':
-        specifier: workspace:*
-        version: link:../integration-starter
-
-  integrations/hermes:
+  integrations/claude-code:
     dependencies:
       '@a2app/integration-starter':
         specifier: workspace:*
@@ -126,6 +114,12 @@ importers:
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43
+
+  integrations/dsh:
+    dependencies:
+      '@a2app/integration-starter':
+        specifier: workspace:*
+        version: link:../integration-starter
 
   integrations/integration-starter:
     devDependencies:
@@ -138,10 +132,6 @@ importers:
       '@a2app/integration-starter':
         specifier: workspace:*
         version: link:../integration-starter
-    devDependencies:
-      '@types/node':
-        specifier: ^20.19.0
-        version: 20.19.43
 
   sdks/typescript:
     dependencies:

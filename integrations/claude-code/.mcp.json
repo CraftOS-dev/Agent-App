@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "a2app": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "env": {
+        "A2APP_CLI": "a2app"
+      }
+    }
+  }
+}

@@ -1,0 +1,64 @@
+# deps & builds
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+*.tgz
+.turbo/
+
+# generated: blueprints bundled into the CLI package at pack time
+framework/cli/toolkits/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# python (sdks/python, conformance harnesses)
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# env & secrets — never commit credentials (runtime artifacts, spec §4.1 / §9)
+.env
+.env.*
+!.env.example
+.agent-token
+*.agent-token
+.principal
+.superuser
+
+# Agent App runtime artifacts (dev instances, backups, local DBs, adapter state)
+# NOTE: .a2app/system-hashes.json (the ownership canon) IS committed, never ignored
+*.db
+*.sqlite
+backups/
+.a2app/backups/
+.a2app/dev/
+**/data/db.json
+**/data/a2app-state.json
+a2app-state.json
+
+# editors & OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# reference repos & research are working material, not part of this distribution
+ref/
+research/
+
+# authored specs and agent-guidance files — kept out of the tracked tree per
+# project preference (they remain on disk as the authoritative working docs)
+requirement.md
+requirement_A2App.md
+AGENTS.md
+CLAUDE.md
+
+# standalone documentation — kept on disk, not part of the distribution
+docs/

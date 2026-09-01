@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/describe.json",
+  "type": "object",
+  "required": ["entities", "operations", "conventions"],
+  "properties": {
+    "entities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["label", "records", "fields"],
+        "properties": {
+          "label": { "type": ["string", "null"] },
+          "records": { "type": "string" },
+          "auth": { "type": "boolean" },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "enum": ["string", "number", "boolean", "datetime", "enum", "ref", "list<enum>", "list<ref>", "json", "binary"] },
+                "required": { "type": "boolean" },
+                "readOnly": { "type": "boolean" },
+                "max": { "type": "number" },
+                "values": { "type": "array", "items": { "type": "string" } },
+                "entity": { "type": "string" },
+                "format": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "destructive"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "destructive": { "type": "boolean" },
+          "readOnly": { "type": "boolean", "description": "the operation has no side effects; safe to call freely, result cacheable. Absent = not asserted" },
+          "idempotent": { "type": "boolean", "description": "repeating the operation is safe; may be retried without an Idempotency-Key. Absent = not asserted" },
+          "params": { "type": "object" }
+        }
+      }
+    },
+    "conventions": { "type": "object" }
+  }
+}

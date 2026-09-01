@@ -1,0 +1,43 @@
+{
+  "$schema": "https://agentapp.dev/schema/skills-index.json",
+  "version": "0.1",
+  "description": "Framework skills. An agent reads this index, picks the skill whose `activity` matches the task (and whose tags match the app's stack), and loads that SKILL.md. Plain self-contained markdown — no host, no injection required.",
+  "skills": [
+    {
+      "name": "creator",
+      "activity": "creator",
+      "description": "Build a new Agent App from a requirements spec: scaffold, build feature by feature under the ownership boundary, gate, launch, walk-verify.",
+      "path": "creator/SKILL.md"
+    },
+    {
+      "name": "modify",
+      "activity": "modify",
+      "description": "Evolve an existing Agent App because requirements changed, safely: decide data-vs-code, edit under the ownership boundary, dev → gate → walk-verify → promote with a pre-promote backup.",
+      "path": "modify/SKILL.md"
+    },
+    {
+      "name": "importer",
+      "activity": "importer",
+      "description": "Bring an existing app into the framework: an Agent App zip, a marketplace app, or a foreign codebase that needs an adapter written from observed behavior.",
+      "path": "importer/SKILL.md"
+    },
+    {
+      "name": "operator",
+      "activity": "operator",
+      "description": "Operate and diagnose a running Agent App on the user's behalf via A2App — read state, write through the guard, invoke declared operations. No code changes.",
+      "path": "operator/SKILL.md"
+    },
+    {
+      "name": "walk-verify",
+      "activity": "walk-verify",
+      "description": "Independently verify a running Agent App against reference/requirements.md by driving the real UI, feature by feature. Run by an agent that is NOT the builder. Verdicts: pass | defects | incomplete | blocked.",
+      "path": "walk-verify/SKILL.md"
+    },
+    {
+      "name": "connect",
+      "activity": "connect",
+      "description": "Connect to a published Agent App you do not own: discover its identity, acquire an owner-issued scoped credential, then operate it exactly as any local app (reserved until deployed mode ships).",
+      "path": "connect/SKILL.md"
+    }
+  ]
+}

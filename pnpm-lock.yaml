@@ -1,0 +1,190 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
+
+  adapters/adapter-core:
+    dependencies:
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../rules
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  adapters/adapter-starter:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../adapter-core
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../rules
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  adapters/reverse-proxy:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../adapter-core
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  adapters/rules: {}
+
+  apps/playground:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../../adapters/rules
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  conformance/harness:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../../adapters/rules
+      '@a2app/sdk':
+        specifier: workspace:*
+        version: link:../../sdks/typescript
+      yaml:
+        specifier: ^2.5.0
+        version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+      a2app:
+        specifier: workspace:*
+        version: link:../../framework/cli
+
+  framework/cli:
+    dependencies:
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../../adapters/rules
+      '@a2app/sdk':
+        specifier: workspace:*
+        version: link:../../sdks/typescript
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  framework/host:
+    dependencies:
+      '@a2app/sdk':
+        specifier: workspace:*
+        version: link:../../sdks/typescript
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  integrations/craftbot:
+    dependencies:
+      '@a2app/integration-starter':
+        specifier: workspace:*
+        version: link:../integration-starter
+
+  integrations/dsh:
+    dependencies:
+      '@a2app/integration-starter':
+        specifier: workspace:*
+        version: link:../integration-starter
+
+  integrations/hermes:
+    dependencies:
+      '@a2app/integration-starter':
+        specifier: workspace:*
+        version: link:../integration-starter
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  integrations/integration-starter:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  integrations/openclaw:
+    dependencies:
+      '@a2app/integration-starter':
+        specifier: workspace:*
+        version: link:../integration-starter
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+  sdks/typescript:
+    dependencies:
+      '@a2app/rules':
+        specifier: workspace:*
+        version: link:../../adapters/rules
+
+  toolkits/blueprint-pocketbase-react: {}
+
+  toolkits/blueprint-react-node: {}
+
+  toolkits/kit:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
+
+packages:
+
+  '@types/node@20.19.43':
+    resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
+
+  typescript@5.7.2:
+    resolution: {integrity: sha512-i5t66RHxDvVN40HfDd1PsEThGNnlMCMT3jMUuoh9/0TaqWevNontacunWyN02LA9/fIbEWlcHZcgTKb9QoaLfg==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  yaml@2.9.0:
+    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
+snapshots:
+
+  '@types/node@20.19.43':
+    dependencies:
+      undici-types: 6.21.0
+
+  typescript@5.7.2: {}
+
+  undici-types@6.21.0: {}
+
+  yaml@2.9.0: {}

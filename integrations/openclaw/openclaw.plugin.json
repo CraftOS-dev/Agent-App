@@ -1,0 +1,11 @@
+{
+  "name": "agent-app",
+  "version": "0.1.0",
+  "description": "Agent App Framework for OpenClaw — build/evolve/operate Agent Apps, with the app rendered in a Control-UI tab.",
+  "skills": ["./skills"],
+  "tools": ["agent_app"],
+  "controlUiTabs": [
+    { "id": "agent-app", "label": "Agent App", "group": "agent", "path": "/__agent-app__/" }
+  ],
+  "cli": ["agent-app"]
+}

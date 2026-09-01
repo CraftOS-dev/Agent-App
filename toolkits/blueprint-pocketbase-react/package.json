@@ -1,0 +1,14 @@
+{
+  "name": "@a2app/blueprint-pocketbase-react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent App blueprint: PocketBase backend + React frontend, with an in-process A2App adapter as PocketBase JS hooks",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "echo \"blueprint — nothing to build yet\" && exit 0",
+    "typecheck": "echo \"blueprint — nothing to typecheck yet\" && exit 0",
+    "test": "echo \"no tests yet\" && exit 0"
+  }
+}

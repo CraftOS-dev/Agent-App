@@ -1,0 +1,16 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "FastAPI Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modificationLock": false,
+  "capabilities": { "integrations": [] },
+  "pipeline": {
+    "install": "pip install -r requirements.txt",
+    "build": "python -m py_compile main.py a2app_adapter.py schema.py",
+    "start": "uvicorn main:app --host 127.0.0.1 --port ${PORT}",
+    "health": "/api/_a2app"
+  }
+}

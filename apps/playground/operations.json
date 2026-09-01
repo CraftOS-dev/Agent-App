@@ -1,0 +1,5 @@
+{
+  "operations": [
+    { "name": "count-by-tier", "description": "Count contacts in a tier.", "destructive": false, "readOnly": true, "idempotent": true }
+  ]
+}

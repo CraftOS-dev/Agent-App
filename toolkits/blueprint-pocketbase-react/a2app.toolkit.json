@@ -1,0 +1,17 @@
+{
+ "id": "blueprint-pocketbase-react",
+ "description": "Agent App blueprint: PocketBase backend + React frontend, with an in-process A2App adapter as PocketBase JS hooks. NOT part of the framework.",
+ "template": "template",
+ "adapterVersionFrom": "pb/pb_hooks/_a2app.pb.js",
+ "systemPaths": ["manifest.json", "pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_rules.js"],
+ "adapterPaths": ["pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_rules.js"],
+ "gate": [
+ {
+ "name": "hooks syntax + rules self-test",
+ "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest"
+ }
+ ],
+ "lifecycle": {
+ "dataDir": "pb/pb_data"
+ }
+}

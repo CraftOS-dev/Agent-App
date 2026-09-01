@@ -1,0 +1,23 @@
+{
+  "name": "@a2app/adapter-starter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Copy-to-create worked example for building a new A2App adapter: implement one Binding, reuse the served surface and rules",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/adapter-core": "workspace:*",
+    "@a2app/rules": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no tests yet\" && exit 0"
+  }
+}

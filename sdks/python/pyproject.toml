@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2app"
+version = "0.1.0"
+description = "Python client SDK for the A2App protocol — identity, describe, guarded writes, operations, tasks/events, whoami/context"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/CraftOS-dev/Agent-App"
+
+[tool.setuptools]
+packages = ["a2app"]

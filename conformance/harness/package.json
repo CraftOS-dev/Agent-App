@@ -1,0 +1,28 @@
+{
+  "name": "@a2app/conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A2App + Agent App conformance harness: runs the language-neutral YAML suites (classes A/B/C, artifact classes) against a live app",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "a2app-conformance": "./dist/run.js"
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/adapter-core": "workspace:*",
+    "@a2app/rules": "workspace:*",
+    "@a2app/sdk": "workspace:*",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "a2app": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node dist/run.js"
+  }
+}

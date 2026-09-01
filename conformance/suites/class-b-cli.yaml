@@ -1,0 +1,36 @@
+class: B
+name: CLI binding
+description: >
+  Class A plus the CLI binding: the same operations any agent performs, driven
+  through the `a2app` CLI, with the pinned exit-code contract — 0 success,
+  1 rejected, 2 usage, 3 unreachable. Skipped automatically if the CLI is not
+  built.
+
+checks:
+  - name: data schema prints the model (exit 0)
+    cli: { args: ["data", "<APPDIR>", "schema"] }
+    expect:
+      exit: 0
+      contains: cards
+
+  - name: data list returns records (exit 0)
+    cli: { args: ["data", "<APPDIR>", "lists", "list"] }
+    expect:
+      exit: 0
+      contains: "To Do"
+
+  - name: data create with a valid field succeeds (exit 0)
+    cli: { args: ["data", "<APPDIR>", "cards", "create", "--title", "From the CLI"] }
+    expect:
+      exit: 0
+      contains: "From the CLI"
+
+  - name: data create with a bad enum is rejected (exit 1)
+    cli: { args: ["data", "<APPDIR>", "cards", "create", "--title", "x", "--priority", "nope"] }
+    expect:
+      exit: 1
+
+  - name: an unknown verb is a usage error (exit 2)
+    cli: { args: ["data", "<APPDIR>", "cards", "frobnicate"] }
+    expect:
+      exit: 2

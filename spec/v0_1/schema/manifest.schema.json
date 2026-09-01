@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentapp/manifest.json",
+  "type": "object",
+  "required": ["id", "name", "agentAppVersion", "adapterVersion", "authMode", "pipeline"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "agentAppVersion": { "type": "string" },
+    "adapterVersion": { "type": "string" },
+    "appVersion": { "type": "string" },
+    "authMode": { "enum": ["none", "multi-user"] },
+    "modificationLock": { "type": "boolean", "default": false },
+    "capabilities": {
+      "type": "object",
+      "description": "declared agent capabilities this app may request (framework section 7 / A2APP-SPEC 6.6)",
+      "properties": { "integrations": { "type": "array", "items": { "type": "string" } } }
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["install", "build", "start", "health"],
+      "properties": {
+        "install": { "type": "string" },
+        "build": { "type": "string" },
+        "start": { "type": "string" },
+        "health": { "type": "string", "description": "URL path polled for readiness" }
+      }
+    }
+  }
+}

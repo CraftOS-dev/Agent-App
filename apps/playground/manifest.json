@@ -1,0 +1,17 @@
+{
+  "id": "playground_contacts",
+  "name": "Playground Contacts",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modificationLock": false,
+  "capabilities": { "integrations": [] },
+  "pipeline": {
+    "install": "pnpm install",
+    "build": "pnpm build",
+    "start": "node dist/server.js",
+    "health": "/api/_a2app"
+  },
+  "port": 8092
+}

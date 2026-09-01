@@ -1,0 +1,19 @@
+{
+  "name": "@a2app/integration-craftbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent App Framework integration for the CraftBot harness: agent tools wrapping the a2app CLI, skills, and embedded app display",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/integration-starter": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no tests yet\" && exit 0"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "a2app",
+  "version": "0.1.0",
+  "description": "A2App CLI — the canonical agent surface for building, evolving, and operating Agent Apps",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "framework/cli" },
+  "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
+  "bugs": "https://github.com/CraftOS-dev/Agent-App/issues",
+  "type": "module",
+  "bin": {
+    "a2app": "./bin/a2app.js"
+  },
+  "main": "./dist/cli.js",
+  "files": ["dist", "bin", "toolkits"],
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/rules": "workspace:*",
+    "@a2app/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no tests\" && exit 0",
+    "bundle-blueprints": "node scripts/bundle-blueprints.mjs",
+    "prepack": "node scripts/bundle-blueprints.mjs"
+  }
+}

@@ -1,0 +1,10 @@
+packages:
+  - framework/*
+  - adapters/*
+  - integrations/*
+  - sdks/typescript
+  - apps/*
+  - conformance/harness
+  - toolkits/kit
+  - toolkits/blueprint-pocketbase-react
+  - toolkits/blueprint-react-node

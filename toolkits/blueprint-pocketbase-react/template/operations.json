@@ -1,0 +1,5 @@
+{
+  "operations": [
+    { "name": "archive-done", "description": "Archive every completed task.", "destructive": true }
+  ]
+}

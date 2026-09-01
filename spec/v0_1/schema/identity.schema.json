@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/identity.json",
+  "type": "object",
+  "required": ["a2app", "protocol", "adapterVersion", "app", "schemaVersion", "serverNow", "serverTzOffsetMinutes"],
+  "properties": {
+    "a2app": { "const": true },
+    "protocol": { "type": "string" },
+    "adapterVersion": { "type": "string" },
+    "app": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string" }, "name": { "type": ["string", "null"] } }
+    },
+    "schemaVersion": { "type": "string" },
+    "serverNow": { "type": "string" },
+    "serverTzOffsetMinutes": { "type": "integer" }
+  }
+}

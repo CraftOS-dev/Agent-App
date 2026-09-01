@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentapp/operations.json",
+  "type": "object",
+  "required": ["operations"],
+  "properties": {
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "destructive"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "destructive": { "type": "boolean" },
+          "readOnly": { "type": "boolean", "description": "the operation has no side effects; safe to call freely, result cacheable. Absent = not asserted" },
+          "idempotent": { "type": "boolean", "description": "repeating the operation is safe; may be retried without an Idempotency-Key. Absent = not asserted" },
+          "params": { "type": "object" },
+          "system": { "type": "boolean", "description": "true for framework-provided ops" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/task.json",
+  "type": "object",
+  "required": ["id", "app", "status", "request", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "type": "string" },
+    "app": { "type": "string" },
+    "event": { "type": ["string", "null"] },
+    "status": { "enum": ["submitted", "working", "input-required", "completed", "failed", "canceled"] },
+    "request": {
+      "type": "object",
+      "required": ["capability"],
+      "properties": { "capability": { "type": "string" }, "payload": { "type": "object" } }
+    },
+    "claim": {
+      "type": ["object", "null"],
+      "properties": {
+        "credentialId": { "type": "string" },
+        "principal": { "type": "string" },
+        "claimedAt": { "type": "string" }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "properties": {
+        "step": { "type": ["string", "null"] },
+        "percent": { "type": ["number", "null"] }
+      }
+    },
+    "result": { "type": ["object", "null"] },
+    "reason": { "type": ["string", "null"] },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "pollAfterMs": { "type": "integer" }
+  }
+}

@@ -1,0 +1,17 @@
+{
+ "id": "blueprint-react-node",
+ "description": "Runnable Agent App blueprint: Node (built-in http) backend + a vanilla SPA View + a JSON-file store, with the A2App adapter mounted as embedded middleware (@a2app/adapter-core). NOT part of the framework.",
+ "template": "template",
+ "adapterVersionFrom": "server.mjs",
+ "systemPaths": ["manifest.json", "server.mjs"],
+ "adapterPaths": ["server.mjs"],
+ "gate": [
+ {
+ "name": "schema loads (fresh, additive)",
+ "run": "node --check server.mjs && node --input-type=module -e \"import('./a2app.schema.mjs').then(m=>{if(!m.schema||!m.schema.entities)throw new Error('a2app.schema.mjs must export { schema: { entities, operations } }');process.stdout.write('schema ok\\n')})\""
+ }
+ ],
+ "lifecycle": {
+ "dataDir": "data"
+ }
+}

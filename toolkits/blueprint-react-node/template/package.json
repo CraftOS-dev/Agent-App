@@ -1,0 +1,14 @@
+{
+  "name": "react-node-agent-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An Agent App scaffolded from blueprint-react-node.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/adapter-core": "^0.1.0"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

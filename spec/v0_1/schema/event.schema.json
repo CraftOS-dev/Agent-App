@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/event.json",
+  "type": "object",
+  "required": ["id", "app", "type", "payload", "createdAt"],
+  "properties": {
+    "id": { "type": "string" },
+    "app": { "type": "string" },
+    "type": { "type": "string" },
+    "payload": { "type": "object" },
+    "createdAt": { "type": "string" }
+  }
+}

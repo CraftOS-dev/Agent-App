@@ -1,0 +1,185 @@
+class: A
+name: Core protocol
+description: >
+  Discovery, describe, HTTP binding, guard, idempotency, read-back, security,
+  IAM, operations, and errors. Class A is required for a stable release: every
+  check here has at least one assertion branching on structure, never on prose.
+
+checks:
+  # --- Discovery and identity ------------------------------------------------
+  - name: identity carries the a2app marker and protocol
+    request: { method: GET, path: /api/_a2app }
+    expect:
+      status: 200
+      match:
+        a2app: true
+        protocol: "0.1"
+      has: [app.id, schemaVersion, serverNow, serverTzOffsetMinutes]
+
+  - name: well-known identity is the same document
+    request: { method: GET, path: /.well-known/a2app.json }
+    expect:
+      status: 200
+      match: { a2app: true, app.id: conformance_kanban }
+
+  # --- Describe --------------------------------------------------------------
+  - name: describe reports entities, label, and the records URL
+    request: { method: GET, path: /api/_a2app/describe }
+    expect:
+      status: 200
+      match:
+        entities.cards.label: title
+        entities.cards.records: /api/collections/cards/records
+        entities.cards.fields.created.readOnly: true
+        entities.cards.fields.due.format: YYYY-MM-DD
+
+  - name: describe carries the optional operation flags (readOnly / idempotent)
+    request: { method: GET, path: /api/_a2app/describe }
+    expect:
+      status: 200
+      match:
+        operations.1.name: count-cards
+        operations.1.readOnly: true
+        operations.1.idempotent: true
+
+  # --- Read ------------------------------------------------------------------
+  - name: a credentialled read returns records
+    request: { method: GET, path: /api/collections/lists/records, token: full }
+    expect:
+      status: 200
+      len: { items: 2 }
+
+  # --- Guard: rejects all violations in one response -------------------------
+  - name: guard rejects unknown field, bad enum, and relative date together
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      body: { title: "x", due: "tomorrow", priority: "nope", bogus: 1 }
+    expect:
+      status: 400
+      match: { a2app: true, ok: false }
+      len: { violations: 3 }
+
+  - name: guard writes to a read-only field are refused
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      body: { title: "ok", created: "2020-01-01" }
+    expect:
+      status: 400
+      match: { violations.0.code: read_only_field, violations.0.field: created }
+
+  # --- A correct write lands (read-back passes) ------------------------------
+  - name: a valid create stores and returns the record
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      body: { title: "Buy milk", priority: "high" }
+    expect:
+      status: 200
+      match: { title: "Buy milk", priority: "high" }
+      has: [id]
+      save: { newCardId: id }
+
+  # --- Idempotency -----------------------------------------------------------
+  - name: first keyed write succeeds
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      headers: { idempotency-key: idem-1 }
+      body: { title: "Once only" }
+    expect:
+      status: 200
+      save: { idemId: id }
+
+  - name: replaying the idempotency key returns 409 naming the record
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      headers: { idempotency-key: idem-1 }
+      body: { title: "Once only" }
+    expect:
+      status: 409
+      match: { code: duplicate_request, id: "${idemId}" }
+
+  # --- Security: origin + credential -----------------------------------------
+  - name: a foreign browser origin is refused 403 (before the guard)
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      origin: https://evil.example
+      body: { bogus: 1 }
+    expect:
+      status: 403
+      match: { code: forbidden_origin }
+
+  - name: an uncredentialled program write gets the 401 challenge
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      body: { title: "x" }
+    expect:
+      status: 401
+      match: { code: agent_token_required }
+      has: [how]
+
+  # --- IAM: scopes + whoami --------------------------------------------------
+  - name: a read-only grant may read
+    request: { method: GET, path: /api/collections/cards/records, token: readonly }
+    expect: { status: 200 }
+
+  - name: a read-only grant may not write (insufficient_scope)
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: readonly
+      body: { title: "nope" }
+    expect:
+      status: 403
+      match: { code: insufficient_scope, required: "data:cards:write" }
+
+  - name: whoami returns the calling credential's grant
+    request: { method: GET, path: /api/_a2app/whoami, token: readonly }
+    expect:
+      status: 200
+      match: { credentialId: cred_ro, principal: owner }
+      has: [scopes]
+
+  # --- Approval --------------------------------------------------------------
+  - name: a destructive op without approval returns the content-addressed key
+    request: { method: POST, path: /api/ops/archive-board, token: full, body: {} }
+    expect:
+      status: 428
+      match: { code: approval_required }
+      has: [approvalKey]
+      save: { approval: approvalKey }
+
+  - name: re-invoking with the key executes the operation
+    request:
+      method: POST
+      path: /api/ops/archive-board
+      token: full
+      headers: { x-a2app-approval: "${approval}" }
+      body: {}
+    expect:
+      status: 200
+      match: { ok: true, operation: archive-board }
+
+  - name: a non-destructive op runs without approval
+    request: { method: POST, path: /api/ops/count-cards, token: full, body: {} }
+    expect:
+      status: 200
+      match: { ok: true, result.count: 1 }
+
+  # --- Errors ----------------------------------------------------------------
+  - name: an unknown operation is a rejection, never a success
+    request: { method: POST, path: /api/ops/does-not-exist, token: full, body: {} }
+    expect:
+      status: 404
+      match: { a2app: true, ok: false, code: unknown_operation }

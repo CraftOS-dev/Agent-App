@@ -1,0 +1,79 @@
+class: C
+name: Bidirectional
+description: >
+  Class B (or A) plus the app->agent plane: events, tasks, the task lifecycle
+  including claim contention, progress, completion, and the context surface. The
+  harness seeds one task (capability "summarize") before the suite runs.
+
+checks:
+  - name: events poll returns the emitted event and a cursor
+    request: { method: GET, path: /api/_a2app/events, token: full }
+    expect:
+      status: 200
+      match: { events.0.type: card.due_soon }
+      has: [nextCursor]
+
+  - name: context returns ids only, never record data
+    request: { method: GET, path: /api/_a2app/context, token: full }
+    expect:
+      status: 200
+      match: { a2app: true, view: null }
+      has: [selected]
+
+  - name: tasks poll returns the seeded claimable task
+    request: { method: GET, path: /api/_a2app/tasks, token: full, query: { status: submitted } }
+    expect:
+      status: 200
+      match: { tasks.0.request.capability: summarize }
+      has: [tasks.0.id]
+      save: { taskId: tasks.0.id }
+
+  - name: claiming the task moves it to working
+    request:
+      method: POST
+      path: "/api/_a2app/tasks/${taskId}/claim"
+      token: full
+      body: { agent: cred_full }
+    expect:
+      status: 200
+      match: { status: working }
+
+  - name: a second claim on the same task is refused 409
+    request:
+      method: POST
+      path: "/api/_a2app/tasks/${taskId}/claim"
+      token: full
+      body: { agent: cred_full }
+    expect:
+      status: 409
+      match: { code: task_not_claimable }
+
+  - name: progress is accepted on a working task
+    request:
+      method: POST
+      path: "/api/_a2app/tasks/${taskId}/progress"
+      token: full
+      body: { step: "reading board", percent: 40 }
+    expect:
+      status: 200
+      match: { status: working, progress.percent: 40 }
+
+  - name: completing the task reaches a terminal state
+    request:
+      method: POST
+      path: "/api/_a2app/tasks/${taskId}/complete"
+      token: full
+      body: { status: completed, result: { summary: "1 card" } }
+    expect:
+      status: 200
+      match: { status: completed, result.summary: "1 card" }
+
+  - name: claiming an unknown task is 404 task_not_found
+    request:
+      method: POST
+      path: /api/_a2app/tasks/tsk_nope/claim
+      token: full
+      body: { agent: cred_full }
+    expect:
+      status: 404
+      match: { code: task_not_found }

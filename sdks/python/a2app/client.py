@@ -1,0 +1,189 @@
+"""A2AppClient — a dependency-free HTTP client for the A2App protocol.
+
+Every method returns the app's response verbatim (status + parsed JSON) so the
+caller branches on the machine ``code``, never on prose.
+"""
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+PROTOCOL_VERSION = "0.1"
+# Some adapters still report "1.0"; it is an alias of "0.1" during the
+# transition window.
+ACCEPTED_PROTOCOLS = ("0.1", "1.0")
+
+
+class A2AppUnreachableError(Exception):
+    """The app is unreachable (spec: CLI exit 3). Network failure, not a
+    protocol rejection."""
+
+
+@dataclass
+class A2AppResponse:
+    status: int
+    body: str
+    json: Any
+    ok: bool
+
+
+class A2AppClient:
+    def __init__(
+        self,
+        base_url: str,
+        token: Optional[str] = None,
+        agent_name: str = "a2app-python",
+        auth_token: Optional[str] = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._token = token
+        self._agent_name = agent_name
+        self._auth_token = auth_token
+
+    # ----------------------------------------------------------- low level
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> A2AppResponse:
+        headers: Dict[str, str] = {
+            "Content-Type": "application/json",
+            "X-A2App-Agent": self._agent_name,
+        }
+        if self._token is not None:
+            headers["X-A2App-Token"] = self._token
+        if self._auth_token is not None:
+            headers["Authorization"] = self._auth_token
+        if extra_headers:
+            headers.update(extra_headers)
+
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 (loopback by design)
+                text = resp.read().decode("utf-8")
+                status = resp.status
+        except urllib.error.HTTPError as e:  # a rejection is a normal outcome
+            text = e.read().decode("utf-8")
+            status = e.code
+        except urllib.error.URLError as e:
+            raise A2AppUnreachableError(
+                f"{e.reason}. The app may not be running (a refused connection is a dead "
+                f"local server, not a network problem). Launch it, then retry."
+            ) from e
+
+        try:
+            parsed = json.loads(text) if text else None
+        except json.JSONDecodeError:
+            parsed = None
+        return A2AppResponse(status=status, body=text, json=parsed, ok=status < 300)
+
+    # ----------------------------------------------------------- discovery
+
+    def identity(self) -> Optional[Dict[str, Any]]:
+        for path in ("/.well-known/a2app.json", "/api/_a2app"):
+            res = self.request("GET", path)
+            if isinstance(res.json, dict) and res.json.get("a2app") is True:
+                return res.json
+        return None
+
+    @staticmethod
+    def protocol_supported(protocol: str) -> bool:
+        return protocol in ACCEPTED_PROTOCOLS
+
+    def describe(self) -> Optional[Dict[str, Any]]:
+        res = self.request("GET", "/api/_a2app/describe")
+        return res.json if res.ok else None
+
+    def whoami(self) -> Optional[Dict[str, Any]]:
+        res = self.request("GET", "/api/_a2app/whoami")
+        return res.json if res.ok else None
+
+    def context(self) -> Optional[Dict[str, Any]]:
+        res = self.request("GET", "/api/_a2app/context")
+        return res.json if res.ok else None
+
+    # ---------------------------------------------------------------- data
+
+    def _records(self, entity: str) -> str:
+        return f"/api/collections/{urllib.parse.quote(entity)}/records"
+
+    def list_records(
+        self, entity: str, filter: Optional[str] = None, sort: Optional[str] = None, per_page: Optional[int] = None
+    ) -> A2AppResponse:
+        qs: Dict[str, str] = {}
+        if filter:
+            qs["filter"] = filter
+        if sort:
+            qs["sort"] = sort
+        if per_page:
+            qs["perPage"] = str(per_page)
+        suffix = f"?{urllib.parse.urlencode(qs)}" if qs else ""
+        return self.request("GET", self._records(entity) + suffix)
+
+    def get_record(self, entity: str, record_id: str) -> A2AppResponse:
+        return self.request("GET", f"{self._records(entity)}/{record_id}")
+
+    def create_record(self, entity: str, body: Dict[str, Any], idempotency_key: Optional[str] = None) -> A2AppResponse:
+        return self.request("POST", self._records(entity), body, _idem(idempotency_key))
+
+    def update_record(
+        self, entity: str, record_id: str, body: Dict[str, Any], idempotency_key: Optional[str] = None
+    ) -> A2AppResponse:
+        return self.request("PATCH", f"{self._records(entity)}/{record_id}", body, _idem(idempotency_key))
+
+    def delete_record(self, entity: str, record_id: str) -> A2AppResponse:
+        return self.request("DELETE", f"{self._records(entity)}/{record_id}")
+
+    # ---------------------------------------------------------- operations
+
+    def call_operation(
+        self, name: str, args: Optional[Dict[str, Any]] = None, approval_key: Optional[str] = None
+    ) -> A2AppResponse:
+        headers = {"X-A2App-Approval": approval_key} if approval_key else None
+        return self.request("POST", f"/api/ops/{urllib.parse.quote(name)}", args or {}, headers)
+
+    # ------------------------------------------------------------ app->agent
+
+    def poll_events(self, since: Optional[str] = None) -> A2AppResponse:
+        suffix = f"?since={urllib.parse.quote(since)}" if since else ""
+        return self.request("GET", f"/api/_a2app/events{suffix}")
+
+    def poll_tasks(self, status: str = "submitted") -> A2AppResponse:
+        return self.request("GET", f"/api/_a2app/tasks?status={urllib.parse.quote(status)}")
+
+    def get_task(self, task_id: str) -> A2AppResponse:
+        return self.request("GET", f"/api/_a2app/tasks/{task_id}")
+
+    def claim_task(self, task_id: str, credential_id: str) -> A2AppResponse:
+        return self.request("POST", f"/api/_a2app/tasks/{task_id}/claim", {"agent": credential_id})
+
+    def progress_task(self, task_id: str, step: Optional[str] = None, percent: Optional[int] = None) -> A2AppResponse:
+        body: Dict[str, Any] = {}
+        if step is not None:
+            body["step"] = step
+        if percent is not None:
+            body["percent"] = percent
+        return self.request("POST", f"/api/_a2app/tasks/{task_id}/progress", body)
+
+    def complete_task(self, task_id: str, status: str = "completed", result: Any = None, reason: Optional[str] = None) -> A2AppResponse:
+        body: Dict[str, Any] = {"status": status}
+        if result is not None:
+            body["result"] = result
+        if reason is not None:
+            body["reason"] = reason
+        return self.request("POST", f"/api/_a2app/tasks/{task_id}/complete", body)
+
+    def cancel_task(self, task_id: str) -> A2AppResponse:
+        return self.request("POST", f"/api/_a2app/tasks/{task_id}/cancel", {})
+
+
+def _idem(key: Optional[str]) -> Optional[Dict[str, str]]:
+    return {"Idempotency-Key": key} if key else None

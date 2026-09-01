@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/whoami.json",
+  "type": "object",
+  "required": ["a2app", "credentialId", "principal", "scopes"],
+  "properties": {
+    "a2app": { "const": true },
+    "credentialId": { "type": "string" },
+    "agentName": { "type": ["string", "null"] },
+    "principal": { "type": "string" },
+    "scopes": { "type": "array", "items": { "type": "string" } }
+  }
+}

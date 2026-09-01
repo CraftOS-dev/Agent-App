@@ -1,0 +1,13 @@
+name: agent-app
+version: 0.1.0
+description: Agent App Framework for Hermes — build/evolve/operate Agent Apps, with the app shown in a dashboard tab or the desktop preview pane.
+entry: dist/index.js
+capabilities:
+  - tools.register
+skills:
+  dir: ./skills
+dashboard:
+  plugins:
+    - id: agent-app
+      label: Agent App
+      manifest: ./dashboard/manifest.json

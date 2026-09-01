@@ -1,0 +1,16 @@
+{
+  "name": "@a2app/blueprint-react-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent App blueprint: React + Hono + SQLite, with embedded A2App adapter (middleware form)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo \"blueprint \u00e2\u20ac\u201d nothing to build yet\" && exit 0",
+    "typecheck": "echo \"blueprint \u00e2\u20ac\u201d nothing to typecheck yet\" && exit 0",
+    "test": "echo \"no tests yet\" && exit 0"
+  }
+}

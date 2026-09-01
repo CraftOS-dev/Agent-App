@@ -1,0 +1,6 @@
+{
+  "operations": [
+    { "name": "clear-done", "description": "Delete every task whose status is done.", "destructive": true },
+    { "name": "count-tasks", "description": "Count the tasks.", "destructive": false, "readOnly": true, "idempotent": true }
+  ]
+}

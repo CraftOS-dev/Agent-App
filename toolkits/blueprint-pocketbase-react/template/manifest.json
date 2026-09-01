@@ -1,0 +1,16 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "PocketBase-React Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modificationLock": false,
+  "capabilities": { "integrations": [] },
+  "pipeline": {
+    "install": "node -e \"process.stdout.write('download the pocketbase binary into ./pb, then re-run\\n')\"",
+    "build": "node --check pb/pb_hooks/_a2app.pb.js",
+    "start": "pb/pocketbase serve --http 127.0.0.1:${PORT} --dir pb/pb_data --hooksDir pb/pb_hooks",
+    "health": "/api/_a2app"
+  }
+}

@@ -1,0 +1,22 @@
+{
+ "name": "@a2app/reverse-proxy",
+ "version": "0.1.0",
+ "private": true,
+ "description": "Sidecar A2App adapter for foreign codebases: a declarative mapping forwards declared operations to an upstream; operate-only, entities:{} by design",
+ "license": "MIT",
+ "type": "module",
+ "main": "./dist/index.js",
+ "types": "./dist/index.d.ts",
+ "engines": { "node": ">=20" },
+ "dependencies": {
+ "@a2app/adapter-core": "workspace:*"
+ },
+ "devDependencies": {
+ "@types/node": "^20.19.0"
+ },
+ "scripts": {
+ "build": "tsc -p tsconfig.json",
+ "typecheck": "tsc -p tsconfig.json --noEmit",
+ "test": "echo \"no tests yet\" && exit 0"
+ }
+}

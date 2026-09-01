@@ -1,0 +1,5 @@
+{
+  "operations": [
+    { "name": "count-tasks", "description": "Count the tasks.", "destructive": false, "readOnly": true, "idempotent": true }
+  ]
+}

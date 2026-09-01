@@ -1,0 +1,18 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "Base Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modificationLock": false,
+  "capabilities": {
+    "integrations": []
+  },
+  "pipeline": {
+    "install": "node -v",
+    "build": "node -e \"process.stdout.write('base blueprint: replace pipeline.build with your stack build\\n')\"",
+    "start": "node -e \"process.stdout.write('base blueprint: replace pipeline.start with your stack start\\n')\"",
+    "health": "/api/_a2app"
+  }
+}

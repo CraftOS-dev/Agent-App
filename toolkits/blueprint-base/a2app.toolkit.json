@@ -1,0 +1,11 @@
+{
+ "id": "blueprint-base",
+ "description": "Tech-stack-agnostic Agent App contract: framework files only, no runtime code. Maximum flexibility — the agent picks and wires the stack. NOT part of the framework.",
+ "template": "template",
+ "systemPaths": ["manifest.json"],
+ "adapterPaths": [],
+ "gate": [],
+ "lifecycle": {
+ "dataDir": "data"
+ }
+}

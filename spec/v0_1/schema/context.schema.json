@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/context.json",
+  "type": "object",
+  "required": ["a2app", "view", "selected"],
+  "properties": {
+    "a2app": { "const": true },
+    "view": { "type": ["string", "null"] },
+    "selected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entity", "id"],
+        "properties": { "entity": { "type": "string" }, "id": { "type": "string" } }
+      }
+    }
+  }
+}

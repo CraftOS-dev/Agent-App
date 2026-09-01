@@ -1,0 +1,20 @@
+{
+  "name": "agent-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent App Framework & A2App Protocol — applications that humans and AI agents build, evolve, and operate together",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.7.2"
+  }
+}

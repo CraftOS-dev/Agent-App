@@ -1,0 +1,18 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "React-Node Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modificationLock": false,
+  "capabilities": {
+    "integrations": []
+  },
+  "pipeline": {
+    "install": "npm install",
+    "build": "node --check server.mjs",
+    "start": "node server.mjs",
+    "health": "/api/_a2app"
+  }
+}

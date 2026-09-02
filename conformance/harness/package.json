@@ -18,7 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.0",
-    "a2app": "workspace:*"
+    "agent-app": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -78,7 +78,7 @@ importers:
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43
-      a2app:
+      agent-app:
         specifier: workspace:*
         version: link:../../framework/cli
 

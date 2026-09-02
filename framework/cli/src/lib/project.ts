@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { A2AppClient } from "@a2app/sdk";
+import { AmbiguousAppError, find } from "./registry.js";
 
 /** manifest.json (framework file). */
 export interface Manifest {
@@ -22,7 +23,7 @@ export interface Manifest {
   pipeline: { install: string; build: string; start: string; health: string };
   /** non-normative: launch port a host assigns; read by operate commands */
   port?: number;
-  /** non-normative safe-evolve marker stamped by `a2app dev` */
+  /** non-normative safe-evolve marker stamped by `agent-app dev` */
   env?: "dev" | "live";
 }
 
@@ -32,11 +33,32 @@ export interface Project {
   baseUrl: string;
 }
 
+/**
+ * Resolve a project by directory, or — when that is not an Agent App — by the
+ * id or name of a registered one (framework section 5.6), so an agent can say
+ * `a2app data "Kanban Board" schema` without tracking paths. The manifest stays
+ * authoritative; the registry only supplies the location.
+ */
 export function loadProject(projectDir: string): Project {
-  const dir = resolve(projectDir);
+  let dir = resolve(projectDir);
+  if (!existsSync(join(dir, "manifest.json"))) {
+    // An ambiguous name must not be guessed at: surface the candidates.
+    let registered;
+    try {
+      registered = find(projectDir);
+    } catch (err) {
+      if (err instanceof AmbiguousAppError) throw new UsageError(err.message);
+      throw err;
+    }
+    if (registered !== null && existsSync(join(resolve(registered.path), "manifest.json"))) {
+      dir = resolve(registered.path);
+    }
+  }
   const manifestPath = join(dir, "manifest.json");
   if (!existsSync(manifestPath)) {
-    throw new UsageError(`Not an Agent App (no manifest.json): ${dir}`);
+    throw new UsageError(
+      `Not an Agent App (no manifest.json): ${dir}. Pass a project directory, or a registered app id/name — see \`agent-app list\`.`,
+    );
   }
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
   const port = manifest.port ?? 8090;

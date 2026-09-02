@@ -1,5 +1,5 @@
 /**
- * a2app toolkit-sync <dir> — re-vendor the toolkit's system files and re-record
+ * agent-app toolkit-sync <dir> — re-vendor the toolkit's system files and re-record
  * the ownership canon. The single writer of the canon; it records exactly the
  * files it just wrote.
  */
@@ -12,7 +12,7 @@ import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app toolkit-sync <dir>");
+  if (dir === undefined) throw new UsageError("Usage: agent-app toolkit-sync <dir>");
   const project = loadProject(dir);
   const tk = projectToolkit(project.dir);
   if (tk === null) {

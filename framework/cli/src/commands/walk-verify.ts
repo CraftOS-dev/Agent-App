@@ -1,5 +1,5 @@
 /**
- * a2app walk-verify <dir> — run the walk-verify checks against the RUNNING app.
+ * agent-app walk-verify <dir> — run the walk-verify checks against the RUNNING app.
  * The full feature-by-feature, browser-driven verification is delivered as the
  * walk-verify SKILL (so a verifier agent, distinct from the builder, drives the
  * real UI). This command does the machine-checkable part: the app mounts and
@@ -20,7 +20,7 @@ interface Check {
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app walk-verify <dir>");
+  if (dir === undefined) throw new UsageError("Usage: agent-app walk-verify <dir>");
   const project = loadProject(dir);
   const client = await clientFor(project);
   const checks: Check[] = [];

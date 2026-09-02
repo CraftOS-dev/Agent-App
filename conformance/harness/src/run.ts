@@ -15,11 +15,17 @@ import { runToolkitClass } from "./toolkits.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SUITES_DIR = resolve(HERE, "..", "..", "suites");
 
-function findCliEntry(): string | null {
+/**
+ * The two binaries are separate entries (framework spec 5.1): protocol checks
+ * (class B) run against `a2app`, toolkit checks against `agent-app`. Resolving
+ * one entry for both would send `create` to the operate client, which now
+ * refuses it by design.
+ */
+function findCliEntry(bin: "a2app" | "agent-app"): string | null {
   const candidates = [
-    resolve(HERE, "..", "node_modules", "a2app", "dist", "cli.js"),
-    resolve(HERE, "..", "..", "..", "node_modules", "a2app", "dist", "cli.js"),
-    resolve(HERE, "..", "..", "..", "framework", "cli", "dist", "cli.js"),
+    resolve(HERE, "..", "node_modules", "agent-app", "dist", `${bin}.js`),
+    resolve(HERE, "..", "..", "..", "node_modules", "agent-app", "dist", `${bin}.js`),
+    resolve(HERE, "..", "..", "..", "framework", "cli", "dist", `${bin}.js`),
   ];
   return candidates.find((c) => existsSync(c)) ?? null;
 }
@@ -74,7 +80,8 @@ async function main(): Promise<number> {
     return 2;
   }
   const ref = await startReferenceApp();
-  const cliEntry = findCliEntry();
+  const cliEntry = findCliEntry("a2app");
+  const frameworkEntry = findCliEntry("agent-app");
   const projectDir = makeProjectDir(ref.port, ref.fullToken);
 
   const ctx: RunContext = {
@@ -99,7 +106,7 @@ async function main(): Promise<number> {
   }
 
   // Artifact class: Toolkit — blueprints scaffold to conforming apps.
-  results.push(await runToolkitClass(cliEntry));
+  results.push(await runToolkitClass(frameworkEntry));
 
   const code = report(results);
   await ref.close();

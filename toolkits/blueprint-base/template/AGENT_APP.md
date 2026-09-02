@@ -25,5 +25,5 @@ optionally `readOnly` / `idempotent`) and implement it behind the adapter.
 - [ ] Choose the stack and replace the `pipeline` block
 - [ ] Wire the A2App adapter (identity, describe, guard, records, ops)
 - [ ] First entity + first operation
-- [ ] Gate passes (`a2app validate`)
+- [ ] Gate passes (`agent-app validate`)
 - [ ] Walk-verify passes

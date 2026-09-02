@@ -1,5 +1,5 @@
 /**
- * a2app dev <dir> — boot a dev copy on a hidden port with a fresh database
+ * agent-app dev <dir> — boot a dev copy on a hidden port with a fresh database
  * created by replaying the full migration chain; live data is never cloned. The
  * stack-specific action is the toolkit's `lifecycle.dev` command; the framework
  * only enforces that dev never touches live data.
@@ -11,7 +11,7 @@ import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app dev <dir>");
+  if (dir === undefined) throw new UsageError("Usage: agent-app dev <dir>");
   const project = loadProject(dir);
 
   const cmd = lifecycleCommand(project.dir, "dev");
@@ -25,6 +25,6 @@ export async function run(args: string[]): Promise<number> {
   log.step("booting dev copy (fresh, migration-replayed database)");
   const out = runShell(cmd, project.dir);
   if (out.stdout.trim()) log.raw(out.stdout.trim());
-  log.ok("dev copy running — run `a2app validate` and walk-verify against it, then `a2app promote`");
+  log.ok("dev copy running — run `agent-app validate` and walk-verify against it, then `agent-app promote`");
   return 0;
 }

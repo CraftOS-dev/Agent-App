@@ -72,7 +72,7 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
     if (!existsSync(join(projectDir, ".a2app", "system-hashes.json")) &&
         !existsSync(join(projectDir, ".lui", "system-hashes.json"))) {
       throw new Error(
-        "no ownership canon — run `a2app toolkit-sync` to record system-file hashes",
+        "no ownership canon — run `agent-app toolkit-sync` to record system-file hashes",
       );
     }
     const drift = verifySystemHashes(projectDir);
@@ -84,7 +84,7 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
     if (problems.length > 0) {
       throw new Error(
         `system-managed files changed outside tooling:\n${problems.join("\n")}\n` +
-          "If a toolkit upgrade is intended, run `a2app toolkit-sync`; agent edits belong in app-owned paths.",
+          "If a toolkit upgrade is intended, run `agent-app toolkit-sync`; agent edits belong in app-owned paths.",
       );
     }
   });

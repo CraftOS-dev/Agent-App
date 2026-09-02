@@ -1,5 +1,5 @@
 /**
- * a2app create <dir> [--blueprint <id|path>] [--name "..."] [--port N]
+ * agent-app create <dir> [--blueprint <id|path>] [--name "..."] [--port N]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
  * versions, write the ownership canon, and provision the agent credential.
@@ -12,6 +12,7 @@ import { writeSystemHashes } from "../lib/canon.js";
 import { flag } from "../lib/args.js";
 import { UsageError } from "../lib/project.js";
 import { adapterVersionOf, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
+import { reserveApp } from "../lib/registry.js";
 import { log } from "../lib/log.js";
 
 const AGENT_APP_VERSION = "0.1.0";
@@ -19,7 +20,7 @@ const AGENT_APP_VERSION = "0.1.0";
 export async function run(args: string[]): Promise<number> {
   const dirArg = args.find((a) => !a.startsWith("--"));
   if (dirArg === undefined) {
-    throw new UsageError("Usage: a2app create <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
+    throw new UsageError("Usage: agent-app create <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
   }
   const dir = resolve(dirArg);
   if (existsSync(join(dir, "manifest.json"))) {
@@ -57,8 +58,27 @@ export async function run(args: string[]): Promise<number> {
   manifest.agentAppVersion = AGENT_APP_VERSION;
   manifest.adapterVersion = adapterVersion;
   if (manifest.authMode === undefined) manifest.authMode = "none";
-  const port = flag(args, "port");
-  if (port !== undefined) manifest.port = Number(port);
+  // Assign a port no registered app claims and nothing is listening on, so two
+  // apps are never mutually unreachable to their own tooling (section 5.6).
+  // An explicit --port is honoured when free, and reported when it is not.
+  const requested = flag(args, "port");
+  const preferred = requested !== undefined ? Number(requested) : (manifest.port as number | undefined);
+  // Pick AND claim the port in one locked step, then record the app. Splitting
+  // choose-then-claim lets a concurrent `create` pick the same port.
+  const assigned = await reserveApp(
+    {
+      id: manifest.id as string,
+      name,
+      path: dir,
+      ...(tk ? { blueprint: tk.manifest.id } : {}),
+      createdAt: new Date().toISOString(),
+    },
+    preferred,
+  );
+  if (requested !== undefined && assigned !== Number(requested)) {
+    log.warn(`port ${requested} is already taken — assigned ${assigned} instead`);
+  }
+  manifest.port = assigned;
   if (manifest.pipeline === undefined) {
     manifest.pipeline = { install: "", build: "", start: "", health: "/api/health" };
   }
@@ -71,11 +91,82 @@ export async function run(args: string[]): Promise<number> {
   }
   writeFileSync(join(dir, ".agent-token"), "a2app_" + randomBytes(24).toString("hex") + "\n", { mode: 0o600 });
 
+  writeHarnessGuides(dir, name);
+
   writeSystemHashes(dir, systemPaths);
 
   log.ok(`Created Agent App "${name}" (id ${manifest.id as string}) at ${dir}`);
-  log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, adapterVersion }, null, 2));
+  log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, port: assigned, adapterVersion }, null, 2));
   return 0;
+}
+
+/**
+ * Harness-facing pointer files: `AGENTS.md` (the common convention) and a
+ * `CLAUDE.md` that defers to it.
+ *
+ * These are NOT framework files — an app is conforming without them, and they
+ * are agent-accessible, never canonized. They exist because discovery is the
+ * framework's weakest link: an agent dropped into an app directory by a harness
+ * with no plugin has no way to learn that `agent-app` builds and launches this app and
+ * `a2app` operates it. The scaffolded app tells it.
+ *
+ * A blueprint that ships its own guidance wins: an existing file is never
+ * overwritten.
+ */
+function writeHarnessGuides(dir: string, name: string): void {
+  const agents = join(dir, "AGENTS.md");
+  if (!existsSync(agents)) {
+    writeFileSync(
+      agents,
+      [
+        `# ${name} — agent guide`,
+        "",
+        "This is an **Agent App**: app code plus an A2App adapter plus framework files.",
+        "It is built, launched, and operated through two CLIs — never by hand:",
+        "",
+        "- `agent-app` — build, evolve, manage.",
+        "- `a2app` — operate a running app (the A2App protocol client; operate only).",
+        "",
+        "## Read first",
+        "",
+        "- `AGENT_APP.md` — this app's index: plan, entities, operations, conventions, checklist.",
+        "- `reference/requirements.md` — the binding spec of what this app must do.",
+        "",
+        "Load the matching framework skill before build or evolve work:",
+        "`agent-app skills` lists them; `agent-app skills --install <dir>` installs them here.",
+        "",
+        "## Operate it (no rebuild)",
+        "",
+        "```bash",
+        "agent-app serve .        # launch (never start a server by hand)",
+        "a2app data . schema      # the data model",
+        "a2app ops .              # declared operations",
+        "a2app run . <op> ...     # invoke one (destructive ops need approval)",
+        "```",
+        "",
+        "Read and write through the adapter only. Never drive the UI to operate this app;",
+        "the UI is for humans and for walk-verify.",
+        "",
+        "## Change its code",
+        "",
+        "```bash",
+        "agent-app dev .          # dev copy, fresh migration-replayed database",
+        "agent-app validate .     # the gate — must pass",
+        "agent-app walk-verify .  # verified by an agent that is NOT the builder",
+        "agent-app promote .      # mandatory pre-promote backup, then apply to live",
+        "```",
+        "",
+        "Never build against the live app, never edit an applied migration, never drop a",
+        "collection holding user data, and never write a system-owned file listed in",
+        "`.a2app/system-hashes.json` — the gate fails on drift.",
+        "",
+      ].join("\n"),
+    );
+  }
+  const claude = join(dir, "CLAUDE.md");
+  if (!existsSync(claude)) {
+    writeFileSync(claude, `See [AGENTS.md](AGENTS.md) — it applies in full.\n`);
+  }
 }
 
 /** Every file under the toolkit template — the create copies the whole app, not

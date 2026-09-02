@@ -33,7 +33,7 @@ shipped credentials. Marketplace apps are pre-built and **pre-verified upstream 
 no walk-verify needed**. An app still in a legacy format is rejected with a clear
 error; tell the user it hasn't been re-published for this version yet, and do not
 improvise a workaround. On a launch error, treat it like any build failure under
-the ownership rules: read ALL errors, fix, `a2app validate`, relaunch.
+the ownership rules: read ALL errors, fix, `agent-app validate`, relaunch.
 
 ## Import (an Agent App export: zip / folder / git)
 
@@ -42,9 +42,9 @@ The source already carries framework files.
 1. Extract; verify the framework files are present and valid. Register a NEW
    delivered project (fresh id + port, shipped credentials stripped, kit
    re-vendored).
-2. `a2app toolkit-sync <dir>` then `a2app adapter-sync <dir>` — re-vendor system
+2. `agent-app toolkit-sync <dir>` then `agent-app adapter-sync <dir>` — re-vendor system
    files and re-deliver the adapter.
-3. `a2app validate` → launch → **walk-verify**. It is not trusted just for
+3. `agent-app validate` → launch → **walk-verify**. It is not trusted just for
    carrying framework files.
 
 ## Adopt (a foreign app, runs AS-IS)
@@ -74,7 +74,7 @@ declared operations; everything else passes through.
    for it: verification covers *the app launches and its main screen renders* —
    never the foreign app's internal features (you can't fix those and must not try;
    it ships as-is, quirks included).
-5. `a2app validate` / launch. Errors come back with the app's own log excerpts; fix
+5. `agent-app validate` / launch. Errors come back with the app's own log excerpts; fix
    the VERBS or the port binding, not the app's features, and retry.
 6. **Verify the operation mappings for real**: invoke every non-destructive mapped
    operation through the adapter and confirm it works; destructive ones are

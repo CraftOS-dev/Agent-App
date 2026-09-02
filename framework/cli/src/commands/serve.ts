@@ -1,17 +1,18 @@
 /**
- * a2app serve <dir> [--install]
+ * agent-app serve <dir> [--install]
  *
  * Launch a running Agent App the framework way — never "start a server by hand".
  * Runs the manifest `pipeline` (optionally `install`, then `build`, then `start`)
  * as a MANAGED BACKGROUND process bound to `manifest.port` (the same port the
  * operate commands read), polls `pipeline.health` until the app answers, and
- * records `.a2app/serve.json` so `a2app stop` can shut it down. Server stdout is
+ * records `.a2app/serve.json` so `agent-app stop` can shut it down. Server stdout is
  * captured to `.a2app/serve.log` for diagnosis.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadProject, UsageError } from "../lib/project.js";
+import { register } from "../lib/registry.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
 
@@ -31,7 +32,7 @@ async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app serve <dir> [--install]");
+  if (dir === undefined) throw new UsageError("Usage: agent-app serve <dir> [--install]");
   const project = loadProject(dir);
   const pipeline = project.manifest.pipeline;
   const port = project.manifest.port ?? 8090;
@@ -39,6 +40,15 @@ export async function run(args: string[]): Promise<number> {
   if (!pipeline?.start) {
     log.error("manifest.pipeline.start is empty — nothing to launch");
     return 1;
+  }
+
+  // Index the app before anything else, so an app that was never created here
+  // (imported, cloned, or already running) still shows up in `agent-app list`.
+  // Convenience only: an unwritable index never fails a launch.
+  try {
+    await register({ id: project.manifest.id, name: project.manifest.name, path: project.dir, port });
+  } catch (err) {
+    log.warn(`could not update the app registry: ${(err as Error).message}`);
   }
 
   const servePath = join(project.dir, ".a2app", "serve.json");

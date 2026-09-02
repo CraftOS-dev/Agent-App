@@ -2,7 +2,7 @@
   "name": "@a2app/integration-openclaw",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework plugin for OpenClaw: agent tools + CLI passthrough + Control-UI tab, driving the a2app CLI",
+  "description": "Agent App Framework plugin for OpenClaw: agent tools + CLI passthrough + Control-UI tab, driving the agent-app and a2app CLIs",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",

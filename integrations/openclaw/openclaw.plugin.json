@@ -1,12 +1,12 @@
 {
   "id": "a2app",
   "name": "Agent App Framework",
-  "description": "Build and operate full Agent Apps over the A2App protocol via the a2app CLI.",
+  "description": "Build and operate full Agent Apps over the A2App protocol via the agent-app and a2app CLIs.",
   "icon": "https://cdn.simpleicons.org/probot",
   "enabledByDefault": false,
   "skills": ["./skills"],
   "cliCommands": [
-    { "name": "agent-app", "description": "Run the a2app CLI (build/evolve/operate an Agent App)", "hasSubcommands": true }
+    { "name": "agent-app", "description": "Run the framework CLIs (build/evolve/operate an Agent App)", "hasSubcommands": true }
   ],
   "activation": {
     "onStartup": false,

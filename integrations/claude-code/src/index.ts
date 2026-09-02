@@ -5,7 +5,7 @@
  * Claude Code consumes tools over the Model Context Protocol. This is a real MCP
  * server (stdio transport, newline-delimited JSON-RPC 2.0) that exposes the
  * framework engine's build+operate tools — so an agent in Claude Code can build,
- * evolve, and operate Agent Apps. Every tool shells the real `a2app` CLI through
+ * evolve, and operate Agent Apps. Every tool shells a real framework CLI through
  * the shared engine (`@a2app/integration-starter`); nothing here is simulated.
  *
  * Register with:  claude mcp add a2app -- node <path>/dist/index.js
@@ -15,10 +15,13 @@ import { createInterface } from "node:readline";
 import { a2appTools, type HarnessTool } from "@a2app/integration-starter";
 
 const CLI = process.env.A2APP_CLI ?? "a2app";
+// Build/evolve lives in a second binary (framework spec 5.1); the engine routes
+// each verb to the right one.
+const FRAMEWORK_CLI = process.env.AGENT_APP_CLI ?? "agent-app";
 const SERVER_INFO = { name: "a2app", version: "0.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 
-const tools: HarnessTool[] = a2appTools(CLI);
+const tools: HarnessTool[] = a2appTools(CLI, FRAMEWORK_CLI);
 const byName = new Map(tools.map((t) => [t.name, t]));
 
 interface JsonRpc {

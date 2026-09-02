@@ -1,6 +1,6 @@
 # blueprint-python-fastapi
 
-A Python Agent App blueprint. `a2app create --blueprint blueprint-python-fastapi` scaffolds a FastAPI app whose A2App adapter is a dependency-free, in-process port of the served surface (identity, describe, guarded records CRUD, operations with approval, tasks/events). Not part of the pnpm workspace (Python).
+A Python Agent App blueprint. `agent-app create --blueprint blueprint-python-fastapi` scaffolds a FastAPI app whose A2App adapter is a dependency-free, in-process port of the served surface (identity, describe, guarded records CRUD, operations with approval, tasks/events). Not part of the pnpm workspace (Python).
 
 Layout:
 

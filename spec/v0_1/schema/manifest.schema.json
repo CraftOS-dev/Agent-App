@@ -34,7 +34,7 @@
     },
     "env": {
       "enum": ["dev", "live"],
-      "description": "non-normative safe-evolve marker stamped by `a2app dev` (framework section 7.2)"
+      "description": "non-normative safe-evolve marker stamped by `agent-app dev` (framework section 7.2)"
     }
   }
 }

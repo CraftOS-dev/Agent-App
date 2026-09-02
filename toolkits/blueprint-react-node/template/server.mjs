@@ -17,7 +17,7 @@ import { schema } from "./a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Records live inside the toolkit's declared `lifecycle.dataDir` ("data"), so
-// `a2app backup` / `restore` / `promote` capture the live database, and the
+// `agent-app backup` / `restore` / `promote` capture the live database, and the
 // template .gitignore keeps it out of the repo.
 const DATA_DIR = join(HERE, "data");
 const DATA_FILE = join(DATA_DIR, "db.json");

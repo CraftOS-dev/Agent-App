@@ -2,7 +2,7 @@
 
 The shared engine every harness plugin is built on, and the copy-to-create template for a new harness.
 
-A plugin's real job is small and identical everywhere: expose the `a2app` CLI as agent tools, ship the skills, and embed a launched app in the harness UI. This package implements all of it; a harness plugin is a thin binding that maps its host's plugin API onto `HarnessContext`.
+A plugin's real job is small and identical everywhere: expose the `agent-app` and `a2app` CLIs as agent tools, ship the skills, and embed a launched app in the harness UI. This package implements all of it; a harness plugin is a thin binding that maps its host's plugin API onto `HarnessContext`.
 
 ## Exports
 

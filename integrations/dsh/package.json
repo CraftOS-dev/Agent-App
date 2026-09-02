@@ -2,7 +2,7 @@
   "name": "@a2app/integration-dsh",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework bundle for deepseek-harness (dsh): a Cordis plugin registering agent tools that drive the a2app CLI, plus a browser iframe renderer",
+  "description": "Agent App Framework bundle for deepseek-harness (dsh): a Cordis plugin registering agent tools that drive the agent-app and a2app CLIs, plus a browser iframe renderer",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",

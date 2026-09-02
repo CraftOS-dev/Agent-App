@@ -1,6 +1,6 @@
 /**
- * Bundle the blueprint toolkits INTO the `a2app` package so a globally-installed
- * CLI can scaffold from them (`a2app create --blueprint <id>`) without a repo
+ * Bundle the blueprint toolkits INTO the `agent-app` package so a globally-installed
+ * CLI can scaffold from them (`agent-app create --blueprint <id>`) without a repo
  * checkout. Runs on `prepack`/`prepublishOnly`; the copy under
  * `framework/cli/toolkits/` is a build artifact (git-ignored).
  *

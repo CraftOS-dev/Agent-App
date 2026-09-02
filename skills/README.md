@@ -20,6 +20,19 @@ bound to a session or project.
   `reference/requirements.md`, and (for stack specifics) the skill variant its
   blueprint ships. A skill never cites an external framework spec it cannot open.
 
+## Getting them
+
+These ship inside the `agent-app` package, so installing the CLI installs the skills:
+
+```bash
+agent-app skills                      # list them
+agent-app skills --path               # where they are
+agent-app skills --install .claude/skills   # into a harness that loads SKILL.md
+```
+
+Claude Code users can instead install the plugin (`.claude-plugin/marketplace.json`
+at the repo root), which carries these six directly.
+
 ## The six activities
 
 | Skill | Activity |

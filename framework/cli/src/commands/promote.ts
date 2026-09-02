@@ -1,5 +1,5 @@
 /**
- * a2app promote <dir> — take a mandatory pre-promote backup (backup failure
+ * agent-app promote <dir> — take a mandatory pre-promote backup (backup failure
  * aborts), then apply the dev copy's migrations to the live database.
  * First-install vs update is decided structurally (does a live database exist?),
  * never by a flag.
@@ -11,7 +11,7 @@ import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app promote <dir>");
+  if (dir === undefined) throw new UsageError("Usage: agent-app promote <dir>");
   const project = loadProject(dir);
 
   const cmd = lifecycleCommand(project.dir, "promote");

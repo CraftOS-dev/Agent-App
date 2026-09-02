@@ -21,7 +21,11 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 
 1. Use the project directory you were given; read `AGENT_APP.md` (current
    plan/entities/operations) and `reference/requirements.md`. Read `manifest.json`
-   for `authMode` and port.
+   for `authMode` and port. Not given a directory? `agent-app list` shows every known
+   app with its path, port, and status, and commands accept a registered app id
+   or name wherever they accept a directory.
+   Also read `agent-app global` — the user's cross-app conventions apply to changes
+   too, with this app's `reference/requirements.md` winning any conflict.
 2. If something broke, **read the logs FIRST** before changing anything — the real
    cause is in them, not in your guess.
 3. If the request is ambiguous, ask one batch of clarifying questions, then wait.
@@ -60,28 +64,28 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 ## Finish
 
 ```
-a2app dev <dir>        # boot a disposable dev copy (fresh, migration-replayed DB)
-a2app validate <dir>   # the gate, against the dev copy
+agent-app dev <dir>        # boot a disposable dev copy (fresh, migration-replayed DB)
+agent-app validate <dir>   # the gate, against the dev copy
 # then the walk-verify skill against the dev URL
-a2app promote <dir>    # pre-promote backup, then apply new migrations to live
+agent-app promote <dir>    # pre-promote backup, then apply new migrations to live
 ```
 
-`a2app dev` boots a disposable copy of your new CODE on a hidden port with a
+`agent-app dev` boots a disposable copy of your new CODE on a hidden port with a
 **FRESH, EMPTY database** — migrations replay at boot, so only data your migrations
 seed exists. The user's live app keeps running the previous version, untouched, and
 its data is NEVER cloned into dev. Test freely against the dev URL (create whatever
 test records you need — they are thrown away). walk-verify drives the dev instance
-in a real browser; a clean verdict is what lets `a2app promote` apply your change to
-the live app (new migrations apply to the real data at its boot). `a2app promote`
-takes a mandatory pre-promote backup and aborts if the backup fails; `a2app restore`
+in a real browser; a clean verdict is what lets `agent-app promote` apply your change to
+the live app (new migrations apply to the real data at its boot). `agent-app promote`
+takes a mandatory pre-promote backup and aborts if the backup fails; `agent-app restore`
 rolls back.
 
 - **The dev DB starts empty every time.** If a feature needs data to be visible,
   either seed it in a migration (survives promote) or create test records after
-  `a2app dev` (dev-only, disposable).
-- **Never run `a2app validate` or `a2app dev` in a way that rebuilds the live
+  `agent-app dev` (dev-only, disposable).
+- **Never run `agent-app validate` or `agent-app dev` in a way that rebuilds the live
   project dir in place** — it overwrites the served frontend and blanks the user's
-  live UI. `a2app dev` gates the dev copy for you.
+  live UI. `agent-app dev` gates the dev copy for you.
 - **Never write test data to the live app** (its DB is the user's real data; agent
   test writes outside the dev env are refused). Do all testing against the dev URL.
   Identity (`GET /api/_a2app`) answers `env: "dev"` or `"live"` if you need to

@@ -1,5 +1,5 @@
 /**
- * a2app adapter-sync <dir> — deliver/update ONLY the adapter files, no rebuild.
+ * agent-app adapter-sync <dir> — deliver/update ONLY the adapter files, no rebuild.
  * Runs on every launch: it is the only path that reaches apps a user already
  * has. Idempotent, non-fatal, never touches app-authored code.
  */
@@ -12,7 +12,7 @@ import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
   const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app adapter-sync <dir>");
+  if (dir === undefined) throw new UsageError("Usage: agent-app adapter-sync <dir>");
   const project = loadProject(dir);
   const tk = projectToolkit(project.dir);
   if (tk === null) {

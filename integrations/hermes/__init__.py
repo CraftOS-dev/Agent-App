@@ -1,7 +1,7 @@
 """Agent App Framework plugin for Hermes.
 
 A native Hermes backend plugin (Hermes plugins are Python). It registers tools
-that build and operate Agent Apps by shelling the `a2app` CLI, so anything an
+that build and operate Agent Apps by shelling the framework CLIs, so anything an
 agent does over the A2App protocol, Hermes can do through these tools. Drop this
 directory into `~/.hermes/plugins/`; set `A2APP_CLI` to override the binary
 (default: `a2app`).
@@ -14,13 +14,22 @@ import os
 import subprocess
 
 CLI = os.environ.get("A2APP_CLI", "a2app")
+# Build/evolve is a second binary; the operate client rejects build verbs by
+# design (framework spec 5.1), so each verb is routed to its owner.
+FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
+FRAMEWORK_VERBS = {
+    "create", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
+}
+
 
 
 def _run(argv: list[str]) -> str:
     exe = argv[:]
     # Run a JS entry (…/cli.js) with node; never use a shell, so field values
     # reach the CLI as literal arguments.
-    cmd = ["node", CLI, *argv] if CLI.endswith((".js", ".mjs", ".cjs")) else [CLI, *argv]
+    exe = FRAMEWORK_CLI if (argv and argv[0] in FRAMEWORK_VERBS) else CLI
+    cmd = ["node", exe, *argv] if exe.endswith((".js", ".mjs", ".cjs")) else [exe, *argv]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:

@@ -11,6 +11,9 @@ needs code changes, that's the modify skill.
 
 ## Inventory
 
+- Across apps: `agent-app list` — every known Agent App with its path, port, and
+  status (`running` / `stopped` / `missing`), probed live rather than remembered.
+  Commands accept a registered app id or name wherever they accept a directory.
 - Per project: `manifest.json` (id, name, `authMode`, port, pipeline),
   `AGENT_APP.md` (what it does), `operations.json` (its declared operations).
 - Identity: `GET /api/_a2app` — confirm `app.id` is the app you intend before
@@ -19,8 +22,9 @@ needs code changes, that's the modify skill.
 
 ## Lifecycle
 
-- `a2app validate <dir>` then launch (or relaunch) via the manifest `pipeline`
-  block; poll `health`.
+- `agent-app validate <dir>`, then `agent-app serve <dir>` to launch (it runs the manifest
+  `pipeline` and polls `health`) and `agent-app stop <dir>` to shut it down. Never
+  start a server by hand.
 - A running app serves everything on ONE port: the UI, the records API
   (`/api/collections/...`), declared operations (`/api/ops/...`), and discovery
   (`GET /api/_a2app/describe`). Never start servers by hand.

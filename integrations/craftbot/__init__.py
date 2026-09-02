@@ -3,7 +3,7 @@
 CraftBot is Agent-App-native and registers agent tools as **actions** via the
 `@action` decorator (importing this module registers them in CraftBot's
 ActionRegistry). These actions build and operate Agent Apps by shelling the
-`a2app` CLI, so anything an agent does over the A2App protocol, CraftBot can do
+framework CLIs, so anything an agent does over the A2App protocol, CraftBot can do
 as an action. Loaded inside CraftBot, which provides `agent_core` (the
 `@action` decorator). Set `A2APP_CLI` to override the binary (default: `a2app`).
 """
@@ -14,6 +14,14 @@ import subprocess
 from agent_core import action  # provided by CraftBot's runtime
 
 CLI = os.environ.get("A2APP_CLI", "a2app")
+# Build/evolve is a second binary; the operate client rejects build verbs by
+# design (framework spec 5.1), so each verb is routed to its owner.
+FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
+FRAMEWORK_VERBS = {
+    "create", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
+}
+
 
 _OUT = {
     "status": {"type": "string", "example": "success", "description": "'success' or 'error' (mirrors the CLI exit code)."},
@@ -25,7 +33,8 @@ _ENTITY = {"type": "string", "example": "contacts", "description": "Entity / col
 
 
 def _run(argv: list) -> dict:
-    cmd = ["node", CLI, *argv] if CLI.endswith((".js", ".mjs", ".cjs")) else [CLI, *argv]
+    exe = FRAMEWORK_CLI if (argv and argv[0] in FRAMEWORK_VERBS) else CLI
+    cmd = ["node", exe, *argv] if exe.endswith((".js", ".mjs", ".cjs")) else [exe, *argv]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:

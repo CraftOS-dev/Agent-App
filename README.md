@@ -49,10 +49,10 @@ Three pillars: **Describe** (the app publishes its own data model, operations, c
 a2app data <dir> schema # describe: entities, operations, conventions
 a2app data <dir> create card --title "Buy milk" --due tomorrow
 # build / evolve (framework CLI)
-a2app create <dir> [--blueprint <id>] # scaffold: framework files + ownership canon
-a2app validate <dir> # the validation + security gate
-a2app dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
-a2app walk-verify <dir> # independent verification vs requirements.md
+agent-app create <dir> [--blueprint <id>] # scaffold: framework files + ownership canon
+agent-app validate <dir> # the validation + security gate
+agent-app dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
+agent-app walk-verify <dir> # independent verification vs requirements.md
 ```
 
 ## Scenarios
@@ -94,7 +94,7 @@ Agents use the app programmatically via the A2App protocol, while continuing to 
 |---|---|
 | [spec/](spec/) | Versioned spec home: normative JSON Schemas (framework files + protocol payloads) |
 | [conformance/](conformance/) | Runnable suites — A2App classes A/B/C; artifact classes Agent App / Toolkit / Host |
-| [framework/](framework/) | TypeScript reference implementation: `a2app` CLI + optional reference host |
+| [framework/](framework/) | TypeScript reference implementation: the `agent-app` + `a2app` CLIs + optional reference host |
 | [adapters/](adapters/) | A2App adapter layers: shared pure rules, starter, sidecar form |
 | [toolkits/](toolkits/) | Blueprints & kits — **NOT part of the framework** (optional accelerators) |
 | [integrations/](integrations/) | Per-harness plugins (plugins are Hosts in spec terms) — CraftBot, OpenClaw, Hermes, dsh |

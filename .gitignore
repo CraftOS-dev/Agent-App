@@ -7,8 +7,9 @@ coverage/
 *.tgz
 .turbo/
 
-# generated: blueprints bundled into the CLI package at pack time
+# generated: blueprints and skills bundled into the CLI package at pack time
 framework/cli/toolkits/
+framework/cli/skills/
 
 # logs
 *.log

@@ -1,17 +1,18 @@
 {
-  "name": "a2app",
+  "name": "agent-app",
   "version": "0.1.0",
-  "description": "A2App CLI — the canonical agent surface for building, evolving, and operating Agent Apps",
+  "description": "The Agent App Framework CLI — `agent-app` builds and evolves Agent Apps; `a2app` operates them over the A2App protocol",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "framework/cli" },
   "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
   "bugs": "https://github.com/CraftOS-dev/Agent-App/issues",
   "type": "module",
   "bin": {
+    "agent-app": "./bin/agent-app.js",
     "a2app": "./bin/a2app.js"
   },
   "main": "./dist/cli.js",
-  "files": ["dist", "bin", "toolkits"],
+  "files": ["dist", "bin", "toolkits", "skills"],
   "engines": { "node": ">=20" },
   "dependencies": {
     "@a2app/rules": "workspace:*",
@@ -25,6 +26,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo \"no tests\" && exit 0",
     "bundle-blueprints": "node scripts/bundle-blueprints.mjs",
-    "prepack": "node scripts/bundle-blueprints.mjs"
+    "bundle-skills": "node scripts/bundle-skills.mjs",
+    "bundle": "node scripts/bundle-blueprints.mjs && node scripts/bundle-skills.mjs",
+    "prepack": "node scripts/bundle-blueprints.mjs && node scripts/bundle-skills.mjs"
   }
 }

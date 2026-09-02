@@ -1,7 +1,7 @@
 /**
  * Toolkit artifact class: a toolkit "scaffolds to a conforming Agent App; system
  * files registered in the canon; sync command provided". This drives the real
- * `a2app` CLI: `create --blueprint <id>` then `validate`, and asserts the
+ * `agent-app` CLI: `create --blueprint <id>` then `validate`, and asserts the
  * ownership canon exists and is non-empty.
  */
 import { spawn } from "node:child_process";
@@ -24,9 +24,19 @@ const TOOLKITS: ToolkitSpec[] = [
   { id: "blueprint-pocketbase-react", noBuild: true },
 ];
 
+/**
+ * Run the CLI against a THROWAWAY framework home, so scaffolding disposable test
+ * apps never registers them in the user's real app registry (framework 5.6).
+ * A suite that pollutes the machine it runs on is not a clean-room suite.
+ */
+const TEST_HOME = mkdtempSync(join(tmpdir(), "a2app-conf-home-"));
+
 function run(cliEntry: string, args: string[]): Promise<{ exit: number; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cliEntry, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [cliEntry, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, A2APP_HOME: TEST_HOME },
+    });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));

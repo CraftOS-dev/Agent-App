@@ -1,5 +1,5 @@
 /**
- * a2app restore <dir> [<backup-id>] — restore a backup, capturing the current
+ * agent-app restore <dir> [<backup-id>] — restore a backup, capturing the current
  * state first and rolling back automatically on failure.
  */
 import { positionals } from "../lib/args.js";
@@ -9,7 +9,7 @@ import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
   const [dir, requested] = positionals(args);
-  if (dir === undefined) throw new UsageError("Usage: a2app restore <dir> [<backup-id>]");
+  if (dir === undefined) throw new UsageError("Usage: agent-app restore <dir> [<backup-id>]");
   const project = loadProject(dir);
 
   const backups = listBackups(project.dir);

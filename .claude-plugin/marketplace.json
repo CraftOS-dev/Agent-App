@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "agent-app",
+  "owner": { "name": "CraftOS", "url": "https://github.com/CraftOS-dev" },
+  "description": "The Agent App Framework and the A2App protocol: agents build, evolve, and operate their own full-stack apps.",
+  "version": "0.1.0",
+  "metadata": {
+    "description": "The Agent App Framework and the A2App protocol: agents build, evolve, and operate their own full-stack apps.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-app",
+      "source": "./",
+      "description": "The six framework skills (creator, modify, importer, operator, walk-verify, connect) plus the CLI conventions. Requires the CLIs: npm i -g agent-app (installs `agent-app` and `a2app`).",
+      "version": "0.1.0"
+    }
+  ]
+}

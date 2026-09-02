@@ -2,7 +2,7 @@
  * Agent App Framework plugin for OpenClaw.
  *
  * A real OpenClaw plugin: it registers agent tools that build and operate Agent
- * Apps through the `a2app` CLI, an `agent-app` CLI passthrough, and a Control UI
+ * Apps through the framework CLIs, an `agent-app` CLI passthrough, and a Control UI
  * tab for a launched app. Every tool shells the real CLI via the shared engine
  * (`@a2app/integration-starter`), so nothing here is simulated.
  *
@@ -14,10 +14,14 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult, textResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
-import { runA2App } from "@a2app/integration-starter";
+import { runA2App, FRAMEWORK_VERBS } from "@a2app/integration-starter";
 
 /** The a2app binary (or JS entry) to shell. Override with A2APP_CLI. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
+/** Build/evolve binary. The operate client rejects build verbs by design
+ *  (framework spec 5.1), so route each verb to its owner. */
+const FRAMEWORK_CLI = process.env.AGENT_APP_CLI ?? "agent-app";
+const binFor = (argv: string[]): string => (FRAMEWORK_VERBS.has(argv[0] ?? "") ? FRAMEWORK_CLI : CLI);
 
 type Args = Record<string, unknown>;
 const s = (v: unknown) => String(v);
@@ -25,7 +29,7 @@ const s = (v: unknown) => String(v);
 export default definePluginEntry({
   id: "a2app",
   name: "Agent App Framework",
-  description: "Build and operate full Agent Apps over the A2App protocol via the a2app CLI.",
+  description: "Build and operate full Agent Apps over the A2App protocol via the agent-app and a2app CLIs.",
   register(api) {
     const DIR = Type.String({ description: "Agent App project directory" });
     const ENTITY = Type.String({ description: "entity / collection name" });
@@ -43,7 +47,7 @@ export default definePluginEntry({
         description,
         parameters: schema,
         async execute(_toolCallId: string, params: unknown) {
-          const r = await runA2App(CLI, toArgv((params ?? {}) as Args));
+          const r = await runA2App(binFor(toArgv((params ?? {}) as Args)), toArgv((params ?? {}) as Args));
           return r.json != null ? jsonResult(r.json) : textResult(r.stdout || r.stderr || `exit ${r.code}`);
         },
       }));
@@ -113,9 +117,9 @@ export default definePluginEntry({
     api.registerCli((program: { command: (name: string) => { description: (d: string) => { action: (fn: (argv: string[]) => Promise<void>) => unknown } } }) => {
       program
         .command("agent-app")
-        .description("Run the a2app CLI (build/evolve/operate an Agent App)")
+        .description("Run the framework CLIs (build/evolve/operate an Agent App)")
         .action(async (argv: string[]) => {
-          const r = await runA2App(CLI, argv);
+          const r = await runA2App(binFor(argv), argv);
           process.stdout.write(r.stdout);
           if (r.stderr) process.stderr.write(r.stderr);
         });

@@ -101,7 +101,7 @@ export function verifySystemHashes(projectDir: string): OwnershipDrift {
   const file = canonPath(projectDir);
   if (file === null) {
     throw new Error(
-      `missing ${CANON_FILE} — run \`a2app toolkit-sync\` to (re)establish the ownership canon`,
+      `missing ${CANON_FILE} — run \`agent-app toolkit-sync\` to (re)establish the ownership canon`,
     );
   }
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;

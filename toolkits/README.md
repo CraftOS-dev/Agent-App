@@ -2,7 +2,7 @@
 
 An agent can start from a blueprint or kit, but **none is required for compliance** — every tier produces the same artifact (app + adapter + framework files). This catalog grows without touching the protocol. A toolkit that vendors files registers them as system-owned in the ownership canon and provides its sync command; it defines its own stack-specific gate steps on top of the framework minimum.
 
-| Toolkit | Tier | What `a2app create --blueprint` produces |
+| Toolkit | Tier | What `agent-app create --blueprint` produces |
 |---|---|---|
 | [blueprint-base/](blueprint-base/) | Tier 1 — fully stack-agnostic | framework-file templates, conventions, conformance checklist; no runtime code — the agent picks the stack |
 | [blueprint-react-node/](blueprint-react-node/) | Tier 2 — Node + browser | Node built-in `http` + JSON-file store + vanilla SPA; embedded `@a2app/adapter-core` middleware |

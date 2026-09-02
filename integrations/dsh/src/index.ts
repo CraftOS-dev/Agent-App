@@ -2,7 +2,7 @@
  * Agent App Framework bundle for deepseek-harness (dsh).
  *
  * A real dsh Cordis plugin: `apply(ctx)` registers agent tools that build and
- * operate Agent Apps through the `a2app` CLI, via
+ * operate Agent Apps through the framework CLIs, via
  * `ctx.tools.register(defineTool(...))`. Each tool shells the real CLI through
  * the shared engine, so nothing here is simulated. `client.ts` is the optional
  * browser half that renders a launched app in an iframe.
@@ -12,10 +12,14 @@
  */
 import type { Context } from "cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { runA2App } from "@a2app/integration-starter";
+import { runA2App, FRAMEWORK_VERBS } from "@a2app/integration-starter";
 
 /** The a2app binary (or JS entry). Override with A2APP_CLI. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
+/** Build/evolve binary. The operate client rejects build verbs by design
+ *  (framework spec 5.1), so route each verb to its owner. */
+const FRAMEWORK_CLI = process.env.AGENT_APP_CLI ?? "agent-app";
+const binFor = (argv: string[]): string => (FRAMEWORK_VERBS.has(argv[0] ?? "") ? FRAMEWORK_CLI : CLI);
 
 type Args = Record<string, unknown>;
 const s = (v: unknown) => String(v);
@@ -33,7 +37,7 @@ function cliTool(name: string, description: string, parameters: Record<string, u
       render: (_args: unknown, value: unknown) => [{ type: "text", text: String(value) }],
     },
     async execute(args: Args) {
-      const r = await runA2App(CLI, toArgv(args ?? {}));
+      const r = await runA2App(binFor(toArgv(args ?? {})), toArgv(args ?? {}));
       // A guard rejection is useful data; return its message rather than throw.
       return r.stdout || r.stderr || `exit ${r.code}`;
     },

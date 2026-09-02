@@ -1,6 +1,6 @@
 # blueprint-base — stack-agnostic
 
-The framework contract with **no runtime code**: what an agent uses to hand-assemble an Agent App in any stack. `a2app create --blueprint blueprint-base` writes the framework files, ready to fill in:
+The framework contract with **no runtime code**: what an agent uses to hand-assemble an Agent App in any stack. `agent-app create --blueprint blueprint-base` writes the framework files, ready to fill in:
 
 ```
 manifest.json          # id, name, versions, authMode, capabilities, and the pipeline launch block

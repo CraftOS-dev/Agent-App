@@ -21,7 +21,7 @@ skill says "per your stack", that is where the stack skill applies.
 
 1. **You were given a project directory** → it is already scaffolded; use it,
    skip scaffolding.
-2. **No project yet** → `a2app create <dir> --blueprint <id>` scaffolds the
+2. **No project yet** → `agent-app create <dir> --blueprint <id>` scaffolds the
    framework files, the adapter, and the ownership canon. Pick `authMode` from
    requirements: `none` (personal local tool — default) or `multi-user`
    (accounts).
@@ -45,7 +45,13 @@ component? Wrap it in your own app code; never edit the locked original.
    implement it exactly and mirror its checklist into `AGENT_APP.md`. If it is
    absent, build from the description; ask the user only when something is
    genuinely blocking and you cannot reasonably decide it yourself.
-2. **Any feature need data from outside the app? Check, then research.** FIRST
+2. **Read the user's cross-app conventions: `agent-app global`.** These are the rules
+   they want in EVERY app they own (design preferences, always-enforced quality
+   rules, ticked optional rules). Apply them as defaults — but this app's own
+   `reference/requirements.md` WINS on any conflict: the global file is the
+   default, not the law. Ticked optional rules are requirements; unticked ones
+   are not.
+3. **Any feature need data from outside the app? Check, then research.** FIRST
    check whether a connected integration already covers the feature — if so, use
    it; nothing to research. Only for THIRD-PARTY public APIs: research like an
    engineer — endpoint, auth, response shape, limits — before writing a line;
@@ -101,9 +107,9 @@ events. (Manifest format and fire API: per your stack.)
 
 ## Finish: gate, launch, then verify
 
-1. **`a2app validate <dir>`** runs the gate (build → migrations-on-a-fresh-db →
+1. **`agent-app validate <dir>`** runs the gate (build → migrations-on-a-fresh-db →
    operations resolve → ownership canon). On errors: read ALL of them, fix ALL of
-   them, run it again. Then `a2app dev <dir>` boots your code in a DEV copy on a
+   them, run it again. Then `agent-app dev <dir>` boots your code in a DEV copy on a
    hidden port with a fresh post-migration DB. Test and read logs THERE; keep
    editing in the real project dir. Never start servers by hand.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success

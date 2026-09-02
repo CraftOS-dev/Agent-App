@@ -1,6 +1,6 @@
 # `a2app` — the framework CLI
 
-The pinned command set of the `a2app` CLI (skills automate; gates guarantee — the pipeline holds even if a skill is ignored):
+The pinned command set of the two framework binaries — `agent-app` (build/evolve/manage) and `a2app` (the A2App operate client) (skills automate; gates guarantee — the pipeline holds even if a skill is ignored):
 
 | Command | Purpose |
 |---|---|
@@ -8,6 +8,9 @@ The pinned command set of the `a2app` CLI (skills automate; gates guarantee — 
 | `validate <dir>` | validation gate + security gate |
 | `toolkit-sync <dir>` / `adapter-sync <dir>` | re-vendor system files / deliver the adapter, re-canonize hashes |
 | `data <dir> <verb> …` | the A2App client (schema, record CRUD, ops, task/event polling) |
+| `serve <dir>` / `stop <dir>` | launch the app via its manifest pipeline as a managed, health-polled background process, and stop it |
+| `list` | every known Agent App with its port and live-probed status (`running`/`stopped`/`missing`); `--json`, `--prune` |
+| `global` | the user's cross-app conventions (`GLOBAL_AGENT_APP.md`), seeded on first use |
 | `walk-verify <dir>` | run the walk-verify skill against the running app |
 | `dev` / `promote` / `backup` / `restore` | safe-evolve environments: dev copy with fresh migration-replayed DB → gate + verify in dev → pre-promote backup → promote |
 

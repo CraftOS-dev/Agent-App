@@ -12,6 +12,8 @@
  }
  ],
  "lifecycle": {
- "dataDir": "data"
+ "dataDir": "data",
+ "dev": "node scripts/dev-prepare.mjs",
+ "promote": "node scripts/promote-apply.mjs"
  }
 }

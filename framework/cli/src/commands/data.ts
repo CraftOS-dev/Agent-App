@@ -8,8 +8,8 @@
  * describe/records surface — anything this CLI does, any agent can. Values are
  * coerced client-side (dates, labels); the app validates.
  */
-import { fetchSchema, coerceBody, renderSchema, suggest, droppedFields } from "@a2app/sdk";
-import { buildBody, flag, positionals } from "../lib/args.js";
+import { fetchSchema, coerceBody, renderSchema, suggest, droppedFields, nonReadableFields } from "@a2app/sdk";
+import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js";
 import { clientFor, loadProject, UsageError } from "../lib/project.js";
 import { log } from "../lib/log.js";
 
@@ -38,7 +38,9 @@ export async function run(args: string[]): Promise<number> {
   }
 
   const idempotencyKey = flag(args, "idempotency-key");
-  let body = buildBody(args);
+  // A record body reserves only --json / --idempotency-key; every other flag is a
+  // field, so common field names like `status` are settable from the CLI.
+  let body = buildBody(args, BODY_CONTROL_FLAGS);
 
   if (body !== undefined && (verb === "create" || verb === "update")) {
     const coerced = await coerceBody(client, schema, collection, body);
@@ -101,7 +103,10 @@ export async function run(args: string[]): Promise<number> {
   if (body !== undefined && (verb === "create" || verb === "update")) {
     const saved = res.json as Record<string, unknown> | null;
     if (saved !== null) {
-      const dropped = droppedFields(body, saved);
+      // Exempt write-only / non-readable fields: the backend legitimately never
+      // echoes them, so they must not be flagged "not stored" (e.g. passwords).
+      const exempt = nonReadableFields(schema.get(collection), body);
+      const dropped = droppedFields(body, saved, exempt);
       if (dropped.length > 0) {
         log.error(
           `WRITE INCOMPLETE — the app accepted the request but did not store: ${dropped.join(", ")}. Do NOT report this as done.`,

@@ -51,6 +51,7 @@ export const ERROR_CODES = {
   INVALID_NUMBER: "invalid_number",
   INVALID_BOOLEAN: "invalid_boolean",
   INVALID_ENUM: "invalid_enum",
+  MISSING_REQUIRED: "missing_required",
   NOT_STORED: "not_stored",
   DUPLICATE_REQUEST: "duplicate_request",
   APPROVAL_REQUIRED: "approval_required",
@@ -102,6 +103,13 @@ export interface Divergence {
 export interface ValidateOptions {
   /** extra keys accepted without being fields (e.g. 'id', auth signup fields) */
   allow?: Record<string, unknown>;
+  /**
+   * Enforce required-field presence. Set ONLY on a create (POST): a required
+   * field that is absent or blank is a `missing_required` violation. Left off
+   * for update/patch, where a partial write is legitimate and a blank value
+   * clears a field — enforcing required there would break both.
+   */
+  requireRequired?: boolean;
 }
 
 /* ------------------------------------------------------------------ helpers */
@@ -262,6 +270,20 @@ export function validate(
       }
     }
   }
+
+  // Required-field guard — create only. A backend silently accepts a create that
+  // omits a required column and stores a half-built row; the agent then reports
+  // success. Catch it at the guard so a missing required field is a rejection,
+  // not a corrupt record. Skipped on update/patch (partial writes are legitimate).
+  if (opts.requireRequired) {
+    for (const f of fields) {
+      if (!f.required || f.readOnly) continue;
+      const provided = Object.prototype.hasOwnProperty.call(body, f.name);
+      if (!provided || isBlank(body[f.name])) {
+        out.push(violation(ERROR_CODES.MISSING_REQUIRED, f.name, "a non-blank value (required field)", provided ? body[f.name] : undefined));
+      }
+    }
+  }
   return out;
 }
 
@@ -282,7 +304,10 @@ export function divergences(
   const out: Divergence[] = [];
   for (const key of Object.keys(body)) {
     const field = map[key];
-    if (!field || field.readOnly) continue;
+    // A write-only field (e.g. a password) is accepted on write but deliberately
+    // never returned by the backend, so "not in the read-back" is expected, not a
+    // divergence — exempt it or every password write would read as incomplete.
+    if (!field || field.readOnly || field.writeOnly) continue;
     const requested = body[key];
     if (isBlank(requested)) continue;
     let stored: unknown;

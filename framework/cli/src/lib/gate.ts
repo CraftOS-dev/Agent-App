@@ -48,26 +48,11 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
     }
   });
 
-  if (!opts.skipBuild) {
-    runStep(errors, "build (manifest pipeline)", () => {
-      if (manifest.pipeline.install) runShell(manifest.pipeline.install, projectDir);
-      runShell(manifest.pipeline.build, projectDir);
-    });
-  }
-
-  // Toolkit-defined steps: migrations replay, known stack footguns, deep
-  // operation resolution — whatever this stack needs.
-  const tk = projectToolkit(projectDir);
-  if (tk?.manifest.gate) {
-    for (const step of tk.manifest.gate) {
-      runStep(errors, step.name, () => {
-        runShell(step.run, projectDir);
-      });
-    }
-  }
-
-  // Ownership canon: the validation gate's system-files check and the one
-  // required security-gate check in v1. Re-hash every entry.
+  // Ownership canon FIRST — the one v1-required security-gate check. It must run
+  // BEFORE any manifest/toolkit shell executes: `manifest.json` is a system-owned,
+  // canon-covered file, so if it was tampered to inject a malicious build/start
+  // string, the canon check has to fail the gate before that shell ever runs. A
+  // security check that runs after the code it is meant to gate protects nothing.
   runStep(errors, "ownership (system files unmodified)", () => {
     if (!existsSync(join(projectDir, ".a2app", "system-hashes.json")) &&
         !existsSync(join(projectDir, ".lui", "system-hashes.json"))) {
@@ -88,6 +73,32 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
       );
     }
   });
+
+  if (!opts.skipBuild) {
+    runStep(errors, "build (manifest pipeline)", () => {
+      if (manifest.pipeline.install) runShell(manifest.pipeline.install, projectDir);
+      runShell(manifest.pipeline.build, projectDir);
+    });
+  }
+
+  // Toolkit-defined steps: migrations replay, known stack footguns, deep
+  // operation resolution — whatever this stack needs.
+  const tk = projectToolkit(projectDir);
+  if (tk?.manifest.gate && tk.manifest.gate.length > 0) {
+    for (const step of tk.manifest.gate) {
+      runStep(errors, step.name, () => {
+        runShell(step.run, projectDir);
+      });
+    }
+  } else {
+    // No toolkit gate: the stack-specific checks the spec lists (migration replay
+    // on a fresh DB, deep operation resolution) cannot run here. Surface that
+    // rather than reporting a green gate that silently skipped them.
+    log.warn(
+      "no toolkit gate steps — migration-replay and deep operation-resolution were not checked " +
+        "(hand-built or toolkit-less app). Declare gate steps in a2app.toolkit.json to cover them.",
+    );
+  }
 
   return errors;
 }

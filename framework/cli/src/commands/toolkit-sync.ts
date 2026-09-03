@@ -3,15 +3,17 @@
  * the ownership canon. The single writer of the canon; it records exactly the
  * files it just wrote.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
+import { positionals } from "../lib/args.js";
+import { writeFileAtomic } from "../lib/home.js";
 import { loadProject, UsageError } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
-  const dir = args.find((a) => !a.startsWith("--"));
+  const dir = positionals(args)[0];
   if (dir === undefined) throw new UsageError("Usage: agent-app toolkit-sync <dir>");
   const project = loadProject(dir);
   const tk = projectToolkit(project.dir);
@@ -26,7 +28,7 @@ export async function run(args: string[]): Promise<number> {
   const manifestPath = join(project.dir, "manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
   manifest.adapterVersion = version;
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
   writeSystemHashes(project.dir, tk.manifest.systemPaths);
   log.ok(`toolkit-sync: ${written.length} system file(s) vendored, adapter ${version}, canon recorded`);
   for (const f of written) log.raw(`  ${f}`);

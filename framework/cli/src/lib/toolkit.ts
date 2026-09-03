@@ -24,6 +24,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertInside } from "./fsx.js";
 
 export interface GateStep {
   name: string;
@@ -115,9 +116,12 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
   const templateRoot = tk.manifest.template ? join(tk.source, tk.manifest.template) : tk.source;
   const written: string[] = [];
   for (const rel of paths) {
-    const src = join(templateRoot, rel);
+    // Contain both ends: a toolkit's declared path list is untrusted (especially
+    // on import), so it must neither read outside the template nor write outside
+    // the project. assertInside throws on a `../` or absolute escape.
+    const src = assertInside(templateRoot, rel, "template path");
     if (!existsSync(src)) continue;
-    const dest = join(projectDir, rel);
+    const dest = assertInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
     cpSync(src, dest, { recursive: true });
     written.push(rel);

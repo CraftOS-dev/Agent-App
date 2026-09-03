@@ -100,14 +100,35 @@ export function readRegistry(): Registry {
     return { version: REGISTRY_VERSION, apps: parsed.apps.filter(isEntry) };
   } catch (err) {
     const kept = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-    try {
-      renameSync(file, kept);
+    // Retry the set-aside on Windows sharing errors, the same way the read path
+    // does: a transient EPERM/EBUSY must not cost the user their corrupt file,
+    // which is the only copy of their index and may be hand-recoverable.
+    let setAside = false;
+    let renameErr: unknown = null;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try {
+        renameSync(file, kept);
+        setAside = true;
+        break;
+      } catch (e) {
+        renameErr = e;
+        const code = (e as NodeJS.ErrnoException).code ?? "";
+        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 + attempt * 10);
+      }
+    }
+    if (setAside) {
       log.error(
         `the app registry was unreadable (${(err as Error).message}) — kept it at ${kept} and started a new one. ` +
           `Apps are unaffected: re-register one with \`agent-app serve <dir>\`.`,
       );
-    } catch {
-      log.error(`the app registry at ${file} is unreadable (${(err as Error).message}) and could not be set aside.`);
+    } else {
+      // Could NOT set it aside — do NOT overwrite the corrupt file. Surface the
+      // fault so the user's only index copy is preserved for manual recovery.
+      throw new Error(
+        `the app registry at ${file} is unreadable (${(err as Error).message}) and could not be set aside ` +
+          `(${(renameErr as Error)?.message ?? "unknown"}). Left it untouched — move or repair it, then retry.`,
+      );
     }
     return { version: REGISTRY_VERSION, apps: [] };
   }
@@ -300,11 +321,26 @@ export async function prune(): Promise<RegistryEntry[]> {
 const PORT_FLOOR = 8090;
 const PORT_CEILING = 8999;
 
-/** Free = claimed by no registered app and nothing listening. */
-async function firstFreePort(reg: Registry, preferred?: number): Promise<number> {
-  const claimed = new Set(reg.apps.map((a) => a.port).filter((p): p is number => typeof p === "number"));
+function validPort(p: number | undefined): p is number {
+  return typeof p === "number" && Number.isInteger(p) && p >= 1 && p <= 65535;
+}
+
+/**
+ * Probe for a port that no registered app claims and nothing is listening on.
+ * This performs network I/O (a TCP connect per candidate) and so runs OUTSIDE
+ * the home lock: holding the lock across hundreds of 300ms probes would serialize
+ * every registry mutation on the machine and make live locks look stale. The
+ * caller re-checks the winning port under the lock before claiming it.
+ */
+async function probeFreePort(reg: Registry, ownPath: string, preferred?: number): Promise<number> {
+  const claimed = new Set(
+    reg.apps
+      .filter((a) => resolve(a.path) !== ownPath)
+      .map((a) => a.port)
+      .filter((p): p is number => validPort(p)),
+  );
   const candidates: number[] = [];
-  if (preferred !== undefined) candidates.push(preferred);
+  if (validPort(preferred)) candidates.push(preferred);
   for (let p = PORT_FLOOR; p <= PORT_CEILING; p++) candidates.push(p);
   for (const port of candidates) {
     if (claimed.has(port)) continue;
@@ -315,20 +351,29 @@ async function firstFreePort(reg: Registry, preferred?: number): Promise<number>
 }
 
 /**
- * Atomically pick a free port AND claim it by writing the entry, in one locked
- * critical section. Choosing and claiming must not be separate steps: between
- * them, another process would pick the very same port.
+ * Pick a free port and claim it by writing the entry. The pick (network probing)
+ * happens outside the lock; the claim (an in-memory registry check + write)
+ * happens inside it. If another process claimed the probed port in the gap, the
+ * locked check catches it and we re-probe — so choosing and claiming are still
+ * effectively atomic (no two apps get the same port) without holding the lock
+ * across network I/O.
  */
 export async function reserveApp(entry: RegistryEntry, preferred?: number): Promise<number> {
   const path = resolve(entry.path);
-  return withHomeLock(async () => {
-    const reg = readRegistry();
-    const port = await firstFreePort(reg, preferred);
-    const at = reg.apps.findIndex((a) => resolve(a.path) === path);
-    const merged: RegistryEntry = { ...(at >= 0 ? reg.apps[at] : {}), ...entry, path, port };
-    if (at >= 0) reg.apps[at] = merged;
-    else reg.apps.push(merged);
-    writeRegistry(reg);
-    return port;
-  });
+  for (let round = 0; round < 64; round++) {
+    const port = await probeFreePort(readRegistry(), path, preferred);
+    const claimed = await withHomeLock(() => {
+      const reg = readRegistry();
+      const takenByOther = reg.apps.some((a) => resolve(a.path) !== path && a.port === port);
+      if (takenByOther) return false; // lost the race between probe and lock — re-probe
+      const at = reg.apps.findIndex((a) => resolve(a.path) === path);
+      const merged: RegistryEntry = { ...(at >= 0 ? reg.apps[at] : {}), ...entry, path, port };
+      if (at >= 0) reg.apps[at] = merged;
+      else reg.apps.push(merged);
+      writeRegistry(reg);
+      return true;
+    });
+    if (claimed) return port;
+  }
+  throw new Error("could not reserve a free port after repeated contention — retry `agent-app scaffold`");
 }

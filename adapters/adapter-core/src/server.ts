@@ -17,7 +17,7 @@ import {
   type Violation,
 } from "@a2app/rules";
 import { approvalKey } from "./canon.js";
-import { InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
+import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import {
   OperationError,
@@ -54,7 +54,15 @@ export interface A2App {
 
 export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
   const now = config.now ?? (() => new Date());
-  const store: StateStore = config.store ?? new InMemoryStateStore(binding.appId, () => now().getTime());
+  // Durability by default: an explicit store wins; otherwise a supplied storePath
+  // gives a restart-durable FileStateStore (the conforming posture — an in-memory
+  // idempotency table is lost on the very restart a retry rides in on); only with
+  // neither do we fall back to the fast in-memory store (tests, ephemeral apps).
+  const store: StateStore =
+    config.store ??
+    (config.storePath
+      ? new FileStateStore(config.storePath, binding.appId, () => now().getTime())
+      : new InMemoryStateStore(binding.appId, () => now().getTime()));
   const operations = config.operations ?? [];
   const opByName = new Map(operations.map((o) => [o.name, o]));
   const eventTypes = knownEventTypes(config.events);
@@ -106,6 +114,10 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     const caller = req.headers["x-a2app-token"] ?? req.headers["x-lui-token"] ?? (req.headers["origin"] ? "origin:" + req.headers["origin"] : "anon");
     const decision = limiter.check(caller, cls);
     if (decision.allowed) return null;
+    // A rate-limit refusal happens before credential resolution, but it must stay
+    // traceable — record the caller key (token/origin/anon) and route class in the
+    // bounded audit ring so a flood is visible after the fact.
+    writeAudit({ credentialId: caller, agentName: null, principal: null }, `rate:${cls}`, null, "rejected", ERROR_CODES.RATE_LIMITED);
     return err(429, ERROR_CODES.RATE_LIMITED, `Rate limit exceeded (${decision.limit} per window). Slow down and retry.`, {
       retryAfterSeconds: decision.retryAfterSeconds,
     });
@@ -260,7 +272,13 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     return { ctx: { credentialId: grant.credentialId, agentName: grant.agentName, principal: grant.principal } };
   }
 
-  function writeAudit(ctx: CallContext | null, target: string, recordId: string | null, outcome: "ok" | "rejected", code?: string): void {
+  function writeAudit(
+    ctx: { credentialId: string; agentName: string | null; principal: string | null } | null,
+    target: string,
+    recordId: string | null,
+    outcome: "ok" | "rejected",
+    code?: string,
+  ): void {
     const entry: AuditEntry = {
       at: now().toISOString(),
       credentialId: ctx?.credentialId ?? null,
@@ -329,21 +347,30 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
 
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    // Idempotency: a replayed key returns 409 naming the record.
+    // Idempotency: a replayed key returns 409 naming the record. Applied to both
+    // creates (POST) and updates (PATCH) — a retried non-idempotent PATCH would
+    // otherwise re-apply, so an in-flight retry after a lost response must dedup.
+    // Namespaced by record on PATCH so a key is scoped to the row it targeted.
     const idemKey = req.headers["idempotency-key"];
-    if (idemKey && req.method === "POST") {
-      const prior = store.idempotencyGet(entity, idemKey);
+    // POST keys are scoped to the entity; PATCH keys to the specific row, so a
+    // create key and an update key can never collide. A PATCH without a record id
+    // is malformed (handled below) — don't run idempotency for it.
+    const idemActive = !!idemKey && (req.method === "POST" || (req.method === "PATCH" && !!recordId));
+    const idemScope = req.method === "PATCH" ? `${entity}#${recordId}` : entity;
+    if (idemActive) {
+      const prior = store.idempotencyGet(idemScope, idemKey!);
       if (prior) {
-        return err(409, ERROR_CODES.DUPLICATE_REQUEST, "This idempotency key already produced a record.", {
+        return err(409, ERROR_CODES.DUPLICATE_REQUEST, "This idempotency key was already applied.", {
           id: prior.recordId,
         });
       }
     }
 
-    // Guard the RAW body before any backend coercion.
+    // Guard the RAW body before any backend coercion. Required-field presence is
+    // enforced on CREATE only (POST) — a PATCH is a legitimate partial write.
     const allow: Record<string, unknown> = {};
     for (const k of def.writeAllow ?? []) allow[k] = true;
-    const violations = validate(def.fields, body, { allow });
+    const violations = validate(def.fields, body, { allow, requireRequired: req.method === "POST" });
     if (violations.length) {
       writeAudit(ctx, `data:${entity}`, recordId, "rejected", violations[0]!.code);
       return guardEnvelope(violations, serverNow);
@@ -376,7 +403,7 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
       };
     }
 
-    if (idemKey && req.method === "POST") store.idempotencyPut(entity, idemKey, stored.id);
+    if (idemActive) store.idempotencyPut(idemScope, idemKey!, stored.id);
     writeAudit(ctx, `data:${entity}`, stored.id, "ok");
     return ok(stored, 200);
   }
@@ -392,6 +419,22 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     if ("reply" in authz) return authz.reply;
     const ctx = authz.ctx;
     const args = (req.body ?? {}) as Record<string, unknown>;
+
+    // Idempotency: a non-idempotent operation carrying an Idempotency-Key must not
+    // double-execute on a retry. A replayed key is a 409 (reject-duplicate), same
+    // as records. Namespaced under `op:<name>` so keys never collide with record
+    // keys. Checked before approval/run; the key is only recorded after a success,
+    // so a first call that 428s (approval) or throws leaves the retry free to run.
+    const idemKey = req.headers["idempotency-key"];
+    const idemScope = `op:${name}`;
+    if (idemKey) {
+      const prior = store.idempotencyGet(idemScope, idemKey);
+      if (prior) {
+        return err(409, ERROR_CODES.DUPLICATE_REQUEST, "This idempotency key already ran this operation.", {
+          operation: name,
+        });
+      }
+    }
 
     // Approval: a destructive op needs a content-addressed key.
     if (decl.destructive) {
@@ -415,6 +458,7 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     }
     try {
       const result = await binding.runOperation(name, args, ctx);
+      if (idemKey) store.idempotencyPut(idemScope, idemKey, name);
       writeAudit(ctx, `op:${name}`, null, "ok");
       return ok({ a2app: true, ok: true, operation: name, result });
     } catch (e) {
@@ -451,6 +495,7 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     if (limited) return limited;
     const authz = authorize(req, { scope: null, isWrite: req.method !== "GET" });
     if ("reply" in authz) return authz.reply;
+    const ctx = authz.ctx;
 
     store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES);
 
@@ -476,12 +521,26 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     switch (action) {
       case "claim": {
         if (task.status !== "submitted") {
+          writeAudit(ctx, `task:claim`, taskId, "rejected", ERROR_CODES.TASK_NOT_CLAIMABLE);
           return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} is ${task.status}, not claimable.`);
         }
-        const ctx = authz.ctx;
+        // Honor an explicit principal in the body ONLY when it names the caller's
+        // own authenticated credential (the SDK sends `{agent: <credentialId>}`).
+        // A body naming a DIFFERENT credential is a claim-as-someone-else attempt —
+        // refuse it rather than silently recording the true caller under a false
+        // affordance. Absent/blank means "claim as me", the common path.
+        const requested = typeof body.agent === "string" && body.agent ? body.agent : null;
+        if (requested && requested !== ctx.credentialId && requested !== ctx.agentName) {
+          writeAudit(ctx, `task:claim`, taskId, "rejected", "principal_mismatch");
+          return err(403, "principal_mismatch", `Cannot claim task ${taskId} as "${requested}": the credential presented is ${ctx.credentialId}.`, {
+            requested,
+            actual: ctx.credentialId,
+          });
+        }
         task.status = "working";
         task.claim = { credentialId: ctx.credentialId, principal: ctx.principal, claimedAt: now().toISOString() };
         store.saveTask(task);
+        writeAudit(ctx, `task:claim`, taskId, "ok");
         return ok(taskWire(task));
       }
       case "progress": {
@@ -498,6 +557,7 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
           task.status = "working";
         }
         store.saveTask(task);
+        writeAudit(ctx, `task:progress`, taskId, "ok");
         return ok(taskWire(task));
       }
       case "complete": {
@@ -513,11 +573,13 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
           return err(400, "usage", 'complete requires status "completed" or "failed".');
         }
         store.saveTask(task);
+        writeAudit(ctx, `task:complete`, taskId, "ok", task.status === "failed" ? "failed" : undefined);
         return ok(taskWire(task));
       }
       case "cancel": {
         task.status = "canceled";
         store.saveTask(task);
+        writeAudit(ctx, `task:cancel`, taskId, "ok");
         return ok(taskWire(task));
       }
       default:

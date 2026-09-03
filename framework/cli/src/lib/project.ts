@@ -117,3 +117,17 @@ export class UsageError extends Error {
     this.name = "UsageError";
   }
 }
+
+/**
+ * An environment/filesystem fault (unwritable home, permission denied, disk
+ * full) — distinct from a gate/guard rejection. It still maps to exit 1, but is
+ * surfaced with a framed, actionable message rather than a bare errno, so an
+ * operator can tell "fix your environment and retry" from "your request was
+ * validly rejected".
+ */
+export class EnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EnvError";
+  }
+}

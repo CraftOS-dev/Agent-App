@@ -11,9 +11,40 @@
  *     a retry arrives, so an in-memory idempotency store is non-conforming).
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { platform } from "node:process";
 import type { AuditEntry, Grant, EventTypeDecl } from "./types.js";
+
+const IS_WINDOWS = platform === "win32";
+
+/** Block the thread for `ms` — only used for the rare rename retry below, so the
+ *  brief stall is acceptable and keeps the durable write fully synchronous. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Rename `from` over `to`, retrying the Windows-transient failures. On win32 a
+ * virus scanner or the indexer briefly locks a freshly-created temp file, so a
+ * rename-over-existing intermittently throws EPERM/EACCES/EBUSY — fatal for a
+ * write-temp-then-rename durable store unless retried. POSIX rename is atomic and
+ * needs no retry, so this only loops for those codes.
+ */
+function durableRename(from: string, to: string): void {
+  const transient = new Set(["EPERM", "EACCES", "EBUSY"]);
+  const maxAttempts = 10;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (!IS_WINDOWS || !transient.has(code) || attempt >= maxAttempts) throw e;
+      sleepSync(Math.min(50, attempt * 5)); // brief, increasing backoff
+    }
+  }
+}
 
 export interface IdempotencyRecord {
   recordId: string;
@@ -79,6 +110,12 @@ export interface StateStore {
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // at least 24h
 const APPROVAL_TTL_MS = 10 * 60 * 1000; // keys expire
+/** Bound the retained tables so memory and the on-disk snapshot cannot grow
+ *  without limit (an event log is otherwise append-forever). Both are rings:
+ *  oldest rows fall off the back. `seq` stays monotonic so event cursors keep
+ *  working across a prune. */
+const EVENT_RETENTION = 5000;
+const AUDIT_RETENTION = 5000;
 
 function id(prefix: string): string {
   return prefix + "_" + randomBytes(8).toString("hex");
@@ -212,6 +249,7 @@ export class InMemoryStateStore implements StateStore {
       createdAt: new Date(this.clock()).toISOString(),
     };
     this.events.push(ev);
+    if (this.events.length > EVENT_RETENTION) this.events.splice(0, this.events.length - EVENT_RETENTION);
     this.onChange();
     return ev;
   }
@@ -296,7 +334,7 @@ export class InMemoryStateStore implements StateStore {
 
   appendAudit(entry: AuditEntry): void {
     this.audit.push(entry);
-    if (this.audit.length > 5000) this.audit.shift();
+    if (this.audit.length > AUDIT_RETENTION) this.audit.splice(0, this.audit.length - AUDIT_RETENTION);
     this.onChange();
   }
   auditTail(n: number): AuditEntry[] {
@@ -331,10 +369,38 @@ export class FileStateStore extends InMemoryStateStore {
 
   protected override onChange(): void {
     if (!this.loaded) return; // don't flush mid-hydrate
-    mkdirSync(dirname(this.path), { recursive: true });
+    const dir = dirname(this.path);
+    mkdirSync(dir, { recursive: true });
     const tmp = this.path + ".tmp";
-    writeFileSync(tmp, JSON.stringify(this.serialize()));
-    renameSync(tmp, this.path);
+    const payload = JSON.stringify(this.serialize());
+    // Atomic AND durable: write the temp file, fsync it so the bytes are on the
+    // platter (not just in the page cache), then rename over the target. Without
+    // the fsync a crash right after rename can leave a zero-length or truncated
+    // snapshot — and a restart is exactly when a retried write arrives, so a lost
+    // idempotency table is a correctness bug, not just a performance one.
+    const fd = openSync(tmp, "w");
+    try {
+      writeSync(fd, payload);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    durableRename(tmp, this.path);
+    // Best-effort directory fsync so the rename itself is durable on crash.
+    // Windows has no directory-fsync (and opening a directory handle can lock
+    // renames within it), so this is POSIX-only; the file fsync above still holds.
+    if (!IS_WINDOWS) {
+      try {
+        const dfd = openSync(dir, "r");
+        try {
+          fsyncSync(dfd);
+        } finally {
+          closeSync(dfd);
+        }
+      } catch {
+        /* directory fsync unsupported here — non-fatal */
+      }
+    }
   }
 }
 

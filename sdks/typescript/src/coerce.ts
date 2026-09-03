@@ -3,7 +3,7 @@
  * schema rendering and a cheap did-you-mean. Coercion is client convenience only
  * — the app's guard is the authority and rejects anything wrong.
  */
-import type { A2AppClient } from "./client.js";
+import { A2AppUnreachableError, type A2AppClient } from "./client.js";
 import type { Describe, DescribeEntity, DescribeField } from "./types.js";
 
 export type FieldSchema = DescribeField & { name: string };
@@ -111,7 +111,9 @@ export function parseDate(value: string, now = new Date()): string | null {
   const shift = (days: number): string => {
     const d = new Date(now);
     d.setDate(d.getDate() + days);
-    return `${localYmd(d)} 00:00:00.000Z`;
+    // ISO 8601 uses a 'T' between date and time; a space is a common-but-illegal
+    // variant that strict backends (and JSON Schema date-time) reject.
+    return `${localYmd(d)}T00:00:00.000Z`;
   };
   if (s === "today" || s === "now") return shift(0);
   if (s === "tomorrow") return shift(1);
@@ -137,6 +139,14 @@ function isDayKey(field: FieldSchema): boolean {
   return field.type === "string" && field.format === "YYYY-MM-DD";
 }
 
+/** Escape a value for interpolation into a `field="value"` filter predicate.
+ *  Backslash MUST be escaped first, then the quote — otherwise a value ending in
+ *  a backslash (`foo\`) escapes the closing quote and breaks (or injects into)
+ *  the predicate. */
+export function escapeFilterValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 /**
  * "To Do" → a record id via a filtered read on the label field. Ambiguity is an
  * error listing the candidates, never a guess: no shipped relation label carries
@@ -155,13 +165,17 @@ export async function resolveRef(
   try {
     const direct = await client.getRecord(targetName, value);
     if (direct.ok) return { id: value };
-  } catch {
-    /* fall through to label resolution */
+  } catch (err) {
+    // A genuinely unreachable app must surface, not be mistaken for "not an id" —
+    // otherwise we fall through to a label lookup that will also fail, and the
+    // caller sees a wrong "no such label" instead of "app is down".
+    if (err instanceof A2AppUnreachableError) throw err;
+    /* otherwise fall through to label resolution */
   }
   const target = schema.get(targetName);
   if (target === undefined || target.label === null) return { id: value };
   const label = target.label;
-  const filter = `${label}="${value.replace(/"/g, '\\"')}"`;
+  const filter = `${label}="${escapeFilterValue(value)}"`;
   const res = await client.listRecords(targetName, { filter, perPage: 10 });
   if (!res.ok) return { id: value };
   const items = ((res.json as { items?: Record<string, unknown>[] })?.items) ?? [];
@@ -198,7 +212,28 @@ export async function coerceBody(
   const errors: string[] = [];
   for (const [key, value] of Object.entries(body)) {
     const field = byName.get(key);
-    if (field === undefined || typeof value !== "string" || value === "") continue;
+    if (field === undefined) continue;
+
+    // list<ref>: an array (or single) of labels/ids — resolve each element the
+    // same way a scalar ref is resolved, so a multi-relation write accepts labels.
+    if (field.type === "list<ref>" && field.entity !== undefined) {
+      const elements = Array.isArray(value) ? value : value === "" ? [] : [value];
+      const resolvedIds: unknown[] = [];
+      for (const el of elements) {
+        if (typeof el !== "string" || el === "") {
+          resolvedIds.push(el);
+          continue;
+        }
+        const resolved = await resolveRef(client, schema, field.entity, el);
+        if (resolved.error !== undefined) errors.push(`--${key}: ${resolved.error}`);
+        else if (resolved.id !== undefined) resolvedIds.push(resolved.id);
+        else resolvedIds.push(el);
+      }
+      if (Array.isArray(value)) out[key] = resolvedIds;
+      continue;
+    }
+
+    if (typeof value !== "string" || value === "") continue;
     if (field.type === "datetime" || isDayKey(field)) {
       const parsed = parseDate(value);
       if (parsed === null) {
@@ -217,14 +252,42 @@ export async function coerceBody(
   return { body: out, errors };
 }
 
-/** Fallback read-back for apps whose adapter predates the in-app write guard:
- *  which non-blank requested values are missing in what came back? */
-export function droppedFields(sent: Record<string, unknown>, saved: Record<string, unknown>): string[] {
+/**
+ * Fallback read-back for apps whose adapter predates the in-app write guard:
+ * which non-blank requested values are missing in what came back?
+ *
+ * `exempt` names fields that are legitimately never echoed — a write-only field
+ * (e.g. a password) or any field the describe omits from its readable set. A
+ * write-only field is SENT by the client and, by design, NEVER returned by the
+ * backend, so without this exemption every password write would be flagged
+ * "WRITE INCOMPLETE". Pass the entity's write-only / non-readable field names.
+ */
+export function droppedFields(
+  sent: Record<string, unknown>,
+  saved: Record<string, unknown>,
+  exempt?: Iterable<string>,
+): string[] {
+  const skip = exempt ? new Set(exempt) : null;
   const out: string[] = [];
   for (const [key, value] of Object.entries(sent)) {
     if (value === "" || value === null || value === undefined) continue;
+    if (skip?.has(key)) continue;
     const stored = saved[key];
     if (stored === undefined || stored === "" || stored === null) out.push(key);
+  }
+  return out;
+}
+
+/** The set of a described entity's write-only / non-readable field names — the
+ *  fields a read-back must NOT expect to see. A field the describe does not list
+ *  as readable (write-only fields are omitted from describe) is exempt from the
+ *  {@link droppedFields} backstop. */
+export function nonReadableFields(entity: EntitySchema | undefined, sent: Record<string, unknown>): Set<string> {
+  const readable = new Set((entity?.fields ?? []).map((f) => f.name));
+  const out = new Set<string>();
+  if (entity === undefined) return out;
+  for (const key of Object.keys(sent)) {
+    if (!readable.has(key)) out.add(key);
   }
   return out;
 }

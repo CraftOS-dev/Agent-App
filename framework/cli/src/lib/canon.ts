@@ -13,13 +13,14 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { assertInside } from "./fsx.js";
 
 export const CANON_DIR = ".a2app";
 export const CANON_FILE = join(CANON_DIR, "system-hashes.json");
@@ -46,10 +47,23 @@ function canonPath(projectDir: string): string | null {
  */
 export function computeSystemHashes(projectDir: string, systemPaths: string[]): Record<string, string> {
   const hashes: Record<string, string> = {};
-  const stack = systemPaths.map((p) => join(projectDir, p)).filter((p) => existsSync(p));
+  // Contain every declared path: a toolkit (and any imported app's canon) is
+  // untrusted input, so a `../../` or absolute entry must never make the canon
+  // read or record a file outside the project. assertInside throws on escape.
+  const stack = systemPaths
+    .map((p) => assertInside(projectDir, p, "system path"))
+    .filter((p) => existsSync(p));
+  const seen = new Set<string>();
   while (stack.length > 0) {
     const current = stack.pop() as string;
-    if (statSync(current).isDirectory()) {
+    if (seen.has(current)) continue; // cycle guard (symlink loops)
+    seen.add(current);
+    // lstat, not stat: never follow a symlink. A system-owned file is a real
+    // file; a symlink in a system path is skipped rather than followed out of
+    // the tree (or into a cycle).
+    const st = lstatSync(current);
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
       for (const name of readdirSync(current)) stack.push(join(current, name));
     } else {
       hashes[toPosix(relative(projectDir, current))] = sha256(current);

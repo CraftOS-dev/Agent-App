@@ -20,7 +20,7 @@
  * "Unknown command".
  */
 import { A2AppUnreachableError } from "@a2app/sdk";
-import { UsageError } from "./lib/project.js";
+import { EnvError, UsageError } from "./lib/project.js";
 import { ValuelessFlagError } from "./lib/args.js";
 import { log } from "./lib/log.js";
 
@@ -37,6 +37,7 @@ interface CommandMeta {
 const COMMANDS: Record<string, CommandMeta> = {
   // agent-app — the framework: build, evolve, and manage Agent Apps.
   scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app" },
+  import: { summary: "Import an existing app: fresh identity + port, strip credentials, re-vendor from a trusted toolkit", surface: "agent-app" },
   validate: { summary: "Run the validation + security gate", surface: "agent-app" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app" },
@@ -115,6 +116,10 @@ export function dispatch(surface: Surface): void {
       } else if (err instanceof A2AppUnreachableError) {
         log.error(err.message);
         process.exitCode = 3;
+      } else if (err instanceof EnvError) {
+        // Environment fault, not a gate rejection: framed and actionable.
+        log.error(err.message);
+        process.exitCode = 1;
       } else {
         log.error(err instanceof Error ? err.message : String(err));
         process.exitCode = 1;

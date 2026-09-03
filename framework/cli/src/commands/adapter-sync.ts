@@ -3,15 +3,17 @@
  * Runs on every launch: it is the only path that reaches apps a user already
  * has. Idempotent, non-fatal, never touches app-authored code.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonPaths, writeSystemHashes } from "../lib/canon.js";
+import { canonPaths, fileMatchesCanon, writeSystemHashes } from "../lib/canon.js";
+import { positionals } from "../lib/args.js";
+import { writeFileAtomic } from "../lib/home.js";
 import { loadProject, UsageError } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
 export async function run(args: string[]): Promise<number> {
-  const dir = args.find((a) => !a.startsWith("--"));
+  const dir = positionals(args)[0];
   if (dir === undefined) throw new UsageError("Usage: agent-app adapter-sync <dir>");
   const project = loadProject(dir);
   const tk = projectToolkit(project.dir);
@@ -20,6 +22,14 @@ export async function run(args: string[]): Promise<number> {
     return 0; // non-fatal
   }
   const adapterPaths = tk.manifest.adapterPaths ?? tk.manifest.systemPaths;
+  // Warn before overwriting an adapter file that drifted from the canon: it is a
+  // system-owned file, so a local edit is unexpected — but surfacing it (rather
+  // than silently clobbering) means a legitimate change is never lost quietly.
+  for (const rel of adapterPaths) {
+    if (existsSync(join(project.dir, rel)) && fileMatchesCanon(project.dir, rel) === false) {
+      log.warn(`overwriting locally-modified system file ${rel} with the toolkit's version`);
+    }
+  }
   const written = vendorPaths(tk, project.dir, adapterPaths);
   if (written.length === 0) {
     log.warn("no adapter files found in the toolkit — nothing to sync");
@@ -30,7 +40,7 @@ export async function run(args: string[]): Promise<number> {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
   const previous = manifest.adapterVersion ?? "none";
   manifest.adapterVersion = version;
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
   // Re-canonize the full system set so the freshly written adapter files match
   // canon (only when a canon already exists).
   if (canonPaths(project.dir).length > 0) {

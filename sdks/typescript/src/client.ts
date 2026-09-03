@@ -17,6 +17,16 @@ export class A2AppUnreachableError extends Error {
   }
 }
 
+/** Raised when a response body exceeds the client's size cap. A protocol reply
+ *  is always small; a multi-megabyte body is a hostile or runaway app, and
+ *  reading it whole would OOM the agent. */
+export class ResponseTooLargeError extends Error {
+  constructor(readonly received: number, readonly limit: number) {
+    super(`Response body exceeds the ${limit}-byte cap (saw at least ${received} bytes) — refusing to buffer it.`);
+    this.name = "ResponseTooLargeError";
+  }
+}
+
 export interface A2AppResponse {
   status: number;
   body: string;
@@ -33,7 +43,20 @@ export interface A2AppClientOptions {
   agentName?: string;
   /** the acting user's own auth token, for operation calls on multi-user apps */
   authToken?: string | null;
+  /** per-request timeout in ms (default 15000). A black-hole port would otherwise
+   *  hang an operate command forever; on timeout the request aborts and throws
+   *  {@link A2AppUnreachableError} (CLI exit 3). Pass 0 to disable. */
+  timeoutMs?: number;
+  /** max bytes read from a response body before erroring (default 10 MiB). Guards
+   *  the agent against a hostile or runaway app streaming an unbounded body. */
+  maxResponseBytes?: number;
 }
+
+/** Default per-request timeout: long enough for a slow-but-alive local backend,
+ *  short enough that a dead port fails fast instead of hanging the agent. */
+const DEFAULT_TIMEOUT_MS = 15_000;
+/** Default response body cap (10 MiB). */
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 /**
  * Unwrap Node's fetch error chain into one true sentence. A bare
@@ -78,12 +101,16 @@ export class A2AppClient {
   private token: string | null;
   private agentName: string;
   private authToken: string | null;
+  private timeoutMs: number;
+  private maxResponseBytes: number;
 
   constructor(opts: A2AppClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "");
     this.token = opts.token ?? null;
     this.agentName = opts.agentName ?? "a2app-sdk";
     this.authToken = opts.authToken ?? null;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   }
 
   /** Low-level request. Throws {@link A2AppUnreachableError} on network failure;
@@ -106,13 +133,44 @@ export class A2AppClient {
     const init: RequestInit = { method, headers };
     if (body !== undefined) init.body = JSON.stringify(body);
 
+    // Per-request timeout: without it a bare fetch to a black-hole port hangs
+    // forever. On timeout we abort and route through describeFetchError's
+    // ETIMEDOUT branch so the CLI maps it to "unreachable" (exit 3).
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer =
+      this.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, this.timeoutMs)
+        : null;
+    init.signal = controller.signal;
+
     let res: globalThis.Response;
     try {
       res = await fetch(`${this.baseUrl}${path}`, init);
     } catch (err) {
+      if (timedOut) {
+        const note = describeFetchError(
+          new Error(`ETIMEDOUT: no response from ${this.baseUrl}${path} within ${this.timeoutMs}ms`),
+        );
+        throw new A2AppUnreachableError(note, { cause: err });
+      }
+      throw new A2AppUnreachableError(describeFetchError(err), { cause: err });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    let text: string;
+    try {
+      text = await this.readCappedBody(res);
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) throw err;
+      // A body that errors mid-stream (connection dropped) is an unreachable-class
+      // failure, not a protocol rejection.
       throw new A2AppUnreachableError(describeFetchError(err), { cause: err });
     }
-    const text = await res.text();
     let json: unknown = null;
     try {
       json = text === "" ? null : JSON.parse(text);
@@ -120,6 +178,47 @@ export class A2AppClient {
       json = null;
     }
     return { status: res.status, body: text, json, ok: res.status < 300 };
+  }
+
+  /** Read a response body but refuse more than `maxResponseBytes`, so a hostile
+   *  or runaway app cannot OOM the agent with an unbounded stream. Checks the
+   *  advertised Content-Length first, then enforces the cap byte-by-byte while
+   *  reading (a lying or absent header cannot get past the streamed count). */
+  private async readCappedBody(res: globalThis.Response): Promise<string> {
+    const max = this.maxResponseBytes;
+    if (max <= 0) return res.text();
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > max) {
+      throw new ResponseTooLargeError(declared, max);
+    }
+    const body = res.body;
+    if (!body) return res.text();
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          total += value.byteLength;
+          if (total > max) {
+            await reader.cancel();
+            throw new ResponseTooLargeError(total, max);
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    let offset = 0;
+    const joined = new Uint8Array(total);
+    for (const c of chunks) {
+      joined.set(c, offset);
+      offset += c.byteLength;
+    }
+    return new TextDecoder("utf-8").decode(joined);
   }
 
   /* ------------------------------------------------------------- discovery */

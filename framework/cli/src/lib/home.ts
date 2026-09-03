@@ -7,7 +7,7 @@
  * of the same apps. Nothing here is required for an app to be complete: an app
  * is any directory with a `manifest.json`.
  */
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -52,7 +52,16 @@ const TRANSIENT = new Set(["EPERM", "EACCES", "EBUSY"]);
 export function writeFileAtomic(file: string, contents: string, attempts = 12): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, contents);
+  // Write + fsync the temp file before renaming, so the bytes are on disk when
+  // the rename publishes them: a crash right after the rename cannot then leave
+  // a present-but-empty file (the failure mode of writeFileSync + rename).
+  const fd = openSync(tmp, "w");
+  try {
+    writeSync(fd, contents);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {

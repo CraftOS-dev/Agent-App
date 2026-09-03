@@ -72,9 +72,13 @@ export async function run(args: string[]): Promise<number> {
   };
   for (const c of checks) (c.ok ? log.ok : log.error).call(log, `${c.name}: ${c.detail ?? ""}`);
   log.raw(JSON.stringify(verdict, null, 2));
-  // A machine "pass" is impossible here (the browser walk is the skill's job);
-  // exit 0 when nothing is broken, 1 when a machine check failed.
-  return blocked || !allOk ? 1 : 0;
+  // Announcement gates on a real `pass`, which only a verifier agent driving the
+  // browser can produce — this machine preflight NEVER pass-es on its own. So a
+  // non-`pass` verdict (incomplete/defects/blocked) must never exit 0, or a
+  // caller treating exit 0 as "verified" would announce an unverified app.
+  void allOk;
+  void blocked;
+  return verdict.verdict === "pass" ? 0 : 1;
 }
 
 /** Extract the "## Features" list items as checkable capability statements. */

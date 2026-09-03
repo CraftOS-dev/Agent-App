@@ -6,98 +6,157 @@
  * Credentials are runtime artifacts — never copied from a blueprint.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
-import { flag } from "../lib/args.js";
+import { flag, hasFlag, positionals } from "../lib/args.js";
+import { mintAgentToken, stripCredentials } from "../lib/credential.js";
+import { writeFileAtomic } from "../lib/home.js";
 import { UsageError } from "../lib/project.js";
 import { adapterVersionOf, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
-import { reserveApp } from "../lib/registry.js";
+import { reserveApp, unregister } from "../lib/registry.js";
 import { log } from "../lib/log.js";
 
 const AGENT_APP_VERSION = "0.1.0";
 
+/** Files whose presence does NOT make a directory "populated" for scaffolding. */
+const IGNORABLE_ENTRIES = new Set([".git", ".gitignore", ".DS_Store", "Thumbs.db", ".hg", ".svn"]);
+
 export async function run(args: string[]): Promise<number> {
-  const dirArg = args.find((a) => !a.startsWith("--"));
+  // Positional target dir — skip flag VALUES so `scaffold --blueprint base ./app`
+  // does not mistake "base" for the directory.
+  const dirArg = positionals(args)[0];
   if (dirArg === undefined) {
-    throw new UsageError("Usage: agent-app scaffold <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
+    throw new UsageError("Usage: agent-app scaffold <dir> [--blueprint <id|path>] [--name \"...\"] [--port N] [--force]");
   }
   const dir = resolve(dirArg);
+
+  // Validate --port up front: a mistyped port must be a usage error (exit 2),
+  // never a NaN/garbage value persisted into the manifest and registry.
+  const requested = flag(args, "port");
+  let preferred: number | undefined;
+  if (requested !== undefined) {
+    const n = Number(requested);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      throw new UsageError(`--port must be an integer between 1 and 65535 (got "${requested}")`);
+    }
+    preferred = n;
+  }
+
   if (existsSync(join(dir, "manifest.json"))) {
     log.error(`${dir} already contains an Agent App (manifest.json present)`);
     return 1;
   }
+
+  // Refuse to scatter a blueprint over a populated directory (a mistyped path,
+  // an existing project, $HOME): only an empty dir, or an explicit --force.
+  const force = hasFlag(args, "force");
+  const dirExisted = existsSync(dir);
+  if (dirExisted && !force) {
+    const occupants = readdirSync(dir).filter((n) => !IGNORABLE_ENTRIES.has(n));
+    if (occupants.length > 0) {
+      throw new UsageError(
+        `${dir} is not empty (${occupants.length} entr${occupants.length === 1 ? "y" : "ies"}). ` +
+          `Scaffold into an empty directory, or pass --force to write into this one.`,
+      );
+    }
+  }
+
   const name = flag(args, "name") ?? basename(dir);
   const blueprintId = flag(args, "blueprint");
 
   mkdirSync(dir, { recursive: true });
 
-  let tk: ResolvedToolkit | null = null;
-  let systemPaths: string[] = ["manifest.json"];
-  let adapterVersion = "0.1.0";
+  // From here on, unwind on failure: a partial scaffold must not leak a registry
+  // entry / claimed port, nor leave a half-written app that reads as "present".
+  let reserved = false;
+  try {
+    let tk: ResolvedToolkit | null = null;
+    let systemPaths: string[] = ["manifest.json"];
+    let adapterVersion = "0.1.0";
 
-  if (blueprintId !== undefined) {
-    tk = resolveToolkit(blueprintId);
-    vendorPaths(tk, dir, allTemplateFiles(tk));
-    recordProjectToolkit(dir, tk);
-    systemPaths = tk.manifest.systemPaths;
-    adapterVersion = adapterVersionOf(tk);
-    log.step(`scaffolded from blueprint "${tk.manifest.id}"`);
-  } else {
-    scaffoldMinimal(dir, name);
-    log.step("scaffolded a minimal Agent App skeleton (no blueprint)");
+    if (blueprintId !== undefined) {
+      try {
+        tk = resolveToolkit(blueprintId);
+      } catch (err) {
+        // An unknown blueprint is a usage mistake (exit 2), not a rejection.
+        throw new UsageError(err instanceof Error ? err.message : String(err));
+      }
+      vendorPaths(tk, dir, allTemplateFiles(tk));
+      recordProjectToolkit(dir, tk);
+      systemPaths = tk.manifest.systemPaths;
+      adapterVersion = adapterVersionOf(tk);
+      log.step(`scaffolded from blueprint "${tk.manifest.id}"`);
+    } else {
+      scaffoldMinimal(dir, name);
+      log.step("scaffolded a minimal Agent App skeleton (no blueprint)");
+    }
+
+    // Fresh identity + stamped versions, merged over the blueprint's manifest.
+    const manifestPath = join(dir, "manifest.json");
+    const manifest = existsSync(manifestPath)
+      ? (JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>)
+      : {};
+    manifest.id = randomBytes(6).toString("hex");
+    manifest.name = name;
+    manifest.agentAppVersion = AGENT_APP_VERSION;
+    manifest.adapterVersion = adapterVersion;
+    if (manifest.authMode === undefined) manifest.authMode = "none";
+    // Assign a port no registered app claims and nothing is listening on, so two
+    // apps are never mutually unreachable to their own tooling (section 5.6).
+    // Pick AND claim in one locked step; an explicit --port is honoured when free.
+    const assigned = await reserveApp(
+      {
+        id: manifest.id as string,
+        name,
+        path: dir,
+        ...(tk ? { blueprint: tk.manifest.id } : {}),
+        createdAt: new Date().toISOString(),
+      },
+      preferred,
+    );
+    reserved = true;
+    if (preferred !== undefined && assigned !== preferred) {
+      log.warn(`port ${preferred} is already taken — assigned ${assigned} instead`);
+    }
+    manifest.port = assigned;
+    if (manifest.pipeline === undefined) {
+      manifest.pipeline = { install: "", build: "", start: "", health: "/api/health" };
+    }
+    // Atomic write: the manifest's presence is what makes this "an Agent App",
+    // so a crash mid-write must never leave a truncated, unparseable one.
+    writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+    // Strip any credential that slipped in from a template, then mint a fresh one.
+    stripCredentials(dir);
+    mintAgentToken(dir);
+
+    writeHarnessGuides(dir, name);
+
+    writeSystemHashes(dir, systemPaths);
+
+    log.ok(`Created Agent App "${name}" (id ${manifest.id as string}) at ${dir}`);
+    log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, port: assigned, adapterVersion }, null, 2));
+    return 0;
+  } catch (err) {
+    // Roll back the port/registry claim, and remove the directory only if this
+    // command created it (never delete a directory the user already had).
+    if (reserved) {
+      try {
+        await unregister(dir);
+      } catch {
+        /* best effort */
+      }
+    }
+    if (!dirExisted) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    throw err;
   }
-
-  // Fresh identity + stamped versions, merged over the blueprint's manifest.
-  const manifestPath = join(dir, "manifest.json");
-  const manifest = existsSync(manifestPath)
-    ? (JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>)
-    : {};
-  manifest.id = randomBytes(4).toString("hex");
-  manifest.name = name;
-  manifest.agentAppVersion = AGENT_APP_VERSION;
-  manifest.adapterVersion = adapterVersion;
-  if (manifest.authMode === undefined) manifest.authMode = "none";
-  // Assign a port no registered app claims and nothing is listening on, so two
-  // apps are never mutually unreachable to their own tooling (section 5.6).
-  // An explicit --port is honoured when free, and reported when it is not.
-  const requested = flag(args, "port");
-  const preferred = requested !== undefined ? Number(requested) : (manifest.port as number | undefined);
-  // Pick AND claim the port in one locked step, then record the app. Splitting
-  // choose-then-claim lets a concurrent `scaffold` pick the same port.
-  const assigned = await reserveApp(
-    {
-      id: manifest.id as string,
-      name,
-      path: dir,
-      ...(tk ? { blueprint: tk.manifest.id } : {}),
-      createdAt: new Date().toISOString(),
-    },
-    preferred,
-  );
-  if (requested !== undefined && assigned !== Number(requested)) {
-    log.warn(`port ${requested} is already taken — assigned ${assigned} instead`);
-  }
-  manifest.port = assigned;
-  if (manifest.pipeline === undefined) {
-    manifest.pipeline = { install: "", build: "", start: "", health: "/api/health" };
-  }
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-
-  // Strip any credential that slipped in from a template, then mint a fresh one.
-  for (const cred of [".agent-token", ".principal", ".superuser"]) {
-    const p = join(dir, cred);
-    if (existsSync(p)) rmSync(p, { force: true });
-  }
-  writeFileSync(join(dir, ".agent-token"), "a2app_" + randomBytes(24).toString("hex") + "\n", { mode: 0o600 });
-
-  writeHarnessGuides(dir, name);
-
-  writeSystemHashes(dir, systemPaths);
-
-  log.ok(`Created Agent App "${name}" (id ${manifest.id as string}) at ${dir}`);
-  log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, port: assigned, adapterVersion }, null, 2));
-  return 0;
 }
 
 /**

@@ -165,9 +165,16 @@ export interface A2AppReply {
 export interface A2AppConfig {
   /** seeded grants; the first is the primary local agent. */
   credentials?: Grant[];
-  /** the adapter-owned state store. Defaults to in-memory; pass a persistent one
-   *  (e.g. FileStateStore) so idempotency survives a restart. */
+  /** the adapter-owned state store. When omitted, the core builds a durable
+   *  {@link import("./store.js").FileStateStore} if `storePath` is given, else an
+   *  in-memory store (fast, but non-conforming for idempotency across a restart).
+   *  Pass an explicit store to override both. */
   store?: import("./store.js").StateStore;
+  /** filesystem path for the default durable store's snapshot. Supply this (a
+   *  stable file under the app's data dir) and the core defaults to a
+   *  FileStateStore, so the idempotency table SURVIVES A RESTART — which is
+   *  exactly when a retry arrives. Ignored when `store` is passed. */
+  storePath?: string;
   /** rate limits. Defaults to data 1200/min, ops 300/min; pass
    *  `{ data: 0, ops: 0 }` to disable. */
   rateLimits?: Partial<import("./rate.js").RateLimits>;

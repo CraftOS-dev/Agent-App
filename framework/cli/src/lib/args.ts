@@ -14,6 +14,15 @@ export const CONTROL_FLAGS = new Set([
   "name",
 ]);
 
+/**
+ * Control flags for a RECORD BODY (create/update). Deliberately minimal: only
+ * the flags `data` itself consumes. Everything else — including `status`,
+ * `filter`, `sort`, `limit`, `since` — is a legitimate entity field name (a
+ * `status` field is one of the most common of all), so a record body must NOT
+ * treat them as reserved, or those fields become unsettable from the CLI.
+ */
+export const BODY_CONTROL_FLAGS = new Set(["json", "idempotency-key"]);
+
 /** Value of `--name`, or undefined. */
 export function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(`--${name}`);
@@ -40,13 +49,13 @@ export function coerceScalar(v: string): unknown {
 
 /** Collect `--field value` pairs (excluding CONTROL_FLAGS) into a body object.
  *  A valueless flag is an error, never coerced to `true`. */
-export function collectFields(args: string[]): Record<string, unknown> {
+export function collectFields(args: string[], control: Set<string> = CONTROL_FLAGS): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
     if (token === undefined || !token.startsWith("--")) continue;
     const key = token.slice(2);
-    if (CONTROL_FLAGS.has(key)) {
+    if (control.has(key)) {
       i++; // skip its value
       continue;
     }
@@ -60,12 +69,26 @@ export function collectFields(args: string[]): Record<string, unknown> {
   return out;
 }
 
-/** Build a write body from --json (base) merged with --field flags (override). */
-export function buildBody(args: string[]): Record<string, unknown> | undefined {
+/**
+ * Build a write body from --json (base) merged with --field flags (override).
+ * `control` names the flags to treat as controls rather than fields; for a
+ * record body pass {@link BODY_CONTROL_FLAGS} so common field names like
+ * `status` are not swallowed. Bad JSON in --json is a usage error (exit 2).
+ */
+export function buildBody(
+  args: string[],
+  control: Set<string> = CONTROL_FLAGS,
+): Record<string, unknown> | undefined {
   const jsonBody = flag(args, "json");
-  const fields = collectFields(args);
+  const fields = collectFields(args, control);
   if (jsonBody !== undefined) {
-    return { ...JSON.parse(jsonBody), ...fields };
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(jsonBody) as Record<string, unknown>;
+    } catch (err) {
+      throw new ValuelessFlagError(`--json is not valid JSON: ${(err as Error).message}`);
+    }
+    return { ...parsed, ...fields };
   }
   return Object.keys(fields).length > 0 ? fields : undefined;
 }

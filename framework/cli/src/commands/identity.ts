@@ -1,12 +1,10 @@
-/** a2app identity <dir> — probe the app's identity document. */
-import { clientFor, loadProject, UsageError } from "../lib/project.js";
+/** a2app <app> identity — probe the app's identity document. */
+import { clientFor, loadProject } from "../lib/project.js";
 import { A2AppClient } from "@a2app/sdk";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: a2app identity <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const client = await clientFor(project);
   const id = await client.identity();
   if (id === null) {

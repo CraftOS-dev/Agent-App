@@ -21,7 +21,7 @@ skill says "per your stack", that is where the stack skill applies.
 
 1. **You were given a project directory** → it is already scaffolded; use it,
    skip scaffolding.
-2. **No project yet** → `agent-app scaffold <dir> --blueprint <id>` scaffolds the
+2. **No project yet** → `agent-app <dir> scaffold --blueprint <id>` scaffolds the
    framework files, the adapter, and the ownership canon. Pick `authMode` from
    requirements: `none` (personal local tool — default) or `multi-user`
    (accounts).
@@ -107,14 +107,14 @@ events. (Manifest format and fire API: per your stack.)
 
 ## Finish: gate, launch, then verify
 
-1. **`agent-app validate <dir>`** runs the gate (build → migrations-on-a-fresh-db →
+1. **`agent-app <dir> validate`** runs the gate (build → migrations-on-a-fresh-db →
    operations resolve → ownership canon). On errors: read ALL of them, fix ALL of
-   them, run it again. Then `agent-app dev <dir>` boots your code in a DEV copy on a
+   them, run it again. Then `agent-app <dir> dev` boots your code in a DEV copy on a
    hidden port with a fresh post-migration DB. Test and read logs THERE; keep
    editing in the real project dir. Never start servers by hand.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
-   - `a2app data <dir> schema` (describe) → does every entity show the FIELDS you
+   - `a2app <dir> data schema` (describe) → does every entity show the FIELDS you
      migrated? An entity showing only `id` means your migration silently did
      nothing.
    - Trigger one real data flow, then read a record back and LOOK at the values.

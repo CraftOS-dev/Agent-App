@@ -49,12 +49,12 @@ export function apply(ctx: Context): void {
   const ENTITY = req("entity / collection name");
 
   ctx.tools.register(cliTool("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
-    { dir: DIR }, (a) => ["data", s(a.dir), "schema"]));
+    { dir: DIR }, (a) => [s(a.dir), "data", "schema"]));
 
   ctx.tools.register(cliTool("agent_app_list", "List records of an entity (optional filter/sort/limit).",
     { dir: DIR, entity: ENTITY, filter: opt("filter expression"), sort: opt("sort field"), limit: { type: "integer", description: "max rows" } },
     (a) => {
-      const argv = ["data", s(a.dir), s(a.entity), "list"];
+      const argv = [s(a.dir), "data", s(a.entity), "list"];
       if (a.filter != null) argv.push("--filter", s(a.filter));
       if (a.sort != null) argv.push("--sort", s(a.sort));
       if (a.limit != null) argv.push("--limit", s(a.limit));
@@ -62,38 +62,38 @@ export function apply(ctx: Context): void {
     }));
 
   ctx.tools.register(cliTool("agent_app_get", "Fetch one record by id.",
-    { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => ["data", s(a.dir), s(a.entity), "get", s(a.id)]));
+    { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => [s(a.dir), "data", s(a.entity), "get", s(a.id)]));
 
   ctx.tools.register(cliTool("agent_app_create", "Create a record; the app's guard validates it and rejections are returned verbatim.",
     { dir: DIR, entity: ENTITY, fields: { type: "object", required: true, description: "field → value" } },
-    (a) => ["data", s(a.dir), s(a.entity), "create", "--json", JSON.stringify(a.fields ?? {})]));
+    (a) => [s(a.dir), "data", s(a.entity), "create", "--json", JSON.stringify(a.fields ?? {})]));
 
   ctx.tools.register(cliTool("agent_app_update", "Update a record by id.",
     { dir: DIR, entity: ENTITY, id: req("record id"), fields: { type: "object", required: true, description: "field → value" } },
-    (a) => ["data", s(a.dir), s(a.entity), "update", s(a.id), "--json", JSON.stringify(a.fields ?? {})]));
+    (a) => [s(a.dir), "data", s(a.entity), "update", s(a.id), "--json", JSON.stringify(a.fields ?? {})]));
 
   ctx.tools.register(cliTool("agent_app_delete", "Delete a record by id.",
-    { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => ["data", s(a.dir), s(a.entity), "delete", s(a.id)]));
+    { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => [s(a.dir), "data", s(a.entity), "delete", s(a.id)]));
 
   ctx.tools.register(cliTool("agent_app_operations", "List the app's declared operations.",
-    { dir: DIR }, (a) => ["ops", s(a.dir)]));
+    { dir: DIR }, (a) => [s(a.dir), "ops"]));
 
   ctx.tools.register(cliTool("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
     { dir: DIR, operation: req("operation name"), fields: { type: "object", description: "operation arguments" }, approve: opt("approval key") },
     (a) => {
-      const argv = ["run", s(a.dir), s(a.operation)];
+      const argv = [s(a.dir), "run", s(a.operation)];
       for (const [k, v] of Object.entries((a.fields as Args) ?? {})) argv.push(`--${k}`, s(v));
       if (a.approve != null) argv.push("--approve", s(a.approve));
       return argv;
     }));
 
   ctx.tools.register(cliTool("agent_app_poll_tasks", "Poll the app→agent task queue (default status: submitted).",
-    { dir: DIR, status: opt("task status filter") }, (a) => (a.status != null ? ["tasks", s(a.dir), "--status", s(a.status)] : ["tasks", s(a.dir)])));
+    { dir: DIR, status: opt("task status filter") }, (a) => (a.status != null ? [s(a.dir), "tasks", "--status", s(a.status)] : [s(a.dir), "tasks"])));
 
   ctx.tools.register(cliTool("agent_app_build", "Scaffold a new Agent App from a blueprint.",
     { dir: DIR, blueprint: opt("blueprint id"), name: opt("app name") },
     (a) => {
-      const argv = ["scaffold", s(a.dir)];
+      const argv = [s(a.dir), "scaffold"];
       if (a.blueprint != null) argv.push("--blueprint", s(a.blueprint));
       if (a.name != null) argv.push("--name", s(a.name));
       return argv;
@@ -101,7 +101,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(cliTool("agent_app_validate", "Run the validation + security gate.",
     { dir: DIR, noBuild: { type: "boolean", description: "skip the build step" } },
-    (a) => (a.noBuild ? ["validate", s(a.dir), "--no-build"] : ["validate", s(a.dir)])));
+    (a) => (a.noBuild ? [s(a.dir), "validate", "--no-build"] : [s(a.dir), "validate"])));
 }
 
 export default apply;

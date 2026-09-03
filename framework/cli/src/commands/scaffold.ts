@@ -1,15 +1,18 @@
 /**
- * agent-app scaffold <dir> [--blueprint <id|path>] [--name "..."] [--port N]
+ * agent-app <dir> scaffold [--blueprint <id|path>] [--name "..."] [--port N]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
  * versions, write the ownership canon, and provision the agent credential.
  * Credentials are runtime artifacts — never copied from a blueprint.
+ *
+ * `<dir>` is the app being created, so it is the target here rather than an
+ * existing app — same first-positional slot as every other command (spec 5.1).
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
-import { flag, hasFlag, positionals } from "../lib/args.js";
+import { flag, hasFlag } from "../lib/args.js";
 import { mintAgentToken, stripCredentials } from "../lib/credential.js";
 import { writeFileAtomic } from "../lib/home.js";
 import { UsageError } from "../lib/project.js";
@@ -22,14 +25,8 @@ const AGENT_APP_VERSION = "0.1.0";
 /** Files whose presence does NOT make a directory "populated" for scaffolding. */
 const IGNORABLE_ENTRIES = new Set([".git", ".gitignore", ".DS_Store", "Thumbs.db", ".hg", ".svn"]);
 
-export async function run(args: string[]): Promise<number> {
-  // Positional target dir — skip flag VALUES so `scaffold --blueprint base ./app`
-  // does not mistake "base" for the directory.
-  const dirArg = positionals(args)[0];
-  if (dirArg === undefined) {
-    throw new UsageError("Usage: agent-app scaffold <dir> [--blueprint <id|path>] [--name \"...\"] [--port N] [--force]");
-  }
-  const dir = resolve(dirArg);
+export async function run(args: string[], app: string): Promise<number> {
+  const dir = resolve(app);
 
   // Validate --port up front: a mistyped port must be a usage error (exit 2),
   // never a NaN/garbage value persisted into the manifest and registry.
@@ -197,10 +194,10 @@ function writeHarnessGuides(dir: string, name: string): void {
         "## Operate it (no rebuild)",
         "",
         "```bash",
-        "agent-app serve .        # launch (never start a server by hand)",
-        "a2app data . schema      # the data model",
-        "a2app ops .              # declared operations",
-        "a2app run . <op> ...     # invoke one (destructive ops need approval)",
+        "agent-app . serve        # launch (never start a server by hand)",
+        "a2app . data schema      # the data model",
+        "a2app . ops              # declared operations",
+        "a2app . run <op> ...     # invoke one (destructive ops need approval)",
         "```",
         "",
         "Read and write through the adapter only. Never drive the UI to operate this app;",
@@ -209,10 +206,10 @@ function writeHarnessGuides(dir: string, name: string): void {
         "## Change its code",
         "",
         "```bash",
-        "agent-app dev .          # dev copy, fresh migration-replayed database",
-        "agent-app validate .     # the gate — must pass",
-        "agent-app walk-verify .  # verified by an agent that is NOT the builder",
-        "agent-app promote .      # mandatory pre-promote backup, then apply to live",
+        "agent-app . dev          # dev copy, fresh migration-replayed database",
+        "agent-app . validate     # the gate — must pass",
+        "agent-app . walk-verify  # verified by an agent that is NOT the builder",
+        "agent-app . promote      # mandatory pre-promote backup, then apply to live",
         "```",
         "",
         "Never build against the live app, never edit an applied migration, never drop a",

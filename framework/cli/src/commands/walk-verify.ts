@@ -1,5 +1,5 @@
 /**
- * agent-app walk-verify <dir> — run the walk-verify checks against the RUNNING app.
+ * agent-app <dir> walk-verify — run the walk-verify checks against the RUNNING app.
  * The full feature-by-feature, browser-driven verification is delivered as the
  * walk-verify SKILL (so a verifier agent, distinct from the builder, drives the
  * real UI). This command does the machine-checkable part: the app mounts and
@@ -9,7 +9,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { clientFor, loadProject, UsageError } from "../lib/project.js";
+import { clientFor, loadProject } from "../lib/project.js";
 import { log } from "../lib/log.js";
 
 interface Check {
@@ -18,10 +18,8 @@ interface Check {
   detail?: string;
 }
 
-export async function run(args: string[]): Promise<number> {
-  const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: agent-app walk-verify <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const client = await clientFor(project);
   const checks: Check[] = [];
 

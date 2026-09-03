@@ -1,5 +1,5 @@
 /**
- * agent-app import <dir> [--blueprint <id|path>] [--name "..."] [--port N] [--keep-data]
+ * agent-app <dir> import [--blueprint <id|path>] [--name "..."] [--port N] [--keep-data]
  *
  * Bring an existing app directory (an extracted Agent App zip, or a codebase
  * already carrying framework files) into the framework as a FRESH local app.
@@ -13,13 +13,13 @@
  *      --blueprint), so imported system CODE is replaced with known-good code,
  *      not merely re-hashed. Then re-record the ownership canon.
  *
- * The caller then runs `agent-app validate` + `serve` + walk-verify: an import is
- * fully re-verified, never trusted on origin.
+ * The caller then runs `agent-app <dir> validate` + `serve` + walk-verify: an
+ * import is fully re-verified, never trusted on origin.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
-import { flag, hasFlag, positionals } from "../lib/args.js";
+import { flag, hasFlag } from "../lib/args.js";
 import { mintAgentToken, stripCredentials } from "../lib/credential.js";
 import { writeFileAtomic } from "../lib/home.js";
 import { loadProject, UsageError } from "../lib/project.js";
@@ -29,12 +29,7 @@ import { reserveApp, unregister } from "../lib/registry.js";
 import { randomBytes } from "node:crypto";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) {
-    throw new UsageError("Usage: agent-app import <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
-  }
-
+export async function run(args: string[], dir: string): Promise<number> {
   const requested = flag(args, "port");
   let preferred: number | undefined;
   if (requested !== undefined) {

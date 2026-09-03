@@ -1,16 +1,14 @@
 /**
- * agent-app validate <dir> — the validation gate and the v1 security gate.
+ * agent-app <dir> validate — the validation gate and the v1 security gate.
  * Machine-readable failures on stdout: one block per failed step.
  */
 import { hasFlag } from "../lib/args.js";
 import { runGate } from "../lib/gate.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = args.find((a) => !a.startsWith("--"));
-  if (dir === undefined) throw new UsageError("Usage: agent-app validate <dir> [--no-build]");
-  const project = loadProject(dir);
+export async function run(args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
 
   const errors = runGate(project.dir, project.manifest, { skipBuild: hasFlag(args, "no-build") });
 

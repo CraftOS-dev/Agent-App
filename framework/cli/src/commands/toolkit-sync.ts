@@ -1,21 +1,18 @@
 /**
- * agent-app toolkit-sync <dir> — re-vendor the toolkit's system files and re-record
+ * agent-app <dir> toolkit-sync — re-vendor the toolkit's system files and re-record
  * the ownership canon. The single writer of the canon; it records exactly the
  * files it just wrote.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
-import { positionals } from "../lib/args.js";
 import { writeFileAtomic } from "../lib/home.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) throw new UsageError("Usage: agent-app toolkit-sync <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const tk = projectToolkit(project.dir);
   if (tk === null) {
     log.error("no toolkit recorded for this app (.a2app/toolkit.json missing) — nothing to sync");

@@ -6,31 +6,41 @@ description: >
   1 rejected, 2 usage, 3 unreachable. Skipped automatically if the CLI is not
   built.
 
+  Commands are app-first (framework spec 5.1): `a2app <app> <verb> [args]`.
+
 checks:
   - name: data schema prints the model (exit 0)
-    cli: { args: ["data", "<APPDIR>", "schema"] }
+    cli: { args: ["<APPDIR>", "data", "schema"] }
     expect:
       exit: 0
       contains: cards
 
   - name: data list returns records (exit 0)
-    cli: { args: ["data", "<APPDIR>", "lists", "list"] }
+    cli: { args: ["<APPDIR>", "data", "lists", "list"] }
     expect:
       exit: 0
       contains: "To Do"
 
   - name: data create with a valid field succeeds (exit 0)
-    cli: { args: ["data", "<APPDIR>", "cards", "create", "--title", "From the CLI"] }
+    cli: { args: ["<APPDIR>", "data", "cards", "create", "--title", "From the CLI"] }
     expect:
       exit: 0
       contains: "From the CLI"
 
   - name: data create with a bad enum is rejected (exit 1)
-    cli: { args: ["data", "<APPDIR>", "cards", "create", "--title", "x", "--priority", "nope"] }
+    cli: { args: ["<APPDIR>", "data", "cards", "create", "--title", "x", "--priority", "nope"] }
     expect:
       exit: 1
 
   - name: an unknown verb is a usage error (exit 2)
-    cli: { args: ["data", "<APPDIR>", "cards", "frobnicate"] }
+    cli: { args: ["<APPDIR>", "data", "cards", "frobnicate"] }
+    expect:
+      exit: 2
+
+  # The app comes first, unconditionally — the parser never inspects it to
+  # decide "app or verb?", so a verb-first invocation is a usage error rather
+  # than being silently accepted (spec 5.1).
+  - name: verb-first ordering is rejected (exit 2)
+    cli: { args: ["data", "<APPDIR>", "schema"] }
     expect:
       exit: 2

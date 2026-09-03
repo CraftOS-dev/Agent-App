@@ -1,6 +1,6 @@
 # blueprint-base — stack-agnostic
 
-The framework contract with **no runtime code**: what an agent uses to hand-assemble an Agent App in any stack. `agent-app scaffold --blueprint blueprint-base` writes the framework files, ready to fill in:
+The framework contract with **no runtime code**: what an agent uses to hand-assemble an Agent App in any stack. `agent-app <dir> scaffold --blueprint blueprint-base` writes the framework files, ready to fill in:
 
 ```
 manifest.json          # id, name, versions, authMode, capabilities, and the pipeline launch block

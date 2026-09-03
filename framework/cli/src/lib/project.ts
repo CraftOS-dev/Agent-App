@@ -36,7 +36,7 @@ export interface Project {
 /**
  * Resolve a project by directory, or — when that is not an Agent App — by the
  * id or name of a registered one (framework section 5.6), so an agent can say
- * `a2app data "Kanban Board" schema` without tracking paths. The manifest stays
+ * `a2app "Kanban Board" data schema` without tracking paths. The manifest stays
  * authoritative; the registry only supplies the location.
  */
 export function loadProject(projectDir: string): Project {

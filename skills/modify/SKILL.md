@@ -64,10 +64,10 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 ## Finish
 
 ```
-agent-app dev <dir>        # boot a disposable dev copy (fresh, migration-replayed DB)
-agent-app validate <dir>   # the gate, against the dev copy
+agent-app <dir> dev        # boot a disposable dev copy (fresh, migration-replayed DB)
+agent-app <dir> validate   # the gate, against the dev copy
 # then the walk-verify skill against the dev URL
-agent-app promote <dir>    # pre-promote backup, then apply new migrations to live
+agent-app <dir> promote    # pre-promote backup, then apply new migrations to live
 ```
 
 `agent-app dev` boots a disposable copy of your new CODE on a hidden port with a

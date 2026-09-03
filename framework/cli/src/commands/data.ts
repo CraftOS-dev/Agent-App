@@ -1,6 +1,6 @@
 /**
- * a2app data <dir> schema
- * a2app data <dir> <entity> [list|get <id>|create|update <id>|delete <id>]
+ * a2app <app> data schema
+ * a2app <app> data <entity> [list|get <id>|create|update <id>|delete <id>]
  *                  [--field value ...] [--json '{...}'] [--filter '...'] [--sort '...']
  *                  [--limit N] [--idempotency-key KEY]
  *
@@ -13,15 +13,14 @@ import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js
 import { clientFor, loadProject, UsageError } from "../lib/project.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const pos = positionals(args);
-  const [dirArg, collection, verb = "list", id] = pos;
-  if (dirArg === undefined || collection === undefined) {
+export async function run(args: string[], app: string): Promise<number> {
+  const [collection, verb = "list", id] = positionals(args);
+  if (collection === undefined) {
     throw new UsageError(
-      "Usage: a2app data <dir> schema | <entity> [list|get <id>|create|update <id>|delete <id>] [--field value ...]",
+      "Usage: a2app <app> data schema | <entity> [list|get <id>|create|update <id>|delete <id>] [--field value ...]",
     );
   }
-  const project = loadProject(dirArg);
+  const project = loadProject(app);
   const client = await clientFor(project);
   const schema = await fetchSchema(client);
 

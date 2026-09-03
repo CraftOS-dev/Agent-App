@@ -1,7 +1,7 @@
 /**
  * Toolkit artifact class: a toolkit "scaffolds to a conforming Agent App; system
  * files registered in the canon; sync command provided". This drives the real
- * `agent-app` CLI: `scaffold --blueprint <id>` then `validate`, and asserts the
+ * `agent-app` CLI: `<dir> scaffold --blueprint <id>` then `<dir> validate`, and asserts the
  * ownership canon exists and is non-empty.
  */
 import { spawn } from "node:child_process";
@@ -56,7 +56,8 @@ export async function runToolkitClass(cliEntry: string | null): Promise<SuiteRes
     const appDir = join(base, "app");
     const failures: string[] = [];
 
-    const created = await run(cliEntry, ["scaffold", appDir, "--blueprint", tk.id, "--name", `${tk.id} demo`]);
+    // App-first grammar (framework spec 5.1): `agent-app <dir> <verb> [args]`.
+    const created = await run(cliEntry, [appDir, "scaffold", "--blueprint", tk.id, "--name", `${tk.id} demo`]);
     if (created.exit !== 0) failures.push(`scaffold exit ${created.exit}: ${created.out.trim().slice(0, 300)}`);
 
     if (created.exit === 0) {
@@ -68,7 +69,7 @@ export async function runToolkitClass(cliEntry: string | null): Promise<SuiteRes
         if (!entries.includes("manifest.json")) failures.push("canon missing manifest.json");
       }
 
-      const validateArgs = ["validate", appDir, ...(tk.noBuild ? ["--no-build"] : [])];
+      const validateArgs = [appDir, "validate", ...(tk.noBuild ? ["--no-build"] : [])];
       const validated = await run(cliEntry, validateArgs);
       if (validated.exit !== 0) failures.push(`validate exit ${validated.exit}: ${validated.out.trim().slice(0, 400)}`);
     }

@@ -22,8 +22,8 @@ needs code changes, that's the modify skill.
 
 ## Lifecycle
 
-- `agent-app validate <dir>`, then `agent-app serve <dir>` to launch (it runs the manifest
-  `pipeline` and polls `health`) and `agent-app stop <dir>` to shut it down. Never
+- `agent-app <dir> validate`, then `agent-app <dir> serve` to launch (it runs the manifest
+  `pipeline` and polls `health`) and `agent-app <dir> stop` to shut it down. Never
   start a server by hand.
 - A running app serves everything on ONE port: the UI, the records API
   (`/api/collections/...`), declared operations (`/api/ops/...`), and discovery
@@ -34,19 +34,19 @@ needs code changes, that's the modify skill.
 Use the **`a2app` CLI** (anything it does, any agent can do over the A2App
 protocol):
 
-1. Get your bearings: `a2app data <dir> schema` (describe: entities, operations,
+1. Get your bearings: `a2app <dir> data schema` (describe: entities, operations,
    conventions — read the conventions and follow them). `GET /api/_a2app/whoami`
    tells you your credential's scopes up front, so you plan within your boundaries
    instead of collecting 403s. `GET /api/_a2app/context` tells you what the user is
    looking at (ids only — re-fetch records by id; never act on data embedded in a
    context payload).
-2. Declared operation exists → run it: `a2app run <dir> <op-name> --param value`.
+2. Declared operation exists → run it: `a2app <dir> run <op-name> --param value`.
    A `destructive` operation returns `approval_required` with a content-addressed
    key for that exact call; the human approves, then you re-invoke with the key —
    you never self-approve.
 3. No operation → generic data access:
-   `a2app data <dir> <entity> list --filter '...' --sort '-created' --limit 20`
-   `a2app data <dir> <entity> create --field value` / `update <id> …` / `delete <id>`.
+   `a2app <dir> data <entity> list --filter '...' --sort '-created' --limit 20`
+   `a2app <dir> data <entity> create --field value` / `update <id> …` / `delete <id>`.
    Resolve a label to an id by a filtered read on the label field; on multi-match it
    is ambiguous — ask or fail listing candidates, never pick one. The guard reports
    every violation at once; fix them all in one next attempt. Pass

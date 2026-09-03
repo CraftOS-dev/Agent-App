@@ -46,13 +46,13 @@ Three pillars: **Describe** (the app publishes its own data model, operations, c
 
 ```bash
 # operate (A2App protocol, CLI-primary — HTTP is the required fallback)
-a2app data <dir> schema # describe: entities, operations, conventions
-a2app data <dir> create card --title "Buy milk" --due tomorrow
+a2app <dir> data schema # describe: entities, operations, conventions
+a2app <dir> data cards create --title "Buy milk" --due tomorrow
 # build / evolve (framework CLI)
-agent-app scaffold <dir> [--blueprint <id>] # scaffold: framework files + ownership canon
-agent-app validate <dir> # the validation + security gate
-agent-app dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
-agent-app walk-verify <dir> # independent verification vs requirements.md
+agent-app <dir> scaffold [--blueprint <id>] # scaffold: framework files + ownership canon
+agent-app <dir> validate # the validation + security gate
+agent-app <dir> dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
+agent-app <dir> walk-verify # independent verification vs requirements.md
 ```
 
 ## Scenarios
@@ -84,7 +84,7 @@ Humans use an Agent App like any other software: visually. You can also talk to 
 
 ### An agent harness using an Agent App
 
-Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by reading its self-description (`describe`) through the `a2app` operate client (`a2app data <dir> schema`).
+Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by reading its self-description (`describe`) through the `a2app` operate client (`a2app <dir> data schema`).
 
 *More scenarios will be added as the ecosystem grows.*
 

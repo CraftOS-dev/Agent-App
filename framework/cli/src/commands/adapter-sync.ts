@@ -1,21 +1,18 @@
 /**
- * agent-app adapter-sync <dir> — deliver/update ONLY the adapter files, no rebuild.
+ * agent-app <dir> adapter-sync — deliver/update ONLY the adapter files, no rebuild.
  * Runs on every launch: it is the only path that reaches apps a user already
  * has. Idempotent, non-fatal, never touches app-authored code.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonPaths, fileMatchesCanon, writeSystemHashes } from "../lib/canon.js";
-import { positionals } from "../lib/args.js";
 import { writeFileAtomic } from "../lib/home.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) throw new UsageError("Usage: agent-app adapter-sync <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const tk = projectToolkit(project.dir);
   if (tk === null) {
     log.warn("no toolkit recorded — skipping adapter-sync (app starts with its existing adapter)");

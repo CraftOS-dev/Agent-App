@@ -42,7 +42,7 @@ The source already carries framework files.
 1. Extract; verify the framework files are present and valid. Register a NEW
    delivered project (fresh id + port, shipped credentials stripped, kit
    re-vendored).
-2. `agent-app toolkit-sync <dir>` then `agent-app adapter-sync <dir>` — re-vendor system
+2. `agent-app <dir> toolkit-sync` then `agent-app <dir> adapter-sync` — re-vendor system
    files and re-deliver the adapter.
 3. `agent-app validate` → launch → **walk-verify**. It is not trusted just for
    carrying framework files.

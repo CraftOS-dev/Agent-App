@@ -1,21 +1,18 @@
 /**
- * agent-app dev <dir> — prepare a dev copy on a hidden port with a fresh database
+ * agent-app <dir> dev — prepare a dev copy on a hidden port with a fresh database
  * created by replaying the full migration chain; live data is NEVER cloned. The
  * stack-specific action is the toolkit's `lifecycle.dev` command; the framework
  * enforces the invariant the toolkit cannot be trusted to keep — that dev did
  * not touch the live data directory — by fingerprinting it before and after.
  */
-import { positionals } from "../lib/args.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { dataFingerprint, lifecycleCommand, lifecycleLock } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) throw new UsageError("Usage: agent-app dev <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
 
   return withLock(lifecycleLock(project.dir), async () => {
     const cmd = lifecycleCommand(project.dir, "dev");

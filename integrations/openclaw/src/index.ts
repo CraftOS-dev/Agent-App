@@ -55,12 +55,12 @@ export default definePluginEntry({
 
     tool("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
       Type.Object({ dir: DIR }),
-      (p) => ["data", s(p.dir), "schema"]);
+      (p) => [s(p.dir), "data", "schema"]);
 
     tool("agent_app_list", "List records of an entity (optional filter/sort/limit).",
       Type.Object({ dir: DIR, entity: ENTITY, filter: Type.Optional(Type.String()), sort: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
       (p) => {
-        const a = ["data", s(p.dir), s(p.entity), "list"];
+        const a = [s(p.dir), "data", s(p.entity), "list"];
         if (p.filter != null) a.push("--filter", s(p.filter));
         if (p.sort != null) a.push("--sort", s(p.sort));
         if (p.limit != null) a.push("--limit", s(p.limit));
@@ -69,28 +69,28 @@ export default definePluginEntry({
 
     tool("agent_app_get", "Fetch one record by id.",
       Type.Object({ dir: DIR, entity: ENTITY, id: Type.String() }),
-      (p) => ["data", s(p.dir), s(p.entity), "get", s(p.id)]);
+      (p) => [s(p.dir), "data", s(p.entity), "get", s(p.id)]);
 
     tool("agent_app_create", "Create a record; the app's guard validates it and rejections are returned verbatim.",
       Type.Object({ dir: DIR, entity: ENTITY, fields: Type.Record(Type.String(), Type.Unknown()) }),
-      (p) => ["data", s(p.dir), s(p.entity), "create", "--json", JSON.stringify(p.fields ?? {})]);
+      (p) => [s(p.dir), "data", s(p.entity), "create", "--json", JSON.stringify(p.fields ?? {})]);
 
     tool("agent_app_update", "Update a record by id.",
       Type.Object({ dir: DIR, entity: ENTITY, id: Type.String(), fields: Type.Record(Type.String(), Type.Unknown()) }),
-      (p) => ["data", s(p.dir), s(p.entity), "update", s(p.id), "--json", JSON.stringify(p.fields ?? {})]);
+      (p) => [s(p.dir), "data", s(p.entity), "update", s(p.id), "--json", JSON.stringify(p.fields ?? {})]);
 
     tool("agent_app_delete", "Delete a record by id.",
       Type.Object({ dir: DIR, entity: ENTITY, id: Type.String() }),
-      (p) => ["data", s(p.dir), s(p.entity), "delete", s(p.id)]);
+      (p) => [s(p.dir), "data", s(p.entity), "delete", s(p.id)]);
 
     tool("agent_app_operations", "List the app's declared operations.",
       Type.Object({ dir: DIR }),
-      (p) => ["ops", s(p.dir)]);
+      (p) => [s(p.dir), "ops"]);
 
     tool("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
       Type.Object({ dir: DIR, operation: Type.String(), fields: Type.Optional(Type.Record(Type.String(), Type.Unknown())), approve: Type.Optional(Type.String()) }),
       (p) => {
-        const a = ["run", s(p.dir), s(p.operation)];
+        const a = [s(p.dir), "run", s(p.operation)];
         for (const [k, v] of Object.entries((p.fields as Args) ?? {})) a.push(`--${k}`, s(v));
         if (p.approve != null) a.push("--approve", s(p.approve));
         return a;
@@ -98,12 +98,12 @@ export default definePluginEntry({
 
     tool("agent_app_poll_tasks", "Poll the app→agent task queue (default status: submitted).",
       Type.Object({ dir: DIR, status: Type.Optional(Type.String()) }),
-      (p) => (p.status != null ? ["tasks", s(p.dir), "--status", s(p.status)] : ["tasks", s(p.dir)]));
+      (p) => (p.status != null ? [s(p.dir), "tasks", "--status", s(p.status)] : [s(p.dir), "tasks"]));
 
     tool("agent_app_build", "Scaffold a new Agent App from a blueprint.",
       Type.Object({ dir: DIR, blueprint: Type.Optional(Type.String()), name: Type.Optional(Type.String()) }),
       (p) => {
-        const a = ["scaffold", s(p.dir)];
+        const a = [s(p.dir), "scaffold"];
         if (p.blueprint != null) a.push("--blueprint", s(p.blueprint));
         if (p.name != null) a.push("--name", s(p.name));
         return a;
@@ -111,7 +111,7 @@ export default definePluginEntry({
 
     tool("agent_app_validate", "Run the validation + security gate.",
       Type.Object({ dir: DIR, noBuild: Type.Optional(Type.Boolean()) }),
-      (p) => (p.noBuild ? ["validate", s(p.dir), "--no-build"] : ["validate", s(p.dir)]));
+      (p) => (p.noBuild ? [s(p.dir), "validate", "--no-build"] : [s(p.dir), "validate"]));
 
     // A CLI passthrough: `openclaw agent-app <args...>`.
     api.registerCli((program: { command: (name: string) => { description: (d: string) => { action: (fn: (argv: string[]) => Promise<void>) => unknown } } }) => {

@@ -120,7 +120,7 @@ export function readRegistry(): Registry {
     if (setAside) {
       log.error(
         `the app registry was unreadable (${(err as Error).message}) — kept it at ${kept} and started a new one. ` +
-          `Apps are unaffected: re-register one with \`agent-app serve <dir>\`.`,
+          `Apps are unaffected: re-register one with \`agent-app <dir> serve\`.`,
       );
     } else {
       // Could NOT set it aside — do NOT overwrite the corrupt file. Surface the

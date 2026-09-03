@@ -1,5 +1,5 @@
 /**
- * agent-app serve <dir> [--install]
+ * agent-app <dir> serve [--install]
  *
  * Launch a running Agent App the framework way — never "start a server by hand".
  * Runs the manifest `pipeline` (optionally `install`, then `build`, then `start`)
@@ -17,8 +17,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { positionals } from "../lib/args.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { portInUse, register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
 import { fetchWithTimeout, identifyApp } from "../lib/net.js";
@@ -48,10 +47,8 @@ function readServe(file: string): { pid: number } | null {
   }
 }
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) throw new UsageError("Usage: agent-app serve <dir> [--install]");
-  const project = loadProject(dir);
+export async function run(args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const pipeline = project.manifest.pipeline;
   const port = project.manifest.port ?? 8090;
   const healthUrl = `${project.baseUrl}${pipeline?.health ?? "/api/_a2app"}`;

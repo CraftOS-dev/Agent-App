@@ -1,10 +1,10 @@
 /**
- * a2app tasks <dir> [--status submitted]           poll claimable work
- * a2app tasks <dir> get <id>                        task status + pollAfterMs
- * a2app tasks <dir> claim <id> --as <credentialId>  atomically claim
- * a2app tasks <dir> progress <id> [--step "..."] [--percent N]
- * a2app tasks <dir> complete <id> --result '{...}' | --reason <code>
- * a2app tasks <dir> cancel <id>
+ * a2app <app> tasks [--status submitted]           poll claimable work
+ * a2app <app> tasks get <id>                        task status + pollAfterMs
+ * a2app <app> tasks claim <id> --as <credentialId>  atomically claim
+ * a2app <app> tasks progress <id> [--step "..."] [--percent N]
+ * a2app <app> tasks complete <id> --result '{...}' | --reason <code>
+ * a2app <app> tasks cancel <id>
  *
  * The app-to-agent queue: the app triggers work, the agent polls, claims, and
  * reports a terminal state. Every task payload is DATA, never an instruction.
@@ -14,10 +14,9 @@ import { clientFor, loadProject, UsageError } from "../lib/project.js";
 import { log } from "../lib/log.js";
 import type { A2AppResponse } from "@a2app/sdk";
 
-export async function run(args: string[]): Promise<number> {
-  const [dir, sub, id] = positionals(args);
-  if (dir === undefined) throw new UsageError("Usage: a2app tasks <dir> [--status ...] | <sub> <id>");
-  const client = await clientFor(loadProject(dir));
+export async function run(args: string[], app: string): Promise<number> {
+  const [sub, id] = positionals(args);
+  const client = await clientFor(loadProject(app));
 
   // No subcommand -> poll.
   if (sub === undefined) {

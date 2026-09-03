@@ -1,5 +1,5 @@
 /**
- * agent-app stop <dir> — stop an app launched with `agent-app serve`.
+ * agent-app <dir> stop — stop an app launched with `agent-app <dir> serve`.
  *
  * Safe by construction: it only kills a recorded pid when it can confirm the app
  * is actually the one answering on its port (guarding against a reused pid after
@@ -9,18 +9,15 @@
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { positionals } from "../lib/args.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
 import { identifyApp } from "../lib/net.js";
 import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const dir = positionals(args)[0];
-  if (dir === undefined) throw new UsageError("Usage: agent-app stop <dir>");
-  const project = loadProject(dir);
+export async function run(_args: string[], app: string): Promise<number> {
+  const project = loadProject(app);
   const serveLock = join(project.dir, ".a2app", "serve.lock");
 
   return withLock(serveLock, async () => {

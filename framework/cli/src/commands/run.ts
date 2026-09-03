@@ -1,5 +1,5 @@
 /**
- * a2app run <dir> <operation> [--field value ...] [--approve <key>]
+ * a2app <app> run <operation> [--field value ...] [--approve <key>]
  *
  * Invoke a declared operation. A destructive operation returns
  * `approval_required` with a content-addressed key; re-run with `--approve <key>`
@@ -9,12 +9,12 @@ import { collectFields, flag, positionals } from "../lib/args.js";
 import { clientFor, loadProject, UsageError } from "../lib/project.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const [dir, opName] = positionals(args);
-  if (dir === undefined || opName === undefined) {
-    throw new UsageError("Usage: a2app run <dir> <operation> [--field value ...] [--approve <key>]");
+export async function run(args: string[], app: string): Promise<number> {
+  const [opName] = positionals(args);
+  if (opName === undefined) {
+    throw new UsageError("Usage: a2app <app> run <operation> [--field value ...] [--approve <key>]");
   }
-  const client = await clientFor(loadProject(dir));
+  const client = await clientFor(loadProject(app));
   const fields = collectFields(args);
   const approvalKey = flag(args, "approve");
   const res = await client.callOperation(opName, fields, approvalKey);
@@ -23,7 +23,7 @@ export async function run(args: string[]): Promise<number> {
     log.error(String(parsed?.["message"] ?? `HTTP ${res.status}`));
     if (parsed?.["code"] === "approval_required" && typeof parsed["approvalKey"] === "string") {
       log.warn(`This is a destructive operation. A human must approve it, then re-run:`);
-      log.raw(`  a2app run ${dir} ${opName} --approve ${parsed["approvalKey"]}`);
+      log.raw(`  a2app ${app} run ${opName} --approve ${parsed["approvalKey"]}`);
     }
     return 1;
   }

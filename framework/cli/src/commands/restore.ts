@@ -1,5 +1,5 @@
 /**
- * agent-app restore <dir> [<backup-id>] — restore a backup, capturing the current
+ * agent-app <dir> restore [<backup-id>] — restore a backup, capturing the current
  * state first and rolling back automatically on failure.
  *
  * Data safety: the restore itself is atomic (the live directory is never deleted
@@ -9,15 +9,14 @@
  */
 import { join } from "node:path";
 import { positionals } from "../lib/args.js";
-import { loadProject, UsageError } from "../lib/project.js";
+import { loadProject } from "../lib/project.js";
 import { assertNotServing, backupId, lifecycleLock, listBackups, restoreBackup, takeBackup } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
 import { log } from "../lib/log.js";
 
-export async function run(args: string[]): Promise<number> {
-  const [dir, requested] = positionals(args);
-  if (dir === undefined) throw new UsageError("Usage: agent-app restore <dir> [<backup-id>]");
-  const project = loadProject(dir);
+export async function run(args: string[], app: string): Promise<number> {
+  const [requested] = positionals(args);
+  const project = loadProject(app);
 
   return withLock(lifecycleLock(project.dir), async () => {
     await assertNotServing(project);

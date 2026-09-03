@@ -18,7 +18,7 @@ const SUITES_DIR = resolve(HERE, "..", "..", "suites");
 /**
  * The two binaries are separate entries (framework spec 5.1): protocol checks
  * (class B) run against `a2app`, toolkit checks against `agent-app`. Resolving
- * one entry for both would send `create` to the operate client, which now
+ * one entry for both would send `scaffold` to the operate client, which now
  * refuses it by design.
  */
 function findCliEntry(bin: "a2app" | "agent-app"): string | null {

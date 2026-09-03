@@ -14,7 +14,7 @@
  *  - An unreadable registry is PRESERVED, never silently discarded: a corrupt
  *    file is set aside and reported, because overwriting it destroys the user's
  *    whole index without warning.
- *  - Every read-modify-write runs under a cross-process lock. Each `a2app` run is
+ *  - Every read-modify-write runs under a cross-process lock. Each `agent-app` run is
  *    its own process, so concurrent commands would otherwise lose entries and
  *    hand two apps the same port.
  *  - Identity and location only. Host concerns (theme, icon, sessions, tunnels)
@@ -136,7 +136,7 @@ async function mutate<T>(fn: (reg: Registry) => T): Promise<T> {
 /**
  * Register an app, or update it in place. Keyed by absolute path: the same
  * directory is one app however many times it is registered, so re-running
- * `create`/`serve` never duplicates an entry.
+ * `scaffold`/`serve` never duplicates an entry.
  */
 export async function register(entry: RegistryEntry): Promise<void> {
   const path = resolve(entry.path);

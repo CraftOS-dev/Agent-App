@@ -1,6 +1,6 @@
 name: agent_app
 version: 0.1.0
-description: "Build and operate Agent Apps over the A2App protocol via the a2app CLI. Registers tools that wrap the framework CLI: describe, records CRUD, declared operations, task polling, scaffold, and the validation gate."
+description: "Build, evolve, and operate Agent Apps via the framework CLIs: agent-app (build/evolve — scaffold, validate) and a2app (A2App operate — describe, records CRUD, declared operations, task polling)."
 author: Agent App Framework
 kind: backend
 provides_tools:

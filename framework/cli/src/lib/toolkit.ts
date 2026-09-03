@@ -10,7 +10,7 @@
  *   a2app.toolkit.json
  *   {
  *     "id": "blueprint-pocketbase-react",
- *     "template": "template",                  // dir copied on `create`
+ *     "template": "template",                  // dir copied on `scaffold`
  *     "adapterVersionFrom": "pb/pb_hooks/_a2app_lib.js",  // file holding ADAPTER_VERSION
  *     "systemPaths": ["manifest.json", "pb/pb_hooks/_a2app.pb.js", ...],
  *     "adapterPaths": ["pb/pb_hooks/_a2app.pb.js", ...],  // subset re-vendored by adapter-sync

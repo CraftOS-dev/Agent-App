@@ -4,7 +4,7 @@ The pinned command set of the two framework binaries — `agent-app` (build/evol
 
 | Command | Purpose |
 |---|---|
-| `create <dir> [--blueprint <id>]` | scaffold: framework files + ownership canon written deterministically |
+| `scaffold <dir> [--blueprint <id>]` | scaffold: framework files + ownership canon written deterministically |
 | `validate <dir>` | validation gate + security gate |
 | `toolkit-sync <dir>` / `adapter-sync <dir>` | re-vendor system files / deliver the adapter, re-canonize hashes |
 | `data <dir> <verb> …` | the A2App client (schema, record CRUD, ops, task/event polling) |

@@ -1,7 +1,7 @@
 # Framework skills
 
 Framework knowledge artifacts: plain, **self-contained** markdown any agent can
-read. Skills carry procedure and discipline; the CLI gate guarantees quality even
+read. Skills carry procedure and discipline; the `agent-app validate` gate guarantees quality even
 if a skill is ignored. Loaded per run, only for the run that needs them; never
 bound to a session or project.
 
@@ -22,7 +22,7 @@ bound to a session or project.
 
 ## Getting them
 
-These ship inside the `agent-app` package, so installing the CLI installs the skills:
+These ship inside the `agent-app` package (one package, two binaries: `agent-app` to build/evolve, `a2app` to operate), so `npm i -g agent-app` installs the skills too:
 
 ```bash
 agent-app skills                      # list them

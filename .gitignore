@@ -66,3 +66,6 @@ docs/
 
 # dogfooding proof run (self-validation of the framework lifecycle)
 .a2app-proof/
+
+# working diagrams — kept on disk, not part of the distribution
+agent-app-user-journey.drawio

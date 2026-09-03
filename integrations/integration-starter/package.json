@@ -2,7 +2,7 @@
   "name": "@a2app/integration-starter",
   "version": "0.1.0",
   "private": true,
-  "description": "Copy-to-create template for an Agent App Framework plugin for a new agent harness: expose the CLI as a tool, ship the skills, offer embedded display",
+  "description": "Copy-to-create template for an Agent App Framework plugin for a new agent harness: expose the agent-app and a2app CLIs as tools, ship the skills, offer embedded display",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

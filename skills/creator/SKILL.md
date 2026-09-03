@@ -21,7 +21,7 @@ skill says "per your stack", that is where the stack skill applies.
 
 1. **You were given a project directory** → it is already scaffolded; use it,
    skip scaffolding.
-2. **No project yet** → `agent-app create <dir> --blueprint <id>` scaffolds the
+2. **No project yet** → `agent-app scaffold <dir> --blueprint <id>` scaffolds the
    framework files, the adapter, and the ownership canon. Pick `authMode` from
    requirements: `none` (personal local tool — default) or `multi-user`
    (accounts).

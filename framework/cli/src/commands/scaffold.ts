@@ -1,5 +1,5 @@
 /**
- * agent-app create <dir> [--blueprint <id|path>] [--name "..."] [--port N]
+ * agent-app scaffold <dir> [--blueprint <id|path>] [--name "..."] [--port N]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
  * versions, write the ownership canon, and provision the agent credential.
@@ -20,7 +20,7 @@ const AGENT_APP_VERSION = "0.1.0";
 export async function run(args: string[]): Promise<number> {
   const dirArg = args.find((a) => !a.startsWith("--"));
   if (dirArg === undefined) {
-    throw new UsageError("Usage: agent-app create <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
+    throw new UsageError("Usage: agent-app scaffold <dir> [--blueprint <id|path>] [--name \"...\"] [--port N]");
   }
   const dir = resolve(dirArg);
   if (existsSync(join(dir, "manifest.json"))) {
@@ -64,7 +64,7 @@ export async function run(args: string[]): Promise<number> {
   const requested = flag(args, "port");
   const preferred = requested !== undefined ? Number(requested) : (manifest.port as number | undefined);
   // Pick AND claim the port in one locked step, then record the app. Splitting
-  // choose-then-claim lets a concurrent `create` pick the same port.
+  // choose-then-claim lets a concurrent `scaffold` pick the same port.
   const assigned = await reserveApp(
     {
       id: manifest.id as string,
@@ -169,14 +169,14 @@ function writeHarnessGuides(dir: string, name: string): void {
   }
 }
 
-/** Every file under the toolkit template — the create copies the whole app, not
+/** Every file under the toolkit template — the scaffold copies the whole app, not
  *  only the system paths (which is what toolkit-sync re-vendors later). */
 function allTemplateFiles(_tk: ResolvedToolkit): string[] {
   // vendorPaths copies directories recursively; "." copies the whole template.
   return ["."];
 }
 
-/** A stack-free skeleton: just the framework files, so `create` without a
+/** A stack-free skeleton: just the framework files, so `scaffold` without a
  *  blueprint still yields a conforming artifact shell an agent then fills in. */
 function scaffoldMinimal(dir: string, name: string): void {
   mkdirSync(join(dir, "reference"), { recursive: true });

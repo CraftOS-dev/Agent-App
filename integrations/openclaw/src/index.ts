@@ -103,7 +103,7 @@ export default definePluginEntry({
     tool("agent_app_build", "Scaffold a new Agent App from a blueprint.",
       Type.Object({ dir: DIR, blueprint: Type.Optional(Type.String()), name: Type.Optional(Type.String()) }),
       (p) => {
-        const a = ["create", s(p.dir)];
+        const a = ["scaffold", s(p.dir)];
         if (p.blueprint != null) a.push("--blueprint", s(p.blueprint));
         if (p.name != null) a.push("--name", s(p.name));
         return a;

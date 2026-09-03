@@ -1,7 +1,7 @@
 /**
  * Toolkit artifact class: a toolkit "scaffolds to a conforming Agent App; system
  * files registered in the canon; sync command provided". This drives the real
- * `agent-app` CLI: `create --blueprint <id>` then `validate`, and asserts the
+ * `agent-app` CLI: `scaffold --blueprint <id>` then `validate`, and asserts the
  * ownership canon exists and is non-empty.
  */
 import { spawn } from "node:child_process";
@@ -56,8 +56,8 @@ export async function runToolkitClass(cliEntry: string | null): Promise<SuiteRes
     const appDir = join(base, "app");
     const failures: string[] = [];
 
-    const created = await run(cliEntry, ["create", appDir, "--blueprint", tk.id, "--name", `${tk.id} demo`]);
-    if (created.exit !== 0) failures.push(`create exit ${created.exit}: ${created.out.trim().slice(0, 300)}`);
+    const created = await run(cliEntry, ["scaffold", appDir, "--blueprint", tk.id, "--name", `${tk.id} demo`]);
+    if (created.exit !== 0) failures.push(`scaffold exit ${created.exit}: ${created.out.trim().slice(0, 300)}`);
 
     if (created.exit === 0) {
       const canon = join(appDir, ".a2app", "system-hashes.json");
@@ -73,7 +73,7 @@ export async function runToolkitClass(cliEntry: string | null): Promise<SuiteRes
       if (validated.exit !== 0) failures.push(`validate exit ${validated.exit}: ${validated.out.trim().slice(0, 400)}`);
     }
 
-    results.push({ name: `${tk.id}: create → canon → validate`, ok: failures.length === 0, failures });
+    results.push({ name: `${tk.id}: scaffold → canon → validate`, ok: failures.length === 0, failures });
   }
 
   const passed = results.filter((r) => r.ok).length;

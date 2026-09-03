@@ -10,7 +10,7 @@ The adapter is the app-side implementation of the A2App interface: **app + adapt
 | Backend binding | type mapping, raw-body interception pre-coercion, live schema read, adapter state | rewritten per stack |
 | Served surface | the A2App endpoints (identity, describe, records, operations, tasks/events, IAM) on the app's own port | uniform by definition |
 
-**Rules**: derive-don't-declare (schema/types/`schemaVersion` from the live app); drop-in (class-A conformance requires zero app-code changes); adapter-owned state (idempotency, tasks, audit, **grants**) invisible to app code; fail open internally, fail closed on policy; never modifies app-authored code. The CLI is a client, not part of the adapter. Delivery: on create/install/import/every launch, idempotent, non-fatal, never overwrites app code.
+**Rules**: derive-don't-declare (schema/types/`schemaVersion` from the live app); drop-in (class-A conformance requires zero app-code changes); adapter-owned state (idempotency, tasks, audit, **grants**) invisible to app code; fail open internally, fail closed on policy; never modifies app-authored code. The `a2app` operate client is a client of the adapter, not part of it. Delivery: on scaffold/install/import/every launch, idempotent, non-fatal, never overwrites app code.
 
 | Directory | Deployment form |
 |---|---|

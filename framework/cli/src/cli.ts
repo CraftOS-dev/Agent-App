@@ -10,7 +10,7 @@
  * The split exists because A2App is operate-only: the binary carrying the
  * protocol's name must carry exactly the protocol, so that a third party
  * implementing A2App ships that client and is not led to believe conformance
- * requires `create` or `promote`. Both are machine-first (the split is
+ * requires `scaffold` or `promote`. Both are machine-first (the split is
  * framework-vs-protocol, NOT human-vs-agent) and share one exit-code contract:
  *   0 success · 1 rejected (gate/guard) · 2 usage error · 3 app unreachable.
  * On success the machine-readable result is on stdout; diagnostics go to stderr.
@@ -36,7 +36,7 @@ interface CommandMeta {
 
 const COMMANDS: Record<string, CommandMeta> = {
   // agent-app — the framework: build, evolve, and manage Agent Apps.
-  create: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app" },
+  scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app" },
   validate: { summary: "Run the validation + security gate", surface: "agent-app" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app" },

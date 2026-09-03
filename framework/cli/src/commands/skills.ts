@@ -31,7 +31,7 @@ export async function run(args: string[]): Promise<number> {
         {
           ok: false,
           error: "skills_not_bundled",
-          hint: "Set A2APP_SKILLS_DIR, or reinstall a2app (skills are bundled at pack time).",
+          hint: "Set A2APP_SKILLS_DIR, or reinstall with `npm i -g agent-app` (skills are bundled at pack time).",
         },
         null,
         2,

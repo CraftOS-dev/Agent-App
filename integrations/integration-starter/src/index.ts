@@ -10,7 +10,8 @@
  * fallback for any harness with no plugin is the portable `skills/` bundle,
  * which needs no code at all.
  *
- * Every tool shells a REAL `a2app` verb and preserves the exit-code contract
+ * Every tool shells a REAL verb on its owning binary (`agent-app` for
+ * build/evolve, `a2app` for operate) and preserves the exit-code contract
  * (0 success · 1 rejected · 2 usage · 3 unreachable); nothing here is simulated.
  */
 import { spawn } from "node:child_process";
@@ -23,11 +24,11 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
 /** Verbs owned by the `agent-app` binary; everything else is `a2app` operate
  *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
 export const FRAMEWORK_VERBS = new Set([
-  "create", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+  "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
   "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 ]);
 
-/** The result of one `a2app` invocation. `json` is populated when stdout is a
+/** The result of one framework CLI invocation (`agent-app` or `a2app`). `json` is populated when stdout is a
  *  JSON document; `ok` mirrors exit code 0. */
 export interface CliResult {
   code: number;
@@ -192,7 +193,7 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
       description: "Scaffold a new Agent App from a blueprint (writes framework files + the ownership canon).",
       parameters: obj({ dir: DIR, blueprint: { type: "string" }, name: { type: "string" } }, ["dir"]),
       handler: (a) => {
-        const argv = ["create", String(a.dir)];
+        const argv = ["scaffold", String(a.dir)];
         if (a.blueprint != null) argv.push("--blueprint", String(a.blueprint));
         if (a.name != null) argv.push("--name", String(a.name));
         return shell(argv);

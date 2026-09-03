@@ -49,7 +49,7 @@ Three pillars: **Describe** (the app publishes its own data model, operations, c
 a2app data <dir> schema # describe: entities, operations, conventions
 a2app data <dir> create card --title "Buy milk" --due tomorrow
 # build / evolve (framework CLI)
-agent-app create <dir> [--blueprint <id>] # scaffold: framework files + ownership canon
+agent-app scaffold <dir> [--blueprint <id>] # scaffold: framework files + ownership canon
 agent-app validate <dir> # the validation + security gate
 agent-app dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
 agent-app walk-verify <dir> # independent verification vs requirements.md
@@ -84,7 +84,7 @@ Humans use an Agent App like any other software: visually. You can also talk to 
 
 ### An agent harness using an Agent App
 
-Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by reading its self-description (`describe`) through the Agent App CLI.
+Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by reading its self-description (`describe`) through the `a2app` operate client (`a2app data <dir> schema`).
 
 *More scenarios will be added as the ecosystem grows.*
 
@@ -104,15 +104,15 @@ Agents use the app programmatically via the A2App protocol, while continuing to 
 
 ## Getting started
 
-> **v0.1 is not yet published to npm/PyPI** — run from source: `pnpm install && pnpm -r build && pnpm -r test`. The `a2app` CLI shown above is available as `node framework/cli/dist/cli.js …` until the packages are published.
+> **v0.1 is not yet published to npm/PyPI.** Once published, `npm i -g agent-app` installs one package carrying both binaries. From source: `pnpm install && pnpm -r build && pnpm -r test`, then invoke the entries directly — `node framework/cli/dist/agent-app.js …` and `node framework/cli/dist/a2app.js …`.
 
-The normative machine contracts are the JSON Schemas in [spec/](spec/), and the [conformance/](conformance/) suite is how an implementation proves it conforms. Each area documents itself: [framework/](framework/) (the CLI), [adapters/](adapters/) (the A2App adapter layers), [toolkits/](toolkits/) (blueprints), [skills/](skills/) (the agent-facing method), and [apps/playground/](apps/playground/) (a runnable example app). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+The normative machine contracts are the JSON Schemas in [spec/](spec/), and the [conformance/](conformance/) suite is how an implementation proves it conforms. Each area documents itself: [framework/](framework/) (the `agent-app` and `a2app` CLIs), [adapters/](adapters/) (the A2App adapter layers), [toolkits/](toolkits/) (blueprints), [skills/](skills/) (the agent-facing method), and [apps/playground/](apps/playground/) (a runnable example app). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 > **Security:** v0.1 is **loopback-trust only** — do not expose an Agent App to a network.
 
 ## Status
 
-**v0.1 — foundation.** Moving toward 1.0-stable. The TypeScript reference implementation ships the CLI, adapters, SDK, and conformance suite; stack choices in the blueprints are incidental and normative for nothing.
+**v0.1 — foundation.** Moving toward 1.0-stable. The TypeScript reference implementation ships both CLIs, adapters, SDK, and conformance suite; stack choices in the blueprints are incidental and normative for nothing.
 
 ## License
 

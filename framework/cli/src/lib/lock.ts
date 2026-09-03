@@ -1,9 +1,9 @@
 /**
  * A cross-process advisory lock for the framework home.
  *
- * The registry is shared by every `a2app` invocation on the machine, and each
+ * The registry is shared by every `agent-app` invocation on the machine, and each
  * invocation is a SEPARATE process — so an in-process mutex cannot protect it.
- * Without a real lock, two concurrent `create` runs both read the registry, both
+ * Without a real lock, two concurrent `scaffold` runs both read the registry, both
  * pick the same free port, and both write: one entry is lost and two apps get
  * the same port, which is exactly the failure the registry exists to prevent.
  *
@@ -83,7 +83,7 @@ export async function withHomeLock<T>(fn: () => Promise<T> | T): Promise<T> {
         throw new Error(
           `timed out waiting for the registry lock at ${file}` +
             (holder ? ` (held by pid ${holder.pid})` : "") +
-            ". If no a2app command is running, delete that file.",
+            ". If no agent-app command is running, delete that file.",
         );
       }
       await new Promise((r) => setTimeout(r, RETRY_MS));

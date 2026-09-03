@@ -58,7 +58,7 @@ export function computeSystemHashes(projectDir: string, systemPaths: string[]): 
   return hashes;
 }
 
-/** Record the current state of `systemPaths` as canonical. Called by create,
+/** Record the current state of `systemPaths` as canonical. Called by scaffold,
  *  toolkit-sync, and adapter-sync — never for agent-editable paths. */
 export function writeSystemHashes(projectDir: string, systemPaths: string[]): void {
   mkdirSync(join(projectDir, CANON_DIR), { recursive: true });

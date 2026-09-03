@@ -5,7 +5,7 @@ CraftBot is Agent-App-native and registers agent tools as **actions** via the
 ActionRegistry). These actions build and operate Agent Apps by shelling the
 framework CLIs, so anything an agent does over the A2App protocol, CraftBot can do
 as an action. Loaded inside CraftBot, which provides `agent_core` (the
-`@action` decorator). Set `A2APP_CLI` to override the binary (default: `a2app`).
+`@action` decorator). Set `A2APP_CLI` (operate, default `a2app`) and `AGENT_APP_CLI` (build/evolve, default `agent-app`).
 """
 import json
 import os
@@ -18,7 +18,7 @@ CLI = os.environ.get("A2APP_CLI", "a2app")
 # design (framework spec 5.1), so each verb is routed to its owner.
 FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
 FRAMEWORK_VERBS = {
-    "create", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
     "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 }
 
@@ -38,7 +38,7 @@ def _run(argv: list) -> dict:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        return {"status": "error", "output": f"a2app CLI not found (looked for {CLI!r}).", "exit_code": 3}
+        return {"status": "error", "output": f"framework CLI not found (looked for {exe!r}). Install with `npm i -g agent-app`, or set A2APP_CLI / AGENT_APP_CLI.", "exit_code": 3}
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return {"status": "success" if proc.returncode == 0 else "error", "output": output or f"(exit {proc.returncode})", "exit_code": proc.returncode}
 
@@ -167,7 +167,7 @@ def agent_app_poll_tasks(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_build(input_data: dict) -> dict:
-    a = ["create", str(input_data["dir"])]
+    a = ["scaffold", str(input_data["dir"])]
     if input_data.get("blueprint"):
         a += ["--blueprint", str(input_data["blueprint"])]
     if input_data.get("name"):

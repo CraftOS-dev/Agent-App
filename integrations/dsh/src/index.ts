@@ -93,7 +93,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(cliTool("agent_app_build", "Scaffold a new Agent App from a blueprint.",
     { dir: DIR, blueprint: opt("blueprint id"), name: opt("app name") },
     (a) => {
-      const argv = ["create", s(a.dir)];
+      const argv = ["scaffold", s(a.dir)];
       if (a.blueprint != null) argv.push("--blueprint", s(a.blueprint));
       if (a.name != null) argv.push("--name", s(a.name));
       return argv;

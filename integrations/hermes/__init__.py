@@ -3,8 +3,8 @@
 A native Hermes backend plugin (Hermes plugins are Python). It registers tools
 that build and operate Agent Apps by shelling the framework CLIs, so anything an
 agent does over the A2App protocol, Hermes can do through these tools. Drop this
-directory into `~/.hermes/plugins/`; set `A2APP_CLI` to override the binary
-(default: `a2app`).
+directory into `~/.hermes/plugins/`; set `A2APP_CLI` (operate, default `a2app`) and `AGENT_APP_CLI`
+(build/evolve, default `agent-app`) to override the binaries.
 
 Every tool shells the real CLI and returns its output verbatim — a guard
 rejection (invalid enum, relative date, …) is useful data, so it is returned to
@@ -18,14 +18,13 @@ CLI = os.environ.get("A2APP_CLI", "a2app")
 # design (framework spec 5.1), so each verb is routed to its owner.
 FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
 FRAMEWORK_VERBS = {
-    "create", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
     "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 }
 
 
 
 def _run(argv: list[str]) -> str:
-    exe = argv[:]
     # Run a JS entry (…/cli.js) with node; never use a shell, so field values
     # reach the CLI as literal arguments.
     exe = FRAMEWORK_CLI if (argv and argv[0] in FRAMEWORK_VERBS) else CLI
@@ -33,7 +32,7 @@ def _run(argv: list[str]) -> str:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        return f"a2app CLI not found (looked for {CLI!r}). Install it or set A2APP_CLI to its path."
+        return f"framework CLI not found (looked for {exe!r}). Install it with `npm i -g agent-app`, or set A2APP_CLI / AGENT_APP_CLI to the binary paths."
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return out or f"(exit {proc.returncode})"
 
@@ -93,7 +92,7 @@ def _poll_tasks(args: dict, **_kw) -> str:
 
 
 def _build(args: dict, **_kw) -> str:
-    a = ["create", str(args["dir"])]
+    a = ["scaffold", str(args["dir"])]
     if args.get("blueprint"):
         a += ["--blueprint", str(args["blueprint"])]
     if args.get("name"):

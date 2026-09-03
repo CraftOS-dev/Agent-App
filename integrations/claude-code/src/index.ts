@@ -9,7 +9,8 @@
  * the shared engine (`@a2app/integration-starter`); nothing here is simulated.
  *
  * Register with:  claude mcp add a2app -- node <path>/dist/index.js
- * Override the CLI binary with the A2APP_CLI env var (default: `a2app`).
+ * Override the binaries with A2APP_CLI (operate, default `a2app`) and
+ * AGENT_APP_CLI (build/evolve, default `agent-app`).
  */
 import { createInterface } from "node:readline";
 import { a2appTools, type HarnessTool } from "@a2app/integration-starter";

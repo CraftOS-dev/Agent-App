@@ -21,12 +21,12 @@ Run the conformance suite alone: `pnpm --filter @a2app/conformance test`.
 ## Try it
 ```bash
 # scaffold and gate an app from a blueprint:
-node framework/cli/dist/cli.js create ./my-app --blueprint blueprint-react-node
-node framework/cli/dist/cli.js validate ./my-app --no-build
+node framework/cli/dist/agent-app.js scaffold ./my-app --blueprint blueprint-react-node
+node framework/cli/dist/agent-app.js validate ./my-app --no-build
 # launch it and operate it over A2App:
-node framework/cli/dist/cli.js serve ./my-app
-node framework/cli/dist/cli.js data ./my-app schema
-node framework/cli/dist/cli.js stop ./my-app
+node framework/cli/dist/agent-app.js serve ./my-app
+node framework/cli/dist/a2app.js data ./my-app schema
+node framework/cli/dist/agent-app.js stop ./my-app
 ```
 
 ## Ground rules

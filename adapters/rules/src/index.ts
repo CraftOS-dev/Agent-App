@@ -57,6 +57,7 @@ export const ERROR_CODES = {
   APPROVAL_REQUIRED: "approval_required",
   INSUFFICIENT_SCOPE: "insufficient_scope",
   AMBIGUOUS_REF: "ambiguous_ref",
+  INVALID_FILTER: "invalid_filter",
   INVALID_EVENT: "invalid_event",
   TASK_NOT_FOUND: "task_not_found",
   TASK_NOT_CLAIMABLE: "task_not_claimable",
@@ -224,8 +225,16 @@ export function validate(
 
     const value = body[key];
     // Blank means "clear this field" — a legitimate operation, only
-    // distinguishable from garbage because we see the raw value.
-    if (isBlank(value)) continue;
+    // distinguishable from garbage because we see the raw value. It is only
+    // legitimate on a NON-required field: clearing a required one leaves the
+    // record in a state the schema says cannot exist, and on a partial update
+    // nothing else would catch it.
+    if (isBlank(value)) {
+      if (field.required) {
+        out.push(violation(ERROR_CODES.MISSING_REQUIRED, key, "a non-blank value (required field)", value));
+      }
+      continue;
+    }
 
     if (field.type === "datetime" && !looksLikeDate(value)) {
       out.push(violation(ERROR_CODES.INVALID_DATE, key, "an ISO 8601 date", value));
@@ -241,6 +250,14 @@ export function validate(
       // backend stores the string "true". The one unchecked type is where it
       // lands, so check it.
       out.push(violation(ERROR_CODES.INVALID_STRING, key, "text", value));
+      continue;
+    }
+    // `max` is published in describe, so a client plans against it; a backend
+    // that silently truncates (or a column that rejects at insert time) turns an
+    // advertised constraint into a surprise. Length is the documented meaning of
+    // `max` on a string field.
+    if (field.type === "string" && typeof field.max === "number" && (value as string).length > field.max) {
+      out.push(violation(ERROR_CODES.INVALID_STRING, key, `text of at most ${field.max} characters`, value));
       continue;
     }
     if (field.type === "number" && typeof value !== "number") {
@@ -262,8 +279,14 @@ export function validate(
       }
     }
     if (field.type === "list<enum>" && field.values && field.values.length) {
-      const items = Array.isArray(value) ? value : [value];
-      const bad = items.find((item) => !field.values!.some((v) => String(v) === String(item)));
+      // The wire form of a list type is an array. Accepting a bare scalar and
+      // wrapping it hides a client bug and makes the stored shape depend on how
+      // many values happened to be sent.
+      if (!Array.isArray(value)) {
+        out.push(violation(ERROR_CODES.INVALID_ENUM, key, "an array of: " + field.values.join(" | "), value));
+        continue;
+      }
+      const bad = value.find((item) => !field.values!.some((v) => String(v) === String(item)));
       if (bad !== undefined) {
         out.push(violation(ERROR_CODES.INVALID_ENUM, key, "each of: " + field.values.join(" | "), value));
         continue;
@@ -275,12 +298,14 @@ export function validate(
   // omits a required column and stores a half-built row; the agent then reports
   // success. Catch it at the guard so a missing required field is a rejection,
   // not a corrupt record. Skipped on update/patch (partial writes are legitimate).
+  // A required field that was PROVIDED but blank is already reported above (that
+  // check applies to updates too), so this only covers the create-specific case:
+  // the field is absent entirely. Reporting both would list one mistake twice.
   if (opts.requireRequired) {
     for (const f of fields) {
       if (!f.required || f.readOnly) continue;
-      const provided = Object.prototype.hasOwnProperty.call(body, f.name);
-      if (!provided || isBlank(body[f.name])) {
-        out.push(violation(ERROR_CODES.MISSING_REQUIRED, f.name, "a non-blank value (required field)", provided ? body[f.name] : undefined));
+      if (!Object.prototype.hasOwnProperty.call(body, f.name)) {
+        out.push(violation(ERROR_CODES.MISSING_REQUIRED, f.name, "a non-blank value (required field)", undefined));
       }
     }
   }
@@ -355,21 +380,61 @@ export function describeIncomplete(lost: Divergence[]): string {
 
 /* --------------------------------------------------------------- fingerprint */
 
+/** Every attribute of a field that describe publishes, rendered deterministically.
+ *  Omitted when unset, so adding an attribute to the model changes the string
+ *  while an untouched field keeps its rendering stable. */
+function fieldPrint(f: NormalizedField): string {
+  const parts = [`${f.name}:${f.type}`];
+  if (f.required) parts.push("req");
+  if (f.readOnly) parts.push("ro");
+  if (f.writeOnly) parts.push("wo");
+  if (f.dayKey) parts.push("day");
+  if (typeof f.max === "number") parts.push(`max=${f.max}`);
+  if (f.entity) parts.push(`entity=${f.entity}`);
+  if (f.values && f.values.length) parts.push(`values=${[...f.values].sort().join("|")}`);
+  return parts.join(":");
+}
+
 /**
- * A stable fingerprint of a data model, so clients can cache describe against
- * it and re-fetch when it changes. Pure and deterministic: same entities in,
- * same `sv_…` out, regardless of ordering. djb2 over a canonicalised
- * `entity(field:type,…)` rendering.
+ * A stable fingerprint of everything describe publishes, so clients can cache
+ * describe against it and re-fetch when it changes. Pure and deterministic: the
+ * same model in, the same `sv_…` out, regardless of ordering.
+ *
+ * It covers every published attribute, not just name and type. A client caches
+ * describe against this value and is told never to write against a stale schema
+ * (section 2) — so narrowing an enum, making a field required, tightening `max`,
+ * or retargeting a `ref` MUST change it. If it did not, every cached client
+ * would keep writing against a model the app no longer has, and the guard
+ * rejections would look inexplicable to the agent.
+ *
+ * Operations are included for the same reason: they are part of the same cached
+ * document, so removing one has to invalidate the cache that still advertises it.
  */
-export function schemaFingerprint(entities: Record<string, NormalizedField[]>): string {
+export function schemaFingerprint(
+  entities: Record<string, NormalizedField[]>,
+  operations: readonly OperationPrint[] = [],
+): string {
   const parts: string[] = [];
   for (const [name, fields] of Object.entries(entities)) {
-    const names = fields.map((f) => `${f.name}:${f.type}`).sort();
-    parts.push(`${name}(${names.join(",")})`);
+    parts.push(`${name}(${fields.map(fieldPrint).sort().join(",")})`);
   }
   parts.sort();
-  const joined = parts.join(";");
+  const ops = operations
+    .map((o) => {
+      const flags = [o.destructive ? "d" : "", o.readOnly ? "r" : "", o.idempotent ? "i" : ""].filter(Boolean);
+      return flags.length ? `${o.name}:${flags.join("")}` : o.name;
+    })
+    .sort();
+  const joined = parts.join(";") + "|" + ops.join(",");
   let h = 5381;
   for (let k = 0; k < joined.length; k++) h = ((h * 33) ^ joined.charCodeAt(k)) >>> 0;
   return "sv_" + h.toString(16);
+}
+
+/** The operation attributes describe publishes, for {@link schemaFingerprint}. */
+export interface OperationPrint {
+  name: string;
+  destructive?: boolean;
+  readOnly?: boolean;
+  idempotent?: boolean;
 }

@@ -11,12 +11,23 @@ import { loadProject } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
+/** The system-owned minimum for an app that vendors nothing (section 4.2): the
+ *  canon is never empty, and `manifest.json` is always system-owned. */
+const NON_VENDORING_SYSTEM_PATHS = ["manifest.json"];
+
 export async function run(_args: string[], app: string): Promise<number> {
   const project = loadProject(app);
   const tk = projectToolkit(project.dir);
   if (tk === null) {
-    log.error("no toolkit recorded for this app (.a2app/toolkit.json missing) — nothing to sync");
-    return 1;
+    // A non-vendoring stack (an app whose adapter is a library dependency, or one
+    // assembled by hand) has no toolkit to re-vendor from, but section 4.2 still
+    // requires it to carry a canon — and this command is the only writer, so
+    // refusing here left such an app permanently unable to establish one. There
+    // is nothing to copy; the canon is still recorded.
+    writeSystemHashes(project.dir, NON_VENDORING_SYSTEM_PATHS);
+    log.ok("toolkit-sync: no toolkit to vendor from — recorded the framework-file canon");
+    log.raw(JSON.stringify({ ok: true, vendored: 0, canon: NON_VENDORING_SYSTEM_PATHS }, null, 2));
+    return 0;
   }
   const written = vendorPaths(tk, project.dir, tk.manifest.systemPaths);
   const version = adapterVersionOf(tk);

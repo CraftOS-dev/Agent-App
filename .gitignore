@@ -69,3 +69,6 @@ docs/
 
 # working diagrams — kept on disk, not part of the distribution
 agent-app-user-journey.drawio
+
+# internal audit notes — kept on disk, not part of the distribution
+blocker_checklist.md

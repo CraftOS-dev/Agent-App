@@ -236,6 +236,25 @@ function allTemplateFiles(_tk: ResolvedToolkit): string[] {
  *  blueprint still yields a conforming artifact shell an agent then fills in. */
 function scaffoldMinimal(dir: string, name: string): void {
   mkdirSync(join(dir, "reference"), { recursive: true });
+  // Credentials are runtime artifacts that must never be committed (section 4.1).
+  // A blueprint ships its own ignore rules; a hand-assembled app has no other
+  // source for them, and the token is minted into this directory moments later.
+  writeFileSync(
+    join(dir, ".gitignore"),
+    [
+      "# Credentials are runtime artifacts: never shipped, exported, or committed.",
+      ".agent-token",
+      ".principal",
+      ".superuser",
+      "",
+      "# Framework runtime state: serve records, logs, dev copies, and backups.",
+      ".a2app/serve.json",
+      ".a2app/serve.log",
+      ".a2app/dev/",
+      ".a2app/backups/",
+      "",
+    ].join("\n"),
+  );
   writeFileSync(
     join(dir, "operations.json"),
     JSON.stringify({ operations: [] }, null, 2) + "\n",

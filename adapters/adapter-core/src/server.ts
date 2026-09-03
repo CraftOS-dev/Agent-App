@@ -16,11 +16,12 @@ import {
   type NormalizedField,
   type Violation,
 } from "@a2app/rules";
-import { approvalKey } from "./canon.js";
+import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import {
   OperationError,
+  UnsupportedFilterError,
   type A2AppConfig,
   type A2AppReply,
   type A2AppRequest,
@@ -133,7 +134,7 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
   }
 
   function schemaVersion(): string {
-    return schemaFingerprint(normalizedEntities());
+    return schemaFingerprint(normalizedEntities(), config.operations ?? []);
   }
 
   function describeDoc(): Record<string, unknown> {
@@ -321,7 +322,17 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
         ...(req.query.perPage !== undefined ? { perPage: Number(req.query.perPage) } : {}),
         ...(req.query.page !== undefined ? { page: Number(req.query.page) } : {}),
       };
-      const result = await binding.listRecords(entity, query);
+      // A binding that cannot honour the filter refuses; the alternative is
+      // answering 200 with rows the caller did not ask for (section 4.2).
+      let result;
+      try {
+        result = await binding.listRecords(entity, query);
+      } catch (e) {
+        if (e instanceof UnsupportedFilterError) {
+          return err(400, ERROR_CODES.INVALID_FILTER, e.message, { got: e.expression });
+        }
+        throw e;
+      }
       return ok(result);
     }
 
@@ -562,6 +573,14 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
       }
       case "complete": {
         if (task.status === "canceled") return err(409, ERROR_CODES.TASK_CANCELED, `Task ${taskId} was canceled.`);
+        // A terminal write belongs to the claimer: completion closes a claim, so
+        // a task nobody claimed has no claim to close. Allowing `submitted ->
+        // completed` would skip the claim that binds the run to a named principal
+        // (section 6.5) and would let a task be reported done by a party that
+        // never did the work.
+        if (task.status !== "working" && task.status !== "input-required") {
+          return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} is ${task.status}, not in progress.`);
+        }
         const status = body.status;
         if (status === "completed") {
           task.status = "completed";
@@ -577,6 +596,13 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
         return ok(taskWire(task));
       }
       case "cancel": {
+        // Terminal is terminal: every task reaches a terminal state once
+        // (section 6.3). Re-labelling a completed or failed task as canceled
+        // would move it backwards through the lifecycle and rewrite the recorded
+        // outcome of work that already finished.
+        if (task.status === "completed" || task.status === "failed" || task.status === "canceled") {
+          return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} already reached ${task.status}.`);
+        }
         task.status = "canceled";
         store.saveTask(task);
         writeAudit(ctx, `task:cancel`, taskId, "ok");
@@ -664,7 +690,17 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
           event: ev.id,
           capability: input.capability,
           payload: input.payload,
-          dedupKey: input.dedupKey ?? ev.id,
+          // Dedup is keyed on the OCCURRENCE, not on the event record: the same
+          // trigger firing twice must make one task (section 6.2). `ev.id` is
+          // freshly minted per emit, so defaulting to it deduplicates nothing.
+          // The occurrence is what the app asked for — its type, the capability
+          // it requests, and its payload — canonicalized so two identical
+          // triggers hash identically regardless of key order.
+          dedupKey:
+            input.dedupKey ??
+            sha256Prefixed(
+              canonicalize({ type: input.type, capability: input.capability, payload: input.payload ?? null }),
+            ),
         });
         taskId = task.id;
       }

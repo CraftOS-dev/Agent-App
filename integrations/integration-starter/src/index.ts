@@ -24,9 +24,31 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
 /** Verbs owned by the `agent-app` binary; everything else is `a2app` operate
  *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
 export const FRAMEWORK_VERBS = new Set([
-  "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+  "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
   "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 ]);
+
+/** The closed set of verbs that address every app rather than one, and so take
+ *  no app argument (framework spec 5.1). Closed is what makes {@link verbOf}
+ *  exact: it never has to inspect a positional to guess what it is. */
+export const REGISTRY_VERBS = new Set(["list", "global", "skills"]);
+
+/**
+ * The verb in an app-first argv. Both CLIs are written `<binary> <app> <verb>
+ * [args]`, so the verb is the SECOND element — except for a registry verb, which
+ * takes no app and therefore stands alone in first position.
+ */
+export function verbOf(argv: string[]): string {
+  const first = argv[0] ?? "";
+  return REGISTRY_VERBS.has(first) ? first : argv[1] ?? "";
+}
+
+/** Route an argv to the binary owning its verb (framework spec 5.1): the operate
+ *  client refuses build verbs by design, so picking by verb keeps a plugin
+ *  correct without asking each harness to configure two paths. */
+export function binFor(argv: string[], cliBin = "a2app", frameworkBin = "agent-app"): string {
+  return FRAMEWORK_VERBS.has(verbOf(argv)) ? frameworkBin : cliBin;
+}
 
 /** The result of one framework CLI invocation (`agent-app` or `a2app`). `json` is populated when stdout is a
  *  JSON document; `ok` mirrors exit code 0. */
@@ -117,11 +139,7 @@ const ENTITY = { type: "string", description: "entity / collection name" };
  * do through these, because each one shells a real framework CLI verb.
  */
 export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): HarnessTool[] {
-  /** Route a verb to the binary that owns it (framework spec 5.1): the operate
-   *  client refuses build verbs by design, so picking by verb keeps a plugin
-   *  correct without asking each harness to configure two paths. */
-  const bin = (verb: string): string => (FRAMEWORK_VERBS.has(verb) ? frameworkBin : cliBin);
-  const shell = (argv: string[]): Promise<CliResult> => runA2App(bin(argv[0] ?? ""), argv);
+  const shell = (argv: string[]): Promise<CliResult> => runA2App(binFor(argv, cliBin, frameworkBin), argv);
   return [
     {
       name: "agent_app_describe",
@@ -236,8 +254,7 @@ export function registerA2AppPlugin(ctx: HarnessContext, opts: PluginOptions = {
   // so a user typing `agent-app data …` is not punished for the split.
   ctx.registerCommand?.({
     name: "agent-app",
-    run: async (argv) =>
-      (await runA2App(FRAMEWORK_VERBS.has(argv[0] ?? "") ? frameworkBin : cliBin, argv)).code,
+    run: async (argv) => (await runA2App(binFor(argv, cliBin, frameworkBin), argv)).code,
   });
   return tools;
 }

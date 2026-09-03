@@ -18,16 +18,31 @@ CLI = os.environ.get("A2APP_CLI", "a2app")
 # design (framework spec 5.1), so each verb is routed to its owner.
 FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
 FRAMEWORK_VERBS = {
-    "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
     "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 }
+# The closed set of verbs that address every app rather than one, and so take no
+# app argument. Closed is what makes _verb exact: it never has to inspect a
+# positional to guess what it is.
+REGISTRY_VERBS = {"list", "global", "skills"}
 
+
+def _verb(argv: list[str]) -> str:
+    """The verb in an app-first argv.
+
+    Both CLIs are written `<binary> <app> <verb> [args]`, so the verb is the
+    SECOND element — except for a registry verb, which takes no app and
+    therefore stands alone in first position (framework spec 5.1).
+    """
+    if argv and argv[0] in REGISTRY_VERBS:
+        return argv[0]
+    return argv[1] if len(argv) > 1 else ""
 
 
 def _run(argv: list[str]) -> str:
     # Run a JS entry (…/cli.js) with node; never use a shell, so field values
     # reach the CLI as literal arguments.
-    exe = FRAMEWORK_CLI if (argv and argv[0] in FRAMEWORK_VERBS) else CLI
+    exe = FRAMEWORK_CLI if _verb(argv) in FRAMEWORK_VERBS else CLI
     cmd = ["node", exe, *argv] if exe.endswith((".js", ".mjs", ".cjs")) else [exe, *argv]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -40,11 +55,11 @@ def _run(argv: list[str]) -> str:
 # --------------------------------------------------------------- handlers
 
 def _describe(args: dict, **_kw) -> str:
-    return _run(["data", str(args["dir"]), "schema"])
+    return _run([str(args["dir"]), "data", "schema"])
 
 
 def _list(args: dict, **_kw) -> str:
-    a = ["data", str(args["dir"]), str(args["entity"]), "list"]
+    a = [str(args["dir"]), "data", str(args["entity"]), "list"]
     if args.get("filter"):
         a += ["--filter", str(args["filter"])]
     if args.get("sort"):
@@ -55,29 +70,29 @@ def _list(args: dict, **_kw) -> str:
 
 
 def _get(args: dict, **_kw) -> str:
-    return _run(["data", str(args["dir"]), str(args["entity"]), "get", str(args["id"])])
+    return _run([str(args["dir"]), "data", str(args["entity"]), "get", str(args["id"])])
 
 
 def _create(args: dict, **_kw) -> str:
     import json
-    return _run(["data", str(args["dir"]), str(args["entity"]), "create", "--json", json.dumps(args.get("fields") or {})])
+    return _run([str(args["dir"]), "data", str(args["entity"]), "create", "--json", json.dumps(args.get("fields") or {})])
 
 
 def _update(args: dict, **_kw) -> str:
     import json
-    return _run(["data", str(args["dir"]), str(args["entity"]), "update", str(args["id"]), "--json", json.dumps(args.get("fields") or {})])
+    return _run([str(args["dir"]), "data", str(args["entity"]), "update", str(args["id"]), "--json", json.dumps(args.get("fields") or {})])
 
 
 def _delete(args: dict, **_kw) -> str:
-    return _run(["data", str(args["dir"]), str(args["entity"]), "delete", str(args["id"])])
+    return _run([str(args["dir"]), "data", str(args["entity"]), "delete", str(args["id"])])
 
 
 def _operations(args: dict, **_kw) -> str:
-    return _run(["ops", str(args["dir"])])
+    return _run([str(args["dir"]), "ops"])
 
 
 def _run_operation(args: dict, **_kw) -> str:
-    a = ["run", str(args["dir"]), str(args["operation"])]
+    a = [str(args["dir"]), "run", str(args["operation"])]
     for key, value in (args.get("fields") or {}).items():
         a += [f"--{key}", str(value)]
     if args.get("approve"):
@@ -87,12 +102,12 @@ def _run_operation(args: dict, **_kw) -> str:
 
 def _poll_tasks(args: dict, **_kw) -> str:
     if args.get("status"):
-        return _run(["tasks", str(args["dir"]), "--status", str(args["status"])])
-    return _run(["tasks", str(args["dir"])])
+        return _run([str(args["dir"]), "tasks", "--status", str(args["status"])])
+    return _run([str(args["dir"]), "tasks"])
 
 
 def _build(args: dict, **_kw) -> str:
-    a = ["scaffold", str(args["dir"])]
+    a = [str(args["dir"]), "scaffold"]
     if args.get("blueprint"):
         a += ["--blueprint", str(args["blueprint"])]
     if args.get("name"):
@@ -101,7 +116,7 @@ def _build(args: dict, **_kw) -> str:
 
 
 def _validate(args: dict, **_kw) -> str:
-    return _run(["validate", str(args["dir"]), "--no-build"] if args.get("noBuild") else ["validate", str(args["dir"])])
+    return _run([str(args["dir"]), "validate", "--no-build"] if args.get("noBuild") else [str(args["dir"]), "validate"])
 
 
 # --------------------------------------------------------------- schemas

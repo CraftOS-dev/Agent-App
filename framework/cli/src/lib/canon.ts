@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { assertInside } from "./fsx.js";
+import { projectToolkit } from "./toolkit.js";
 
 export const CANON_DIR = ".a2app";
 export const CANON_FILE = join(CANON_DIR, "system-hashes.json");
@@ -108,25 +109,40 @@ export interface OwnershipDrift {
   added: string[];
 }
 
-/** Compare the recorded canon to the current state. `modified`/`missing` come
- *  from recorded entries; `added` is a recorded path reappearing that is not in
- *  canon. */
+/**
+ * Compare the recorded canon to the current state: `modified` and `missing`
+ * come from recorded entries, `added` is a system-owned file present now that
+ * the canon does not record.
+ *
+ * The comparison walks the toolkit's DECLARED system paths, not the canon's own
+ * keys. Re-walking the recorded keys can only ever rediscover the files already
+ * listed, so an added file would be invisible — but a declared path may be a
+ * directory, and a new file dropped inside it is a system-owned file nobody
+ * canonized. Section 4.2 requires the gate to fail on exactly that.
+ *
+ * With no toolkit there are no declared directory roots, so the recorded file
+ * list IS the complete declaration of what is system-owned, and any other file
+ * in the project is agent-accessible by definition.
+ */
 export function verifySystemHashes(projectDir: string): OwnershipDrift {
   const file = canonPath(projectDir);
   if (file === null) {
     throw new Error(
-      `missing ${CANON_FILE} — run \`agent-app toolkit-sync\` to (re)establish the ownership canon`,
+      `missing ${CANON_FILE} — run \`agent-app <dir> toolkit-sync\` to (re)establish the ownership canon`,
     );
   }
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  const paths = Object.keys(recorded);
-  const current = computeSystemHashes(projectDir, paths);
+  const declared = projectToolkit(projectDir)?.manifest.systemPaths ?? Object.keys(recorded);
+  const current = computeSystemHashes(projectDir, declared);
 
   const drift: OwnershipDrift = { modified: [], missing: [], added: [] };
   for (const [path, hash] of Object.entries(recorded)) {
     const now = current[path];
     if (now === undefined) drift.missing.push(path);
     else if (now !== hash) drift.modified.push(path);
+  }
+  for (const path of Object.keys(current)) {
+    if (recorded[path] === undefined) drift.added.push(path);
   }
   return drift;
 }

@@ -196,6 +196,24 @@ export interface A2AppConfig {
   audit?: (entry: AuditEntry) => void;
 }
 
+/**
+ * Thrown by a {@link Binding} when a `filter` falls outside the query grammar
+ * it implements. The served surface turns it into an `invalid_filter` rejection.
+ *
+ * A filtered read MUST filter (section 4.2). A binding that cannot honour an
+ * expression has exactly two honest options — refuse, or implement it — because
+ * returning unfiltered rows answers 200 with the wrong records and returning
+ * none answers 200 with a false empty. Both read as a correct filtered read to
+ * the caller, and label resolution is built on filtered reads. This error is how
+ * a binding refuses.
+ */
+export class UnsupportedFilterError extends Error {
+  constructor(readonly expression: string) {
+    super(`filter expression is not supported by this backend: ${expression}`);
+    this.name = "UnsupportedFilterError";
+  }
+}
+
 /** One audit row: every credentialed write is appended. */
 export interface AuditEntry {
   at: string;

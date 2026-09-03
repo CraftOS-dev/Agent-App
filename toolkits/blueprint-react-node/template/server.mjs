@@ -8,7 +8,7 @@
  * `public/` (View) — never this file. Because describe and `schemaVersion` are
  * derived from the live schema, an agent always sees the true model.
  */
-import { createA2App, createA2AppServer } from "@a2app/adapter-core";
+import { createA2App, createA2AppServer, UnsupportedFilterError } from "@a2app/adapter-core";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -88,14 +88,24 @@ function cmp(a, b) {
   return String(a) < String(b) ? -1 : 1;
 }
 
-/** A minimal single-clause equality filter — `field = "value"`, `field != "value"`,
- *  or `field ~ "value"` (contains). Enough for label→id resolution; a richer
- *  backend exposes its own query language. */
+/** The single-clause grammar this backend implements — `field = "value"`,
+ *  `field != "value"`, or `field ~ "value"` (contains), optionally wrapped in one
+ *  pair of parentheses. Enough for label→id resolution; a richer backend exposes
+ *  its own query language.
+ *
+ *  Anything outside it is REFUSED, never ignored: an adapter that accepts
+ *  `filter` and returns unfiltered rows answers 200 with the wrong records, which
+ *  turns every label lookup into a false multi-match. */
+const FILTER_CLAUSE =
+  /^\s*\(?\s*([A-Za-z_]\w*)\s*(=|!=|~)\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s"'()]+))\s*\)?\s*$/;
+
 function matchFilter(expr) {
-  const m = /^\s*([A-Za-z_][\w]*)\s*(=|!=|~)\s*(.*?)\s*$/.exec(expr);
-  if (!m) return () => true;
-  const [, field, op, raw] = m;
-  const val = raw.replace(/^["']|["']$/g, "").replace(/\\"/g, '"');
+  const m = FILTER_CLAUSE.exec(expr);
+  if (!m) throw new UnsupportedFilterError(expr);
+  const [, field, op, quoted, singleQuoted, bare] = m;
+  // Only the double-quoted form carries escapes; unescape exactly what the
+  // escaping side wrote (`\x` -> `x`).
+  const val = quoted !== undefined ? quoted.replace(/\\(.)/g, "$1") : (singleQuoted ?? bare ?? "");
   return (r) => {
     const cur = r[field];
     const s = cur === undefined || cur === null ? "" : String(cur);
@@ -188,6 +198,12 @@ const app = createA2App(binding, {
   operations: schema.operations ?? [],
   allowedOrigins: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`],
   credentialHint: "Read the app's .agent-token file (mode 0600) in the project directory.",
+  // Adapter-owned state (idempotency keys, tasks, events, grants, audit) lives
+  // beside the records, inside the toolkit's declared lifecycle dataDir. The
+  // idempotency table MUST survive a restart: a restart is exactly when a
+  // retried write arrives, so an in-memory table would return a duplicate
+  // record instead of the 409 the protocol promises.
+  storePath: join(DATA_DIR, "a2app-state.json"),
 });
 
 /* ------------------------------------------------------------ static View */

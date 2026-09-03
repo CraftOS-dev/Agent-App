@@ -18,9 +18,25 @@ CLI = os.environ.get("A2APP_CLI", "a2app")
 # design (framework spec 5.1), so each verb is routed to its owner.
 FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
 FRAMEWORK_VERBS = {
-    "scaffold", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+    "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
     "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
 }
+# The closed set of verbs that address every app rather than one, and so take no
+# app argument. Closed is what makes _verb exact: it never has to inspect a
+# positional to guess what it is.
+REGISTRY_VERBS = {"list", "global", "skills"}
+
+
+def _verb(argv: list) -> str:
+    """The verb in an app-first argv.
+
+    Both CLIs are written `<binary> <app> <verb> [args]`, so the verb is the
+    SECOND element — except for a registry verb, which takes no app and
+    therefore stands alone in first position (framework spec 5.1).
+    """
+    if argv and argv[0] in REGISTRY_VERBS:
+        return argv[0]
+    return argv[1] if len(argv) > 1 else ""
 
 
 _OUT = {
@@ -33,7 +49,7 @@ _ENTITY = {"type": "string", "example": "contacts", "description": "Entity / col
 
 
 def _run(argv: list) -> dict:
-    exe = FRAMEWORK_CLI if (argv and argv[0] in FRAMEWORK_VERBS) else CLI
+    exe = FRAMEWORK_CLI if _verb(argv) in FRAMEWORK_VERBS else CLI
     cmd = ["node", exe, *argv] if exe.endswith((".js", ".mjs", ".cjs")) else [exe, *argv]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -50,7 +66,7 @@ def _run(argv: list) -> dict:
     input_schema={"dir": _DIR}, output_schema=_OUT,
 )
 def agent_app_describe(input_data: dict) -> dict:
-    return _run(["data", str(input_data["dir"]), "schema"])
+    return _run([str(input_data["dir"]), "data", "schema"])
 
 
 @action(
@@ -66,7 +82,7 @@ def agent_app_describe(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_list(input_data: dict) -> dict:
-    a = ["data", str(input_data["dir"]), str(input_data["entity"]), "list"]
+    a = [str(input_data["dir"]), "data", str(input_data["entity"]), "list"]
     if input_data.get("filter"):
         a += ["--filter", str(input_data["filter"])]
     if input_data.get("sort"):
@@ -84,7 +100,7 @@ def agent_app_list(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_get(input_data: dict) -> dict:
-    return _run(["data", str(input_data["dir"]), str(input_data["entity"]), "get", str(input_data["id"])])
+    return _run([str(input_data["dir"]), "data", str(input_data["entity"]), "get", str(input_data["id"])])
 
 
 @action(
@@ -95,7 +111,7 @@ def agent_app_get(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_create(input_data: dict) -> dict:
-    return _run(["data", str(input_data["dir"]), str(input_data["entity"]), "create", "--json", json.dumps(input_data.get("fields") or {})])
+    return _run([str(input_data["dir"]), "data", str(input_data["entity"]), "create", "--json", json.dumps(input_data.get("fields") or {})])
 
 
 @action(
@@ -106,7 +122,7 @@ def agent_app_create(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_update(input_data: dict) -> dict:
-    return _run(["data", str(input_data["dir"]), str(input_data["entity"]), "update", str(input_data["id"]), "--json", json.dumps(input_data.get("fields") or {})])
+    return _run([str(input_data["dir"]), "data", str(input_data["entity"]), "update", str(input_data["id"]), "--json", json.dumps(input_data.get("fields") or {})])
 
 
 @action(
@@ -117,7 +133,7 @@ def agent_app_update(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_delete(input_data: dict) -> dict:
-    return _run(["data", str(input_data["dir"]), str(input_data["entity"]), "delete", str(input_data["id"])])
+    return _run([str(input_data["dir"]), "data", str(input_data["entity"]), "delete", str(input_data["id"])])
 
 
 @action(
@@ -127,7 +143,7 @@ def agent_app_delete(input_data: dict) -> dict:
     input_schema={"dir": _DIR}, output_schema=_OUT,
 )
 def agent_app_operations(input_data: dict) -> dict:
-    return _run(["ops", str(input_data["dir"])])
+    return _run([str(input_data["dir"]), "ops"])
 
 
 @action(
@@ -138,7 +154,7 @@ def agent_app_operations(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_run_operation(input_data: dict) -> dict:
-    a = ["run", str(input_data["dir"]), str(input_data["operation"])]
+    a = [str(input_data["dir"]), "run", str(input_data["operation"])]
     for key, value in (input_data.get("fields") or {}).items():
         a += [f"--{key}", str(value)]
     if input_data.get("approve"):
@@ -155,8 +171,8 @@ def agent_app_run_operation(input_data: dict) -> dict:
 )
 def agent_app_poll_tasks(input_data: dict) -> dict:
     if input_data.get("status"):
-        return _run(["tasks", str(input_data["dir"]), "--status", str(input_data["status"])])
-    return _run(["tasks", str(input_data["dir"])])
+        return _run([str(input_data["dir"]), "tasks", "--status", str(input_data["status"])])
+    return _run([str(input_data["dir"]), "tasks"])
 
 
 @action(
@@ -167,7 +183,7 @@ def agent_app_poll_tasks(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_build(input_data: dict) -> dict:
-    a = ["scaffold", str(input_data["dir"])]
+    a = [str(input_data["dir"]), "scaffold"]
     if input_data.get("blueprint"):
         a += ["--blueprint", str(input_data["blueprint"])]
     if input_data.get("name"):
@@ -184,4 +200,4 @@ def agent_app_build(input_data: dict) -> dict:
 )
 def agent_app_validate(input_data: dict) -> dict:
     no_build = str(input_data.get("no_build", "")).lower() in ("true", "1", "yes")
-    return _run(["validate", str(input_data["dir"]), "--no-build"] if no_build else ["validate", str(input_data["dir"])])
+    return _run([str(input_data["dir"]), "validate", "--no-build"] if no_build else [str(input_data["dir"]), "validate"])

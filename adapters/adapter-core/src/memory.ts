@@ -8,6 +8,7 @@
  * served surface (server.ts) and the rules are shared verbatim.
  */
 import { randomBytes } from "node:crypto";
+import { UnsupportedFilterError } from "./types.js";
 import type {
   Binding,
   CallContext,
@@ -173,17 +174,29 @@ function cmp(a: unknown, b: unknown): number {
 }
 
 /**
- * A minimal single-clause equality filter — `field = "value"`, `field != "value"`,
- * or `field ~ "value"` (contains). The A2App filter grammar is the backend's own;
- * this is the simple in-memory grammar, enough for label→id resolution. A backend
- * with a richer query language exposes it instead.
+ * The single-clause grammar this binding implements: `field = "value"`,
+ * `field != "value"`, or `field ~ "value"` (contains), optionally wrapped in one
+ * pair of parentheses. The value may be double-quoted (with `\` escapes),
+ * single-quoted, or a bare token containing no whitespace or quotes.
+ *
+ * The A2App filter grammar is the backend's own; this is the floor every adapter
+ * must implement (section 4.2). Anything outside it is REFUSED, never ignored:
+ * an adapter that accepts `filter` and returns unfiltered rows turns every label
+ * lookup into a false multi-match and makes relation writes impossible, and it
+ * does so silently, because the caller got a 200.
  */
+const FILTER_CLAUSE =
+  /^\s*\(?\s*([A-Za-z_]\w*)\s*(=|!=|~)\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s"'()]+))\s*\)?\s*$/;
+
 function matchFilter(expr: string): (r: StoredRecord) => boolean {
-  const m = /^\s*([A-Za-z_][\w]*)\s*(=|!=|~)\s*(.*?)\s*$/.exec(expr);
-  if (!m) return () => true;
+  const m = FILTER_CLAUSE.exec(expr);
+  if (!m) throw new UnsupportedFilterError(expr);
   const field = m[1]!;
   const op = m[2]!;
-  const val = m[3]!.replace(/^["']|["']$/g, "").replace(/\\"/g, '"');
+  // Only the double-quoted form carries escapes; unescape exactly what the
+  // escaping side wrote (`\x` -> `x`), so a value ending in a backslash or
+  // containing a quote round-trips.
+  const val = m[3] !== undefined ? m[3].replace(/\\(.)/g, "$1") : (m[4] ?? m[5] ?? "");
   return (r) => {
     const cur = r[field];
     const s = cur === undefined || cur === null ? "" : String(cur);

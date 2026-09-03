@@ -17,6 +17,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { verifySystemHashes } from "../lib/canon.js";
 import { loadProject } from "../lib/project.js";
 import { portInUse, register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
@@ -93,6 +94,25 @@ export async function run(args: string[], app: string): Promise<number> {
       }
       log.error(
         `port ${port} is already in use by another process (not an Agent App) — free it or change manifest.port.`,
+      );
+      return 1;
+    }
+
+    // Ownership canon, before any of the app's own commands run. Launch is the
+    // only path that reaches an app a user already has, so a system file swapped
+    // for a weakened version between builds would otherwise run unchallenged
+    // until someone re-ran the gate. The pipeline strings themselves live in the
+    // canonized manifest, so this must precede install/build/start.
+    const drift = verifySystemHashes(project.dir);
+    const drifted = [
+      ...drift.modified.map((p) => `modified: ${p}`),
+      ...drift.missing.map((p) => `deleted: ${p}`),
+      ...drift.added.map((p) => `added: ${p}`),
+    ];
+    if (drifted.length > 0) {
+      log.error(
+        `refusing to launch — system-managed files changed outside tooling:\n${drifted.join("\n")}\n` +
+          "If a toolkit upgrade is intended, run `agent-app <dir> toolkit-sync`; agent edits belong in app-owned paths.",
       );
       return 1;
     }

@@ -15,6 +15,6 @@ A plugin's real job is small and identical everywhere: expose the `agent-app` an
 
 ## Verified
 
-The engine drives the real CLIs end-to-end: `agent_app_build` (`agent-app scaffold`) scaffolds an app and `agent_app_validate` (`agent-app validate`) runs the gate (both exit 0). Every other tool uses the same `runA2App` path.
+The engine drives the real CLIs end-to-end: `agent_app_build` (`agent-app <dir> scaffold`) scaffolds an app and `agent_app_validate` (`agent-app <dir> validate`) runs the gate (both exit 0). Every other tool uses the same `runA2App` path.
 
 The five harness plugins in [`../`](../) each bind this engine to a real harness API.

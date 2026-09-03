@@ -72,10 +72,15 @@ export async function run(_args: string[], app: string): Promise<number> {
   log.raw(JSON.stringify(verdict, null, 2));
   // Announcement gates on a real `pass`, which only a verifier agent driving the
   // browser can produce — this machine preflight NEVER pass-es on its own. So a
-  // non-`pass` verdict (incomplete/defects/blocked) must never exit 0, or a
-  // caller treating exit 0 as "verified" would announce an unverified app.
+  // non-`pass` verdict must not exit 0, or a caller treating exit 0 as "verified"
+  // would announce an unverified app.
+  //
+  // `blocked` is the exception the spec calls out (section 5.4): the environment
+  // was unavailable, which is not a failure of the app. It maps to the shared
+  // exit code for an unreachable app (3), so a caller can retry after launching
+  // it instead of reporting defects that were never observed.
   void allOk;
-  void blocked;
+  if (blocked) return 3;
   return verdict.verdict === "pass" ? 0 : 1;
 }
 

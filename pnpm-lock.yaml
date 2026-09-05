@@ -66,6 +66,12 @@ importers:
         specifier: ^20.19.0
         version: 20.19.43
 
+  apps/readdeck:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+
   conformance/harness:
     dependencies:
       '@a2app/adapter-core':

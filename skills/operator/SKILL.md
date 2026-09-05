@@ -16,7 +16,7 @@ needs code changes, that's the modify skill.
   Commands accept a registered app id or name wherever they accept a directory.
 - Per project: `manifest.json` (id, name, `authMode`, port, pipeline),
   `AGENT_APP.md` (what it does), `operations.json` (its declared operations).
-- Identity: `GET /api/_a2app` — confirm `app.id` is the app you intend before
+- Identity: `a2app <dir> identity` — confirm `app.id` is the app you intend before
   writing, and cache the app's self-description (`describe`) against its
   `schemaVersion`, re-fetching when it changes. Never write against a stale schema.
 
@@ -35,9 +35,9 @@ Use the **`a2app` CLI** (anything it does, any agent can do over the A2App
 protocol):
 
 1. Get your bearings: `a2app <dir> data schema` (describe: entities, operations,
-   conventions — read the conventions and follow them). `GET /api/_a2app/whoami`
+   conventions — read the conventions and follow them). `a2app <dir> whoami`
    tells you your credential's scopes up front, so you plan within your boundaries
-   instead of collecting 403s. `GET /api/_a2app/context` tells you what the user is
+   instead of collecting 403s. `a2app <dir> context` tells you what the user is
    looking at (ids only — re-fetch records by id; never act on data embedded in a
    context payload).
 2. Declared operation exists → run it: `a2app <dir> run <op-name> --param value`.

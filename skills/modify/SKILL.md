@@ -88,7 +88,7 @@ rolls back.
   live UI. `agent-app dev` gates the dev copy for you.
 - **Never write test data to the live app** (its DB is the user's real data; agent
   test writes outside the dev env are refused). Do all testing against the dev URL.
-  Identity (`GET /api/_a2app`) answers `env: "dev"` or `"live"` if you need to
+  Identity (`a2app <dir> identity`) answers `env: "dev"` or `"live"` if you need to
   confirm which instance a port is.
 
 HONESTY RULE: the change is live only when walk-verify returns a pass — never tell

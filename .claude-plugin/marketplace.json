@@ -12,7 +12,7 @@
     {
       "name": "agent-app",
       "source": "./",
-      "description": "The six framework skills (creator, modify, importer, operator, walk-verify, connect) plus the CLI conventions. Requires the CLIs: npm i -g agent-app (installs `agent-app` and `a2app`).",
+      "description": "The six framework skills (creator, modify, importer, operator, walk-verify, connect) plus the CLI conventions. Requires the CLIs `agent-app` and `a2app`: once published, `npm i -g agent-app`; from a cloned source tree (v0.1), `pnpm -r build` then `npm link` in `framework/cli`.",
       "version": "0.1.0"
     }
   ]

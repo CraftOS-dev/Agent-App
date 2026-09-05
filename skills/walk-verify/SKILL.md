@@ -22,8 +22,8 @@ re-verify.
 - **Data safety.** After a code change you verify the dev copy's fresh database,
   never real user data. Verification does not run after data-only changes.
 - Confirm the app is up first: poll the manifest health endpoint; confirm identity
-  (`GET /api/_a2app`) returns the intended `app.id` (and `env: "dev"` after a code
-  change).
+  (`a2app <dir> identity`) returns the intended `app.id` (and `env: "dev"` after a
+  code change).
 
 ## The checklist
 

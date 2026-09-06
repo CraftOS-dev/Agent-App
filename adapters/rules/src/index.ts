@@ -23,6 +23,44 @@
 /** Bumped only when the validation semantics change. */
 export const RULES_VERSION = "0.1.0";
 
+/**
+ * Availability predicates (A2APP-SPEC 3.4): the closed language deciding whether
+ * an operation applies to a given record, plus the deterministic explanation of
+ * why it does not. Pure and shared for the same reason the guard is — two stacks
+ * must block the same action on the same record for the same stated reason.
+ */
+export * from "./predicate.js";
+
+/**
+ * The per-response describe budget, in characters (A2APP-SPEC 1). Every describe
+ * level fits this at any app size; an app whose module or entity would overflow
+ * must subdivide. Lives here because the adapter enforces it at serve time and
+ * the build gate enforces it at build time, and the two must not drift.
+ */
+export const DESCRIBE_BUDGET_CHARS = 2000;
+
+/**
+ * First path segments the operate CLI reserves for the protocol surface
+ * (framework spec 5.1). A module may not take one of these names: the walk
+ * resolves the first segment as a module unless it is reserved, so a module
+ * named `data` would be permanently unreachable.
+ */
+export const RESERVED_PATH_SEGMENTS = ["data", "identity", "whoami", "context", "tasks", "events"] as const;
+
+/** Module names are lower-kebab and never a reserved segment. */
+const MODULE_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** Why this is not a usable module name, or null if it is one. */
+export function moduleNameProblem(name: string): string | null {
+  if (!MODULE_NAME.test(name)) {
+    return `"${name}" is not a valid module name (lower-case, digits and hyphens, starting with a letter, max 32)`;
+  }
+  if ((RESERVED_PATH_SEGMENTS as readonly string[]).includes(name)) {
+    return `"${name}" is reserved by the operate CLI (${RESERVED_PATH_SEGMENTS.join(", ")}) and would be unreachable as a module`;
+  }
+  return null;
+}
+
 /** The closed protocol type vocabulary. Extending it is a protocol version
  *  change. */
 export const PROTOCOL_TYPES = [
@@ -411,24 +449,64 @@ function fieldPrint(f: NormalizedField): string {
  * document, so removing one has to invalidate the cache that still advertises it.
  */
 export function schemaFingerprint(
-  entities: Record<string, NormalizedField[]>,
+  entities: Record<string, EntityPrint>,
   operations: readonly OperationPrint[] = [],
 ): string {
   const parts: string[] = [];
-  for (const [name, fields] of Object.entries(entities)) {
-    parts.push(`${name}(${fields.map(fieldPrint).sort().join(",")})`);
+  for (const [name, print] of Object.entries(entities)) {
+    const attrs = [`${name}(${print.fields.map(fieldPrint).sort().join(",")})`];
+    // `auth` and `module` are published by describe, so they must move the hash:
+    // a client caching against it would otherwise keep a document that puts the
+    // entity in a module it has left, or omits an auth marker it has gained.
+    if (print.auth) attrs.push("auth");
+    attrs.push(`mod=${print.module}`);
+    parts.push(attrs.join(":"));
   }
   parts.sort();
-  const ops = operations
-    .map((o) => {
-      const flags = [o.destructive ? "d" : "", o.readOnly ? "r" : "", o.idempotent ? "i" : ""].filter(Boolean);
-      return flags.length ? `${o.name}:${flags.join("")}` : o.name;
-    })
-    .sort();
+  const ops = operations.map(operationPrint).sort();
   const joined = parts.join(";") + "|" + ops.join(",");
   let h = 5381;
   for (let k = 0; k < joined.length; k++) h = ((h * 33) ^ joined.charCodeAt(k)) >>> 0;
   return "sv_" + h.toString(16);
+}
+
+/**
+ * Everything describe publishes about one operation, rendered deterministically.
+ *
+ * `params` and `appliesWhen` are included because both are published and both
+ * are load-bearing for a cached client: a narrowed parameter type or a changed
+ * availability rule leaves a stale cache advertising a signature the app no
+ * longer accepts. They are canonicalised through sorted-key JSON so that key
+ * order in the declaration cannot change the hash.
+ */
+function operationPrint(o: OperationPrint): string {
+  const flags = [o.destructive ? "d" : "", o.readOnly ? "r" : "", o.idempotent ? "i" : ""].filter(Boolean);
+  const parts = [flags.length ? `${o.name}:${flags.join("")}` : o.name];
+  parts.push(`mod=${o.module}`);
+  if (o.entity) parts.push(`on=${o.entity}`);
+  if (o.params && Object.keys(o.params).length > 0) parts.push(`params=${stableJson(o.params)}`);
+  if (o.appliesWhen) parts.push(`when=${stableJson(o.appliesWhen)}`);
+  return parts.join(":");
+}
+
+/** JSON with object keys sorted at every depth, so two equal declarations that
+ *  differ only in key order fingerprint identically. */
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(",")}}`;
+}
+
+/** One entity as describe publishes it, for {@link schemaFingerprint}.
+ *
+ *  `module` is required, not optional: every entity belongs to exactly one, and
+ *  a fingerprint that could omit it would let an entity move between modules
+ *  without invalidating the caches that still place it in the old one. */
+export interface EntityPrint {
+  fields: NormalizedField[];
+  module: string;
+  auth?: boolean;
 }
 
 /** The operation attributes describe publishes, for {@link schemaFingerprint}. */
@@ -437,4 +515,9 @@ export interface OperationPrint {
   destructive?: boolean;
   readOnly?: boolean;
   idempotent?: boolean;
+  /** required for the same reason as EntityPrint.module */
+  module: string;
+  entity?: string;
+  params?: Record<string, unknown>;
+  appliesWhen?: unknown;
 }

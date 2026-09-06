@@ -62,6 +62,30 @@ component? Wrap it in your own app code; never edit the locked original.
    blocker. **Mock or generated data is forbidden** unless requirements explicitly
    ask for demo data — a mock that renders is a lie that passes review.
 
+## Before any feature: name the modules
+
+**Modules are decided first, and they are decided once.** Every entity and every
+operation belongs to exactly one, they are declared in `manifest.json`, and they
+are what an agent sees when it opens the app — the root screen of `describe`
+lists them and nothing else.
+
+Read the `## Operations` and `## Features` sections of
+`reference/requirements.md` and group them into 3–8 areas a person would
+recognise as tabs: `sales`, `inventory`, `support`. Write them into
+`manifest.json` and into `## Modules` in both `AGENT_APP.md` and
+`reference/requirements.md` BEFORE declaring an entity or an operation, because
+each of those has to name one.
+
+Two rules that keep this honest as the app grows:
+
+- **A module must fit its screen.** Every describe level is capped at 2,000
+  characters and the gate walks the running app to check it. A module whose
+  screen would overflow gets split — that is how an app grows. Lengthening a
+  flat list is not.
+- **Never use a reserved name**: `data`, `identity`, `whoami`, `context`,
+  `tasks`, `events`. The operate CLI resolves those first, so a module with one
+  of those names is unreachable and the gate rejects it.
+
 ## Per feature: schema → operations → UI
 
 **Schema** — add a NEW migration. **Never edit AND never rename or delete a
@@ -72,10 +96,36 @@ migration's mistake = writing a NEW migration that alters the collection. Match
 the app's `authMode`: open data rules for `none`; owner-scoped for `multi-user`.
 (Migration API, seeding, relation fields: **per your stack**.)
 
+**Schema** — every entity also names the `module` it lives in, and may carry a
+one-line `summary` shown beside it on that module's screen.
+
 **Custom operations** — anything beyond plain CRUD is a declared operation:
 implement it behind the adapter PLUS a matching entry in `operations.json`. The
-gate fails operations without an implementation. Mark data-deleting operations
-`"destructive": true`. Plain CRUD needs no operation — the data API covers it.
+gate fails an operation with no implementation (a toolkit "operations resolve"
+step), and fails the app part if a declaration is inconsistent. Plain CRUD needs
+no operation — the data API covers it.
+
+Each declaration carries four things beyond its name:
+
+- `module` — which screen it appears on. Required.
+- `params` — **typed**, using the same vocabulary as entity fields. Required; use
+  `{}` when it takes no arguments. The record screen renders this as the
+  operation's signature, so arguments described in prose inside `description`
+  can be neither shown nor checked. Writing `"Args: { category? }"` in the
+  description does NOT satisfy this.
+- `entity` — the entity it acts on, when it acts on one record. This is what puts
+  it on that entity's and that record's screens instead of only the module's.
+- `appliesWhen` — an optional condition over the record's own fields deciding
+  whether it is available on a given record, e.g.
+  `{ "field": "status", "ne": "done" }`. The adapter evaluates it and derives the
+  "blocked" reason from it. Comparisons only (`eq`, `ne`, `in`, `notIn`,
+  `isBlank`, composed with `all`/`any`/`not`) — never a natural-language rule.
+
+**Flags:** mark data-deleting operations `"destructive": true` (they require
+human approval). Also set `"readOnly": true` when an operation has no side
+effects, and `"idempotent": true` when repeating it is safe — an agent uses both
+to plan and to retry, and neither is assumed when absent.
+
 **Naming: kebab-case, and every place the name appears must agree** — the
 `operations.json` name, the route, and every frontend call. Pick the names once,
 before writing any of them.
@@ -107,16 +157,26 @@ events. (Manifest format and fire API: per your stack.)
 
 ## Finish: gate, launch, then verify
 
-1. **`agent-app <dir> validate`** runs the gate (build → migrations-on-a-fresh-db →
-   operations resolve → ownership canon). On errors: read ALL of them, fix ALL of
-   them, run it again. Then `agent-app <dir> dev` boots your code in a DEV copy on a
-   hidden port with a fresh post-migration DB. Test and read logs THERE; keep
-   editing in the real project dir. Never start servers by hand.
+1. **`agent-app <dir> validate`** runs the gate (app-part consistency → build →
+   migrations-on-a-fresh-db → operations resolve → ownership canon → describe
+   budget). On errors: read ALL of them, fix ALL of them, run it again. Then
+   `agent-app <dir> dev` boots your code in a DEV copy on a hidden port with a
+   fresh post-migration DB. Test and read logs THERE; keep editing in the real
+   project dir. Never start servers by hand.
+   A step the gate reports **UNCHECKED** did not pass — it could not run. The
+   budget step needs the app running, so re-run `validate` after `serve`/`dev`
+   rather than treating the warning as a pass.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
-   - `a2app <dir> data schema` (describe) → does every entity show the FIELDS you
+   - `a2app <dir>` → does the root show the modules you declared, with the entity
+     counts you expect? A module reading `0 entities` means nothing was filed
+     under it.
+   - `a2app <dir> <module> <entity>` → does the entity show the FIELDS you
      migrated? An entity showing only `id` means your migration silently did
      nothing.
+   - `a2app <dir> <module> <entity> <id>` on a real record → is each operation
+     available when it should be, and blocked with a sensible reason when it
+     should not? A wrong `appliesWhen` shows up here and nowhere else.
    - Trigger one real data flow, then read a record back and LOOK at the values.
      Missing fields, empty strings, all-zero numbers = the write silently failed,
      whatever status it returned.

@@ -1,19 +1,28 @@
 {
- "id": "blueprint-react-node",
- "description": "Runnable Agent App blueprint: Node (built-in http) backend + a vanilla SPA View + a JSON-file store, with the A2App adapter mounted as embedded middleware (@a2app/adapter-core). NOT part of the framework.",
- "template": "template",
- "adapterVersionFrom": "server.mjs",
- "systemPaths": ["manifest.json", "server.mjs"],
- "adapterPaths": ["server.mjs"],
- "gate": [
- {
- "name": "schema loads (fresh, additive)",
- "run": "node --check server.mjs && node --input-type=module -e \"import('./a2app.schema.mjs').then(m=>{if(!m.schema||!m.schema.entities)throw new Error('a2app.schema.mjs must export { schema: { entities, operations } }');process.stdout.write('schema ok\\n')})\""
- }
- ],
- "lifecycle": {
- "dataDir": "data",
- "dev": "node scripts/dev-prepare.mjs",
- "promote": "node scripts/promote-apply.mjs"
- }
+  "id": "blueprint-react-node",
+  "description": "Runnable Agent App blueprint: Node (built-in http) backend + a vanilla SPA View + a JSON-file store, with the A2App adapter mounted as embedded middleware (@a2app/adapter-core). NOT part of the framework.",
+  "template": "template",
+  "adapterVersionFrom": "server.mjs",
+  "systemPaths": [
+    "manifest.json",
+    "server.mjs"
+  ],
+  "adapterPaths": [
+    "server.mjs"
+  ],
+  "gate": [
+    {
+      "name": "schema loads (fresh, additive)",
+      "run": "node --check server.mjs && node --input-type=module -e \"import('./a2app.schema.mjs').then(m=>{if(!m.schema||!m.schema.entities)throw new Error('a2app.schema.mjs must export { schema: { entities, operations } }');process.stdout.write('schema ok\\n')})\""
+    },
+    {
+      "name": "operations resolve (every declared op has a runner)",
+      "run": "node --input-type=module -e \"import{pathToFileURL}from'node:url';const m=await import(pathToFileURL('a2app.schema.mjs').href);const s=m.schema;const r=s.operationRunners||{};const missing=(s.operations||[]).filter(o=>typeof r[o.name]!=='function').map(o=>o.name);if(missing.length){console.error('declared with no runner: '+missing.join(', '));process.exit(1)}process.stdout.write('operations resolve ok\\n')\""
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data",
+    "dev": "node scripts/dev-prepare.mjs",
+    "promote": "node scripts/promote-apply.mjs"
+  }
 }

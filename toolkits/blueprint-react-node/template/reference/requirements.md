@@ -13,6 +13,12 @@ agent can operate the same list on the user's behalf through A2App.
 - The agent can clear all done tasks in one operation (with approval, since it is
   destructive).
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. They are declared in
+`manifest.json`; each entity names its module in `a2app.schema.mjs`.
+- **planning** — tasks and the work in front of you.
+
 ## Data
 - **tasks**: title (required), status (todo/doing/done), due (YYYY-MM-DD), notes,
   created (server-set).

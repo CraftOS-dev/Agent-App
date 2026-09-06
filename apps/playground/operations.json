@@ -1,5 +1,48 @@
 {
   "operations": [
-    { "name": "count-by-tier", "description": "Count contacts in a tier.", "destructive": false, "readOnly": true, "idempotent": true }
+    {
+      "name": "count-by-tier",
+      "description": "Count contacts in a tier.",
+      "destructive": false,
+      "readOnly": true,
+      "idempotent": true,
+      "module": "directory",
+      "params": {
+        "tier": { "type": "enum", "values": ["lead", "customer", "vip"], "required": true }
+      }
+    },
+    {
+      "name": "promote-to-customer",
+      "description": "Move a contact to the customer tier.",
+      "destructive": false,
+      "module": "directory",
+      "entity": "people",
+      "appliesWhen": { "field": "tier", "ne": "customer" },
+      "params": {
+        "person": { "type": "ref", "entity": "people", "required": true }
+      }
+    },
+    {
+      "name": "archive-person",
+      "description": "Archive a contact and stop outreach.",
+      "destructive": true,
+      "module": "directory",
+      "entity": "people",
+      "appliesWhen": { "field": "archived", "ne": true },
+      "params": {
+        "person": { "type": "ref", "entity": "people", "required": true }
+      }
+    },
+    {
+      "name": "mark-replied",
+      "description": "Record that a touchpoint got a reply.",
+      "destructive": false,
+      "module": "outreach",
+      "entity": "touchpoints",
+      "appliesWhen": { "field": "replied", "ne": true },
+      "params": {
+        "touchpoint": { "type": "ref", "entity": "touchpoints", "required": true }
+      }
+    }
   ]
 }

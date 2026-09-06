@@ -55,7 +55,9 @@ def _run(argv: list[str]) -> str:
 # --------------------------------------------------------------- handlers
 
 def _describe(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "data", "schema"])
+    # Describe is navigational: the path names ONE place in the app.
+    segments = [p for p in str(args.get("path", "")).split("/") if p]
+    return _run([str(args["dir"]), *segments])
 
 
 def _list(args: dict, **_kw) -> str:
@@ -87,12 +89,12 @@ def _delete(args: dict, **_kw) -> str:
     return _run([str(args["dir"]), "data", str(args["entity"]), "delete", str(args["id"])])
 
 
-def _operations(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "ops"])
+def _find(args: dict, **_kw) -> str:
+    return _run([str(args["dir"]), "--find", str(args["term"])])
 
 
 def _run_operation(args: dict, **_kw) -> str:
-    a = [str(args["dir"]), "run", str(args["operation"])]
+    a = [str(args["dir"]), *[p for p in str(args["path"]).split("/") if p], str(args["operation"])]
     for key, value in (args.get("fields") or {}).items():
         a += [f"--{key}", str(value)]
     if args.get("approve"):
@@ -135,8 +137,11 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
 
 
 _TOOLS = [
-    (_schema("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
-             {"dir": _DIR}, ["dir"]), _describe, "🔎"),
+    (_schema("agent_app_describe",
+             'Describe ONE place in an Agent App. `path` is empty for the root (its modules), "sales" for a '
+             'module, "sales/invoices" for an entity, "sales/invoices/INV-1" for a record and the operations '
+             "its state allows. Every response names the legal next moves. No call returns the whole model.",
+             {"dir": _DIR, "path": _STR}, ["dir"]), _describe, "🔎"),
     (_schema("agent_app_list", "List records of an entity (optional filter/sort/limit).",
              {"dir": _DIR, "entity": _ENTITY, "filter": _STR, "sort": _STR, "limit": {"type": "integer"}}, ["dir", "entity"]), _list, "📋"),
     (_schema("agent_app_get", "Fetch one record by id.",
@@ -147,10 +152,16 @@ _TOOLS = [
              {"dir": _DIR, "entity": _ENTITY, "id": _STR, "fields": {"type": "object"}}, ["dir", "entity", "id", "fields"]), _update, "✏️"),
     (_schema("agent_app_delete", "Delete a record by id.",
              {"dir": _DIR, "entity": _ENTITY, "id": _STR}, ["dir", "entity", "id"]), _delete, "🗑️"),
-    (_schema("agent_app_operations", "List the app's declared operations.",
-             {"dir": _DIR}, ["dir"]), _operations, "⚙️"),
-    (_schema("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
-             {"dir": _DIR, "operation": _STR, "fields": {"type": "object"}, "approve": _STR}, ["dir", "operation"]), _run_operation, "▶️"),
+    # No agent_app_operations: no global operation list exists. An operation is
+    # found on the screen it belongs to and invoked at the path identifying it.
+    (_schema("agent_app_find",
+             "Search entity, operation and module names across the app; returns their locations.",
+             {"dir": _DIR, "term": _STR}, ["dir", "term"]), _find, "🔎"),
+    (_schema("agent_app_run_operation",
+             "Invoke a declared operation at the path that identifies it. A destructive op returns "
+             "approval_required with a key; pass `approve` to execute.",
+             {"dir": _DIR, "path": _STR, "operation": _STR, "fields": {"type": "object"}, "approve": _STR},
+             ["dir", "path", "operation"]), _run_operation, "▶️"),
     (_schema("agent_app_poll_tasks", "Poll the app-to-agent task queue (default status: submitted).",
              {"dir": _DIR, "status": _STR}, ["dir"]), _poll_tasks, "📥"),
     (_schema("agent_app_build", "Scaffold a new Agent App from a blueprint.",

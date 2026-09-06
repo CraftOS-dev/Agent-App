@@ -4,14 +4,29 @@
  * adapter author implements {@link Binding}; the core serves every A2App
  * endpoint on top of it.
  */
-import type { NormalizedField } from "@a2app/rules";
+import type { NormalizedField, Predicate } from "@a2app/rules";
 
 /* ----------------------------------------------------------------- schema */
+
+/** One declared module: an app's organizing unit, and one row of describe's root
+ *  level. Every entity and every operation belongs to exactly one. */
+export interface ModuleDecl {
+  name: string;
+  /** one line, shown on the root screen */
+  summary?: string;
+}
 
 /** One entity as the binding exposes it, already mapped to protocol types. */
 export interface EntityDef {
   /** protocol-typed fields (never the backend's native types) */
   fields: NormalizedField[];
+  /**
+   * Which declared module this entity lives in. Required: an entity outside
+   * every module has no screen to appear on and is unreachable by the walk.
+   */
+  module: string;
+  /** one line, shown on the module screen beside the entity's name */
+  summary?: string;
   /** true if the entity is an auth/accounts collection (describe `auth: true`) */
   auth?: boolean;
   /**
@@ -41,6 +56,13 @@ export interface ListResult {
 
 /* -------------------------------------------------------------- operations */
 
+/** One typed operation parameter. Same vocabulary as an entity field, so a
+ *  signature renders with the types an agent already knows. */
+export type ParamDef = Omit<NormalizedField, "name" | "readOnly" | "writeOnly" | "dayKey"> & {
+  description?: string;
+  format?: string;
+};
+
 /** A declared operation (operations.json / describe). */
 export interface OperationDecl {
   name: string;
@@ -50,7 +72,30 @@ export interface OperationDecl {
   readOnly?: boolean;
   /** advisory: safe to repeat without an Idempotency-Key */
   idempotent?: boolean;
-  params?: Record<string, unknown>;
+  /**
+   * Which declared module this operation appears under. Required for the same
+   * reason as {@link EntityDef.module}: an operation with nowhere to appear
+   * cannot be found by walking.
+   */
+  module: string;
+  /**
+   * The entity this operation acts on. Absent means module-level: it shows on
+   * the module screen only, never on a record.
+   */
+  entity?: string;
+  /**
+   * When this operation is available on a record, as a schema-based predicate
+   * over that record's own fields. Requires {@link OperationDecl.entity}.
+   * Evaluated by the adapter; a model never decides availability.
+   */
+  appliesWhen?: Predicate;
+  /**
+   * Typed parameters. Required — the record level renders this as the
+   * operation's signature, and arguments described in prose inside
+   * `description` can be neither rendered nor checked. An operation that takes
+   * no arguments declares `{}`.
+   */
+  params: Record<string, ParamDef>;
   /** true for framework-provided ops; excluded from nothing, marked in canon */
   system?: boolean;
 }
@@ -180,6 +225,15 @@ export interface A2AppConfig {
   rateLimits?: Partial<import("./rate.js").RateLimits>;
   /** declared operations (from operations.json). */
   operations?: OperationDecl[];
+  /**
+   * The app's declared modules, in the order the root screen lists them.
+   *
+   * Required: every entity and operation names one, the root screen lists them,
+   * and an app with none has no root screen to serve. `createA2App` refuses a
+   * config without them rather than serving an app that cannot be walked — the
+   * type says so too, so the refusal is a compile error wherever it can be.
+   */
+  modules: ModuleDecl[];
   /** app-authored conventions merged into the protocol defaults. */
   conventions?: Record<string, unknown>;
   /** the app's own origins; a write from any other Origin is refused 403. */

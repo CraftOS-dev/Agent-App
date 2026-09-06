@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "agentapp/manifest.json",
   "type": "object",
-  "required": ["id", "name", "agentAppVersion", "adapterVersion", "authMode", "pipeline"],
+  "required": ["id", "name", "agentAppVersion", "adapterVersion", "authMode", "modules", "pipeline"],
   "properties": {
     "id": { "type": "string" },
     "name": { "type": "string" },
@@ -10,6 +10,30 @@
     "adapterVersion": { "type": "string" },
     "appVersion": { "type": "string" },
     "authMode": { "enum": ["none", "multi-user"] },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "description": "the app's organizing units. Every entity and every operation belongs to exactly one, and these are what the root of describe lists (A2APP-SPEC 3.1). Declared before anything that belongs to one; growth means adding and splitting modules, never lengthening a flat list.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,31}$",
+            "not": { "enum": ["data", "identity", "whoami", "context", "tasks", "events"] },
+            "description": "never one of the reserved first path segments of the operate CLI (framework section 5.1): data, identity, whoami, context, tasks, events"
+          },
+          "summary": { "type": "string", "description": "one line, shown on the root screen" },
+          "entities": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "which entities belong to this module, for stacks whose backend schema cannot carry a per-entity module (e.g. PocketBase collections). Where the app's own schema declares the module on each entity, this is omitted and the schema is authoritative. The describe output is identical either way; only the place the fact is written differs."
+          }
+        }
+      }
+    },
     "modificationLock": { "type": "boolean", "default": false },
     "capabilities": {
       "type": "object",

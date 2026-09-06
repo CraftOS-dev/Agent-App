@@ -67,14 +67,28 @@ const COMMANDS: Record<string, CommandMeta> = {
   skills: { summary: "List the framework skills, or install them into a harness (--install <dir>)", surface: "agent-app", scope: "registry" },
   // a2app — the A2App protocol client. Operate only; never a build command.
   identity: { summary: "Probe the app's identity document", surface: "a2app", scope: "app" },
-  data: { summary: "Read/write records; `<app> data schema` shows the data model", surface: "a2app", scope: "app", args: "<entity> <verb>" },
-  ops: { summary: "List the app's declared operations", surface: "a2app", scope: "app" },
-  run: { summary: "Invoke a declared operation (destructive ops need approval)", surface: "a2app", scope: "app", args: "<operation>" },
+  data: { summary: "Read/write records; `<app> data schema` lists entities", surface: "a2app", scope: "app", args: "<entity> <verb>" },
   whoami: { summary: "Show the calling credential's grant (scopes)", surface: "a2app", scope: "app" },
   context: { summary: "Show what the user is currently viewing", surface: "a2app", scope: "app" },
   tasks: { summary: "Poll/claim/progress/complete the app→agent task queue", surface: "a2app", scope: "app" },
   events: { summary: "Poll the app's event log", surface: "a2app", scope: "app" },
 };
+
+/**
+ * The first path segments `a2app` keeps for the protocol surface. Everything
+ * else in that position is a module name, which is why these six are forbidden
+ * as module names (framework spec 5.1) — a module called `data` would be
+ * permanently unreachable, and the build gate rejects one.
+ *
+ * Kept in lockstep with `RESERVED_PATH_SEGMENTS` in `@a2app/rules`, which the
+ * gate checks against; this copy exists so the dispatcher does not have to load
+ * the rules package to route a command.
+ */
+const RESERVED_SEGMENTS = new Set(["data", "identity", "whoami", "context", "tasks", "events"]);
+
+function isReservedSegment(segment: string): boolean {
+  return RESERVED_SEGMENTS.has(segment);
+}
 
 const TAGLINE: Record<Surface, string> = {
   "agent-app": "build, evolve, and manage Agent Apps",
@@ -93,7 +107,22 @@ function usage(surface: Surface): void {
   const other: Surface = surface === "agent-app" ? "a2app" : "agent-app";
   const target = surface === "a2app" ? "<app>" : "<dir>";
   log.raw(`${surface} v${VERSION} — ${TAGLINE[surface]}\n`);
-  log.raw(`  Usage: ${surface} ${target} <verb> [args] [--flags]   (the app comes first)\n`);
+  if (surface === "a2app") {
+    // The walk is the surface; the reserved verbs are the exception to it. Show
+    // the walk first, because an agent that reads only the first lines should
+    // learn to navigate rather than learn a verb table.
+    log.raw(`  Usage: ${surface} ${target} [<path…>] [<operation>] [--flags]   (the app comes first)\n`);
+    log.raw(`  ${target}                        the app's root screen: its modules`);
+    log.raw(`  ${target} <module>               a module's entities and operations`);
+    log.raw(`  ${target} <module> <entity>      one entity's fields and operations`);
+    log.raw(`  ${target} <module> <entity> <id> one record, and what it allows now`);
+    log.raw(`  ${target} … <operation> [--…]    invoke, at the path that identifies it`);
+    log.raw(`  ${target} --find <term>          search names, get locations\n`);
+    log.raw(`  Every screen ends by naming the legal next moves.\n`);
+    log.raw(`  Reserved (never module names):`);
+  } else {
+    log.raw(`  Usage: ${surface} ${target} <verb> [args] [--flags]   (the app comes first)\n`);
+  }
   const mine = Object.entries(COMMANDS).filter(([, m]) => m.surface === surface);
   for (const [cmd, meta] of mine.filter(([, m]) => m.scope === "app")) {
     log.raw(`  ${target} ${cmd.padEnd(13)} ${meta.summary}`);
@@ -142,6 +171,16 @@ export async function main(surface: Surface): Promise<number> {
   // Everything else: `<app> <verb> [args]`.
   const app = first;
   const name = rest[0];
+
+  // `a2app` is a walk, not a verb table (A2APP-SPEC 4.1). Its first path segment
+  // is a module unless it is one of the reserved protocol segments, and a bare
+  // app is the root screen rather than a usage error — arriving at an app is the
+  // first thing an agent does, and it must land somewhere.
+  if (surface === "a2app" && (name === undefined || !isReservedSegment(name))) {
+    const walk = (await import("./commands/walk.js")) as { run: (args: string[], app: string) => Promise<number> };
+    return walk.run(rest, app);
+  }
+
   if (name === undefined) {
     log.error(`No command given for "${app}".`);
     log.raw(`Usage: ${surface} ${app} <verb> [args]  —  try: ${surface} help`);

@@ -10,6 +10,13 @@ an agent operates them through A2App.
 - The app rejects an invalid status or a relative date at write time (guard).
 - The agent can archive all done tasks in one operation (with approval).
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. PocketBase collections
+cannot carry a module of their own, so `manifest.json` maps them: each
+`modules[].entities` lists the collections in that module.
+- **planning** — tasks and the work in front of you.
+
 ## Data
 - **tasks**: title (required), status (todo/doing/done), due (YYYY-MM-DD),
   created (server-set).

@@ -6,6 +6,12 @@ The adapter ports the pure guard rules to Python; parity with every other stack
 is proven by the conformance suite, not by inspection. Evolve the app by editing
 `schema.py` (Model) — never `a2app_adapter.py` or `main.py` (system-owned).
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. They are declared in
+`manifest.json`; each entity names its module in `schema.py`.
+- **planning** — tasks and the work in front of you.
+
 ## Entities
 - **tasks** — title (string, required), status (todo/doing/done), due (day key),
  notes (string), created (datetime, read-only).

@@ -2,4 +2,4 @@
 
 | Directory | Purpose |
 |---|---|
-| [playground/](playground/) | The living reference (AG-UI dojo pattern): a real Agent App built from a blueprint, plus an **adapter feature matrix** showing which capabilities each adapter/blueprint implements — conformance made visible as a demo |
+| [playground/](playground/) | The living reference: a runnable Agent App on `@a2app/adapter-core`, shaped so that every level of the describe walk — root, module, entity, record, relation, find — has something real to show |

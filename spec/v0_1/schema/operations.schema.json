@@ -1,6 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "agentapp/operations.json",
+  "title": "Declared operations — part of the A2App adapter's app part",
+  "description": "requirement.md section 4.1 and Appendix B.2. Every operation belongs to exactly one declared module and carries typed params; an operation that acts on a record also names its entity and may declare when it applies.",
   "type": "object",
   "required": ["operations"],
   "properties": {
@@ -8,17 +10,70 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "destructive"],
+        "required": ["name", "destructive", "module", "params"],
         "properties": {
-          "name": { "type": "string" },
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$" },
           "description": { "type": "string" },
           "destructive": { "type": "boolean" },
           "readOnly": { "type": "boolean", "description": "the operation has no side effects; safe to call freely, result cacheable. Absent = not asserted" },
           "idempotent": { "type": "boolean", "description": "repeating the operation is safe; may be retried without an Idempotency-Key. Absent = not asserted" },
-          "params": { "type": "object" },
+          "module": {
+            "type": "string",
+            "description": "which declared module this operation appears under. MUST name one of manifest.modules — an operation with nowhere to appear is unreachable by the walk."
+          },
+          "entity": {
+            "type": "string",
+            "description": "the entity this operation acts on. Absent = module-level: it appears on the module screen only, never on a record."
+          },
+          "appliesWhen": {
+            "$ref": "#/$defs/predicate",
+            "description": "decides whether this operation is available on a given record. Requires `entity`. Comparisons over the record's own fields only; natural-language conditions are prohibited (requirement_A2App.md 3.4, consistent with 6.1)."
+          },
+          "params": {
+            "type": "object",
+            "description": "typed parameters, using the A2App field vocabulary. Required: the record level renders this as the operation's signature. Arguments described in prose inside `description` do not satisfy this.",
+            "additionalProperties": { "$ref": "#/$defs/param" }
+          },
           "system": { "type": "boolean", "description": "true for framework-provided ops" }
-        }
+        },
+        "dependentRequired": { "appliesWhen": ["entity"] }
       }
+    }
+  },
+  "$defs": {
+    "param": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["string", "number", "boolean", "datetime", "enum", "ref", "list<enum>", "list<ref>", "json", "binary"] },
+        "required": { "type": "boolean" },
+        "max": { "type": "number" },
+        "values": { "type": "array", "items": { "type": "string" } },
+        "entity": { "type": "string" },
+        "format": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "predicate": {
+      "description": "A schema-based predicate over a record's stored fields. Leaf forms compare one field; `all`/`any`/`not` compose them. Deliberately closed: every form is machine-evaluable and machine-explainable, so a blocked operation can state its own reason without a model composing one.",
+      "oneOf": [
+        { "type": "object", "required": ["field", "eq"], "additionalProperties": false,
+          "properties": { "field": { "type": "string" }, "eq": {} } },
+        { "type": "object", "required": ["field", "ne"], "additionalProperties": false,
+          "properties": { "field": { "type": "string" }, "ne": {} } },
+        { "type": "object", "required": ["field", "in"], "additionalProperties": false,
+          "properties": { "field": { "type": "string" }, "in": { "type": "array" } } },
+        { "type": "object", "required": ["field", "notIn"], "additionalProperties": false,
+          "properties": { "field": { "type": "string" }, "notIn": { "type": "array" } } },
+        { "type": "object", "required": ["field", "isBlank"], "additionalProperties": false,
+          "properties": { "field": { "type": "string" }, "isBlank": { "type": "boolean" } } },
+        { "type": "object", "required": ["all"], "additionalProperties": false,
+          "properties": { "all": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } } } },
+        { "type": "object", "required": ["any"], "additionalProperties": false,
+          "properties": { "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } } } },
+        { "type": "object", "required": ["not"], "additionalProperties": false,
+          "properties": { "not": { "$ref": "#/$defs/predicate" } } }
+      ]
     }
   }
 }

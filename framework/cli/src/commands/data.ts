@@ -1,14 +1,28 @@
 /**
  * a2app <app> data schema
+ * a2app <app> data <entity> schema
  * a2app <app> data <entity> [list|get <id>|create|update <id>|delete <id>]
  *                  [--field value ...] [--json '{...}'] [--filter '...'] [--sort '...']
  *                  [--limit N] [--idempotency-key KEY]
  *
- * The A2App data client. Reads and writes records through the public
- * describe/records surface — anything this CLI does, any agent can. Values are
- * coerced client-side (dates, labels); the app validates.
+ * Raw record access, alongside the walk. The walk is for browsing and acting;
+ * `data` is for filtered queries and direct writes — the two cases a screen is
+ * the wrong shape for.
+ *
+ * `data` is a reserved first path segment precisely so this can coexist with a
+ * module namespace (framework spec 5.1). Values are coerced client-side (dates,
+ * labels); the app's guard remains the authority.
  */
-import { fetchSchema, coerceBody, renderSchema, suggest, droppedFields, nonReadableFields } from "@a2app/sdk";
+import {
+  coerceBody,
+  droppedFields,
+  fetchEntityIndex,
+  fetchEntitySchema,
+  nonReadableFields,
+  renderEntity,
+  renderEntityIndex,
+  suggest,
+} from "@a2app/sdk";
 import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js";
 import { clientFor, loadProject, UsageError } from "../lib/project.js";
 import { log } from "../lib/log.js";
@@ -17,23 +31,39 @@ export async function run(args: string[], app: string): Promise<number> {
   const [collection, verb = "list", id] = positionals(args);
   if (collection === undefined) {
     throw new UsageError(
-      "Usage: a2app <app> data schema | <entity> [list|get <id>|create|update <id>|delete <id>] [--field value ...]",
+      "Usage: a2app <app> data schema | <entity> [schema|list|get <id>|create|update <id>|delete <id>] [--field value ...]",
     );
   }
   const project = loadProject(app);
   const client = await clientFor(project);
-  const schema = await fetchSchema(client);
 
+  // `data schema` is entity NAMES, grouped by module — never the whole model.
+  // Field detail is one level in, which is what keeps this bounded at any app
+  // size and is the whole point of the navigational surface.
   if (collection === "schema") {
-    log.raw(`${project.manifest.name} — entities (field(type), * = required):\n${renderSchema(schema)}`);
+    const index = await fetchEntityIndex(client);
+    if (index.size === 0) {
+      log.error("No readable entities — is the app running, and does your credential hold any data scope?");
+      return 1;
+    }
+    log.raw(`${project.manifest.name} — entities by module:\n${renderEntityIndex(index)}`);
+    log.raw(`\n  → a2app ${app} data <entity> schema     (that entity's fields)`);
     return 0;
   }
 
-  if (schema.size > 0 && !schema.has(collection)) {
-    const hint = suggest(collection, [...schema.keys()]);
+  const schema = await fetchEntitySchema(client, collection);
+  if (schema === null) {
+    const index = await fetchEntityIndex(client);
+    const hint = suggest(collection, [...index.keys()]);
     log.error(`No entity "${collection}"${hint !== null ? ` — did you mean "${hint}"?` : ""}`);
-    log.raw(`Entities:\n${renderSchema(schema)}`);
+    if (index.size > 0) log.raw(`Entities:\n${renderEntityIndex(index)}`);
     return 1;
+  }
+
+  if (verb === "schema") {
+    log.raw(renderEntity(schema));
+    log.raw(`\n  → a2app ${app} ${schema.module} ${collection}     (fields and operations, as a screen)`);
+    return 0;
   }
 
   const idempotencyKey = flag(args, "idempotency-key");
@@ -42,7 +72,7 @@ export async function run(args: string[], app: string): Promise<number> {
   let body = buildBody(args, BODY_CONTROL_FLAGS);
 
   if (body !== undefined && (verb === "create" || verb === "update")) {
-    const coerced = await coerceBody(client, schema, collection, body);
+    const coerced = await coerceBody(client, new Map([[collection, schema]]), collection, body);
     if (coerced.errors.length > 0) {
       for (const message of coerced.errors) log.error(message);
       return 1;
@@ -73,7 +103,7 @@ export async function run(args: string[], app: string): Promise<number> {
       break;
     case "update":
       if (id === undefined) throw new UsageError("update needs an <id>");
-      if (body === undefined) throw new UsageError('update needs fields or --json \'{...}\'');
+      if (body === undefined) throw new UsageError("update needs fields or --json '{...}'");
       res = await client.updateRecord(collection, id, body, idempotencyKey);
       break;
     case "delete":
@@ -104,7 +134,9 @@ export async function run(args: string[], app: string): Promise<number> {
     if (saved !== null) {
       // Exempt write-only / non-readable fields: the backend legitimately never
       // echoes them, so they must not be flagged "not stored" (e.g. passwords).
-      const exempt = nonReadableFields(schema.get(collection), body);
+      // This is sound only because the entity level publishes EVERY readable
+      // field — a summarised model would exempt real fields and mute the check.
+      const exempt = nonReadableFields(schema, body);
       const dropped = droppedFields(body, saved, exempt);
       if (dropped.length > 0) {
         log.error(

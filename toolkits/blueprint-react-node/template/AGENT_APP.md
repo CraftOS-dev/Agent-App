@@ -7,6 +7,12 @@ middleware in `server.mjs`. You evolve the app by editing `a2app.schema.mjs` (th
 Model + operations) and `public/` (the View) — never `server.mjs` (system-owned,
 hash-locked).
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. They are declared in
+`manifest.json`; each entity names its module in `a2app.schema.mjs`.
+- **planning** — tasks and the work in front of you.
+
 ## Entities
 - **tasks** — a to-do item. Fields: `title` (string, required), `status`
   (enum: todo/doing/done), `due` (day key YYYY-MM-DD), `notes` (string),

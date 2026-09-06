@@ -43,9 +43,19 @@ export function verbOf(argv: string[]): string {
   return REGISTRY_VERBS.has(first) ? first : argv[1] ?? "";
 }
 
-/** Route an argv to the binary owning its verb (framework spec 5.1): the operate
- *  client refuses build verbs by design, so picking by verb keeps a plugin
- *  correct without asking each harness to configure two paths. */
+/**
+ * Route a HAND-TYPED argv to the binary owning its verb (framework spec 5.1), so
+ * the passthrough command a harness exposes to its user needs only one entry
+ * point rather than two.
+ *
+ * The registered tools do NOT use this — each one names its binary directly.
+ * Under the walk, an operate argv's second element is a module name chosen by the
+ * app, so an app with a module called `validate` or `promote` would have its
+ * operate calls misrouted to the build binary. The inference is still correct for
+ * a human typing a build verb, which is all this is for; the reserved-segment
+ * rule keeps the protocol verbs unambiguous, and the build verbs are only
+ * reachable through `agent-app` anyway.
+ */
 export function binFor(argv: string[], cliBin = "a2app", frameworkBin = "agent-app"): string {
   return FRAMEWORK_VERBS.has(verbOf(argv)) ? frameworkBin : cliBin;
 }
@@ -130,6 +140,14 @@ function fieldsOf(args: Record<string, unknown>, key: string): Record<string, un
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
 
+/** A describe path split into CLI positionals. An empty path is the app root,
+ *  which is a real destination — the screen an agent lands on when it arrives. */
+function segments(path: unknown): string[] {
+  return String(path ?? "")
+    .split("/")
+    .filter((s) => s !== "");
+}
+
 const DIR = { type: "string", description: "path to the Agent App project directory" };
 const ENTITY = { type: "string", description: "entity / collection name" };
 
@@ -139,13 +157,41 @@ const ENTITY = { type: "string", description: "entity / collection name" };
  * do through these, because each one shells a real framework CLI verb.
  */
 export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): HarnessTool[] {
-  const shell = (argv: string[]): Promise<CliResult> => runA2App(binFor(argv, cliBin, frameworkBin), argv);
+  // Each tool states which binary it needs rather than letting the router infer
+  // it from argv. Inference worked while every operate argument was a fixed verb;
+  // under the walk, argv[1] is a MODULE NAME chosen by the app, so an app with a
+  // module called `validate` or `promote` would have its operate calls routed to
+  // the build binary. Naming the binary at the call site removes the guess.
+  const shell = (argv: string[]): Promise<CliResult> => runA2App(cliBin, argv);
+  const build = (argv: string[]): Promise<CliResult> => runA2App(frameworkBin, argv);
   return [
     {
+      // ONE describe tool taking a path, not a tool per operation. A tool list
+      // that grows with the app reproduces exactly the cost and the selection
+      // problem the navigational surface exists to remove — and it cannot express
+      // `appliesWhen` at all, because a tool list is fixed at connection time and
+      // cannot vary with a record's state (A2APP-SPEC Appendix B).
       name: "agent_app_describe",
-      description: "Read an Agent App's live self-description: entities, fields, and declared operations.",
-      parameters: obj({ dir: DIR }, ["dir"]),
-      handler: (a) => shell([String(a.dir), "data", "schema"]),
+      description:
+        "Describe ONE place in an Agent App. `path` is empty for the root (its modules), " +
+        '"sales" for a module, "sales/invoices" for an entity, "sales/invoices/INV-1" for one ' +
+        "record and the operations its current state allows, plus one more segment for a " +
+        "sub-resource. Every response names the legal next moves. There is no call that " +
+        "returns the whole model.",
+      parameters: obj({ dir: DIR, path: { type: "string" }, all: { type: "boolean" } }, ["dir"]),
+      handler: (a) => {
+        const argv = [String(a.dir), ...segments(a.path)];
+        if (a.all === true) argv.push("--all");
+        return shell(argv);
+      },
+    },
+    {
+      name: "agent_app_find",
+      description:
+        "Search entity, operation, and module names across the app and return their locations. " +
+        "Use this instead of guessing a branch and walking back out of it.",
+      parameters: obj({ dir: DIR, term: { type: "string" } }, ["dir", "term"]),
+      handler: (a) => shell([String(a.dir), "--find", String(a.term)]),
     },
     {
       name: "agent_app_list",
@@ -184,17 +230,27 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
       handler: (a) => shell([String(a.dir), "data", String(a.entity), "delete", String(a.id)]),
     },
     {
-      name: "agent_app_operations",
-      description: "List the app's declared operations (its agent verbs).",
-      parameters: obj({ dir: DIR }, ["dir"]),
-      handler: (a) => shell([String(a.dir), "ops"]),
-    },
-    {
+      // There is deliberately no `agent_app_operations`: no global operation list
+      // exists to return. An operation is found on the screen it belongs to, and
+      // invoked at the path that identifies it.
       name: "agent_app_run_operation",
-      description: "Invoke a declared operation. A destructive op returns approval_required with a content-addressed key; re-run with `approve` set to that key to execute.",
-      parameters: obj({ dir: DIR, operation: { type: "string" }, fields: { type: "object" }, approve: { type: "string" } }, ["dir", "operation"]),
+      description:
+        "Invoke a declared operation at the path that identifies it. `path` is the module, " +
+        'entity, and record it was found under (e.g. "sales/invoices/INV-1"), or just the ' +
+        "module for a module-level operation. A destructive op returns approval_required with " +
+        "a content-addressed key; re-run with `approve` set to that key to execute.",
+      parameters: obj(
+        {
+          dir: DIR,
+          path: { type: "string" },
+          operation: { type: "string" },
+          fields: { type: "object" },
+          approve: { type: "string" },
+        },
+        ["dir", "path", "operation"],
+      ),
       handler: (a) => {
-        const argv = [String(a.dir), "run", String(a.operation)];
+        const argv = [String(a.dir), ...segments(a.path), String(a.operation)];
         for (const [k, v] of Object.entries(fieldsOf(a, "fields"))) argv.push(`--${k}`, String(v));
         if (a.approve != null) argv.push("--approve", String(a.approve));
         return shell(argv);
@@ -208,26 +264,26 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
     },
     {
       name: "agent_app_build",
-      description: "Scaffold a new Agent App from a blueprint (writes framework files + the ownership canon).",
+      description: "Scaffold a new Agent App from a blueprint (writes the adapter app part + the ownership canon).",
       parameters: obj({ dir: DIR, blueprint: { type: "string" }, name: { type: "string" } }, ["dir"]),
       handler: (a) => {
         const argv = [String(a.dir), "scaffold"];
         if (a.blueprint != null) argv.push("--blueprint", String(a.blueprint));
         if (a.name != null) argv.push("--name", String(a.name));
-        return shell(argv);
+        return build(argv);
       },
     },
     {
       name: "agent_app_validate",
       description: "Run the validation + security gate on an Agent App.",
       parameters: obj({ dir: DIR, noBuild: { type: "boolean" } }, ["dir"]),
-      handler: (a) => shell(a.noBuild ? [String(a.dir), "validate", "--no-build"] : [String(a.dir), "validate"]),
+      handler: (a) => build(a.noBuild ? [String(a.dir), "validate", "--no-build"] : [String(a.dir), "validate"]),
     },
     {
       name: "agent_app_walk_verify",
       description: "Independently verify a running app against its requirements (walk-verify).",
       parameters: obj({ dir: DIR }, ["dir"]),
-      handler: (a) => shell([String(a.dir), "walk-verify"]),
+      handler: (a) => build([String(a.dir), "walk-verify"]),
     },
   ];
 }

@@ -21,6 +21,7 @@ import {
   type ListResult,
   type OperationDecl,
   type StoredRecord,
+  type ParamDef,
 } from "@a2app/adapter-core";
 
 export const REVERSE_PROXY_ADAPTER_VERSION = "0.1.0";
@@ -29,9 +30,24 @@ export const REVERSE_PROXY_ADAPTER_VERSION = "0.1.0";
 export interface ProxyOperation {
   name: string;
   description?: string;
-  destructive?: boolean;
+  /** required: defaulting this to false would let a foreign mapping that forgot
+   *  it bypass the approval gate on a destructive upstream call */
+  destructive: boolean;
   readOnly?: boolean;
   idempotent?: boolean;
+  /**
+   * Which declared module this operation appears under. An adopted app has no
+   * entities, so its walk is two levels — root, then module — and this is what
+   * puts the operation on a screen at all.
+   */
+  module: string;
+  /**
+   * Typed parameters, in the protocol field vocabulary. Required for the same
+   * reason as everywhere else: the module screen renders the signature, and a
+   * mapping derived from a foreign route without one cannot be called correctly
+   * on the first try.
+   */
+  params: Record<string, ParamDef>;
   /** upstream HTTP method + path template; `{arg}` segments are filled from args. */
   method: string;
   path: string;
@@ -44,6 +60,12 @@ export interface ReverseProxyConfig {
   appName?: string;
   upstreamBaseUrl: string;
   operations: ProxyOperation[];
+  /**
+   * The modules this adopted app is presented under. An app with no entities
+   * still has a root screen, and its operations still need somewhere to live —
+   * OpenAPI tags or route prefixes are the natural source when mapping one.
+   */
+  modules: { name: string; summary?: string }[];
   /** conventions text surfaced in describe. */
   conventions?: Record<string, unknown>;
   /** upstream auth header injected server-side, never handed to a caller. */
@@ -132,17 +154,25 @@ class ProxyBinding implements Binding {
 export function operationDecls(cfg: ReverseProxyConfig): OperationDecl[] {
   return cfg.operations.map((o) => ({
     name: o.name,
-    destructive: o.destructive ?? false,
+    destructive: o.destructive,
+    module: o.module,
+    params: o.params,
     ...(o.description ? { description: o.description } : {}),
     ...(o.readOnly ? { readOnly: true } : {}),
     ...(o.idempotent ? { idempotent: true } : {}),
   }));
 }
 
-/** Build an A2App surface that proxies a foreign app. */
+/** Build an A2App surface that proxies a foreign app.
+ *
+ *  An adopted app publishes operations and no entities, so its walk stops at the
+ *  module level: root lists the modules, each module lists its operations, and
+ *  there is no entity or record screen to descend into. The walk never assumes
+ *  entities exist (A2APP-SPEC 3.6). */
 export function createReverseProxy(cfg: ReverseProxyConfig, credentials: Grant[]): A2App {
   return createA2App(new ProxyBinding(cfg), {
     credentials,
+    modules: cfg.modules,
     operations: operationDecls(cfg),
     ...(cfg.conventions ? { conventions: cfg.conventions } : {}),
   });

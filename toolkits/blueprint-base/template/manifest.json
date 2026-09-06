@@ -5,6 +5,12 @@
   "adapterVersion": "0.1.0",
   "appVersion": "0.1.0",
   "authMode": "none",
+  "modules": [
+    {
+      "name": "core",
+      "summary": "this app's first area — rename it as the app takes shape"
+    }
+  ],
   "modificationLock": false,
   "capabilities": {
     "integrations": []

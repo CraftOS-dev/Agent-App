@@ -7,7 +7,7 @@
  *
  * Pure and dependency-free so any host embeds it.
  */
-import type { Describe, DescribeEntity } from "@a2app/sdk";
+import type { DescribeEntity } from "@a2app/sdk";
 
 export type WriteVerb = "created" | "updated" | "deleted";
 
@@ -25,7 +25,15 @@ export interface WriteRecord {
 /* ------------------------------------------------------------- receipts */
 
 export interface HumanizeOptions {
-  describe: Describe;
+  /**
+   * The ENTITY level of describe for the entity being written (A2APP-SPEC 3.3).
+   *
+   * One entity, not the whole model: a receipt is generated for one write, and
+   * the caller has already navigated to that entity to perform it. Requiring the
+   * whole model here would put a cost on every receipt proportional to the size
+   * of the app rather than the size of the write.
+   */
+  entity: DescribeEntity;
   /** resolve a ref id to its human label, if the host can. Return null to fall
    *  back to the id. */
   resolveRef?: (entity: string, id: string) => string | null;
@@ -33,12 +41,12 @@ export interface HumanizeOptions {
 
 /** Generate the user-facing receipt for one write, FROM the stored record. */
 export function humanizeWrite(write: WriteRecord, opts: HumanizeOptions): string {
-  const entityDef = opts.describe.entities[write.entity];
-  const label = entityDef ? recordLabel(write, entityDef) : write.id;
+  const entityDef = opts.entity;
+  const label = recordLabel(write, entityDef);
   const noun = singular(write.entity);
   if (write.verb === "deleted") return `Deleted ${noun} "${label}".`;
   const verb = write.verb === "created" ? "Created" : "Updated";
-  const details = write.record && entityDef ? humanizeFields(write.record, entityDef, opts) : [];
+  const details = write.record ? humanizeFields(write.record, entityDef, opts) : [];
   const suffix = details.length ? ` (${details.join(", ")})` : "";
   return `${verb} ${noun} "${label}"${suffix}.`;
 }

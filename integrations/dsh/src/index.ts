@@ -48,8 +48,15 @@ export function apply(ctx: Context): void {
   const DIR = req("Agent App project directory");
   const ENTITY = req("entity / collection name");
 
-  ctx.tools.register(cliTool("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
-    { dir: DIR }, (a) => [s(a.dir), "data", "schema"]));
+  // Describe is navigational: one tool taking a PATH, not a tool per operation.
+  // A tool list that grew with the app would reproduce the cost and the
+  // selection problem the walk exists to remove.
+  ctx.tools.register(cliTool("agent_app_describe",
+    "Describe ONE place in an Agent App. `path` is empty for the root (its modules), \"sales\" for a module, " +
+      "\"sales/invoices\" for an entity, \"sales/invoices/INV-1\" for a record and the operations its state allows. " +
+      "Every response names the legal next moves. No call returns the whole model.",
+    { dir: DIR, path: opt("module/entity/id path; empty for the root") },
+    (a) => [s(a.dir), ...(a.path == null ? [] : s(a.path).split("/").filter((seg) => seg !== ""))]));
 
   ctx.tools.register(cliTool("agent_app_list", "List records of an entity (optional filter/sort/limit).",
     { dir: DIR, entity: ENTITY, filter: opt("filter expression"), sort: opt("sort field"), limit: { type: "integer", description: "max rows" } },
@@ -75,13 +82,16 @@ export function apply(ctx: Context): void {
   ctx.tools.register(cliTool("agent_app_delete", "Delete a record by id.",
     { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => [s(a.dir), "data", s(a.entity), "delete", s(a.id)]));
 
-  ctx.tools.register(cliTool("agent_app_operations", "List the app's declared operations.",
-    { dir: DIR }, (a) => [s(a.dir), "ops"]));
+  // No `agent_app_operations`: there is no global operation list to return. An
+  // operation is found on the screen it belongs to, and invoked at the path that
+  // identifies it.
+  ctx.tools.register(cliTool("agent_app_find", "Search entity, operation and module names across the app; returns their locations.",
+    { dir: DIR, term: req("search term") }, (a) => [s(a.dir), "--find", s(a.term)]));
 
-  ctx.tools.register(cliTool("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
-    { dir: DIR, operation: req("operation name"), fields: { type: "object", description: "operation arguments" }, approve: opt("approval key") },
+  ctx.tools.register(cliTool("agent_app_run_operation", "Invoke a declared operation at the path that identifies it. A destructive op returns approval_required with a key; pass `approve` to execute.",
+    { dir: DIR, path: req("module/entity/id path the operation was found under"), operation: req("operation name"), fields: { type: "object", description: "operation arguments" }, approve: opt("approval key") },
     (a) => {
-      const argv = [s(a.dir), "run", s(a.operation)];
+      const argv = [s(a.dir), ...s(a.path).split("/").filter((seg) => seg !== ""), s(a.operation)];
       for (const [k, v] of Object.entries((a.fields as Args) ?? {})) argv.push(`--${k}`, s(v));
       if (a.approve != null) argv.push("--approve", s(a.approve));
       return argv;

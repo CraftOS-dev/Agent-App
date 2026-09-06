@@ -6,7 +6,19 @@
  * Every method returns the app's response verbatim (status + parsed JSON) so the
  * caller can branch on `code`, never on prose.
  */
-import { ACCEPTED_PROTOCOLS, type Context, type Describe, type Identity, type Task, type Whoami, type A2AppEvent } from "./types.js";
+import {
+  ACCEPTED_PROTOCOLS,
+  type Context,
+  type DescribeEntity,
+  type DescribeFind,
+  type DescribeLevel,
+  type DescribeRecord,
+  type DescribeRoot,
+  type Identity,
+  type Task,
+  type Whoami,
+  type A2AppEvent,
+} from "./types.js";
 
 /** Raised when the app is unreachable (CLI exit 3). Network failure, not a
  *  protocol rejection. */
@@ -239,10 +251,55 @@ export class A2AppClient {
     return (ACCEPTED_PROTOCOLS as readonly string[]).includes(protocol);
   }
 
-  async describe(): Promise<Describe | null> {
-    const res = await this.request("GET", "/api/_a2app/describe");
+  /**
+   * Fetch one level of describe (A2APP-SPEC 3).
+   *
+   * `path` is the location to describe — `""` for the root, `"sales"` for a
+   * module, `"sales/invoices"` for an entity, `"sales/invoices/INV-1"` for a
+   * record, and one more segment for a sub-resource. Segments are encoded here
+   * because entity names and record ids are the app's, not this client's.
+   *
+   * Returns null on any non-2xx: a level that cannot be read is indistinguishable
+   * from one that is not there, and the caller decides what to do about it.
+   */
+  async describe(path = "", opts: { all?: boolean } = {}): Promise<DescribeLevel | null> {
+    const segments = path.split("/").filter((s) => s !== "");
+    const suffix = segments.map(encodeURIComponent).join("/");
+    const query = opts.all === true ? "?all=true" : "";
+    const res = await this.request("GET", `/api/_a2app/describe${suffix ? `/${suffix}` : ""}${query}`);
     if (!res.ok) return null;
-    return res.json as Describe;
+    return res.json as DescribeLevel;
+  }
+
+  /** The app's root screen: its modules, their sizes, and this caller's access. */
+  async describeRoot(): Promise<DescribeRoot | null> {
+    const level = await this.describe("");
+    return level?.level === "root" ? level : null;
+  }
+
+  /** One entity's fields and the operations that act on it. */
+  async describeEntity(module: string, entity: string): Promise<DescribeEntity | null> {
+    const level = await this.describe(`${module}/${entity}`);
+    return level?.level === "entity" ? level : null;
+  }
+
+  /** One record, and which operations its current state allows. */
+  async describeRecord(module: string, entity: string, id: string): Promise<DescribeRecord | null> {
+    const level = await this.describe(`${module}/${entity}/${id}`);
+    return level?.level === "record" ? level : null;
+  }
+
+  /**
+   * Search entity, operation, and module names, returning locations.
+   *
+   * This is what keeps the walk from being a linked list: without it, an agent
+   * that picks the wrong branch pays a full backtrack to correct itself.
+   */
+  async find(term: string): Promise<DescribeFind | null> {
+    const res = await this.request("GET", `/api/_a2app/describe?find=${encodeURIComponent(term)}`);
+    if (!res.ok) return null;
+    const level = res.json as DescribeLevel;
+    return level?.level === "find" ? level : null;
   }
 
   async whoami(): Promise<Whoami | null> {
@@ -352,4 +409,4 @@ function idem(key: string | undefined): Record<string, string> | undefined {
   return key === undefined ? undefined : { "Idempotency-Key": key };
 }
 
-export type { Identity, Describe, Whoami, Context, Task, A2AppEvent };
+export type { Identity, DescribeLevel, DescribeRoot, DescribeEntity, DescribeRecord, DescribeFind, Whoami, Context, Task, A2AppEvent };

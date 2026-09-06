@@ -44,13 +44,61 @@ def parse_date(value: Optional[str], today: Optional[date] = None) -> Optional[s
     return None
 
 
-def describe_to_schema(describe: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
-    """Flatten a describe document into ``{entity: {field: type}}`` for quick
-    lookups and 'did you mean' suggestions."""
-    out: Dict[str, Dict[str, str]] = {}
-    for entity, spec in (describe.get("entities") or {}).items():
-        fields = {}
-        for name, field in (spec.get("fields") or {}).items():
-            fields[name] = field.get("type", "string")
-        out[entity] = fields
+def entity_to_schema(level: Dict[str, Any]) -> Dict[str, str]:
+    """Flatten ONE entity level into ``{field: type}`` for quick lookups.
+
+    Takes the entity level of describe (A2APP-SPEC 3.3), not a whole-app
+    document — there is no such document. Mirrors ``entityToSchema`` in
+    ``@a2app/sdk``.
+    """
+    return {name: field.get("type", "string") for name, field in (level.get("fields") or {}).items()}
+
+
+def locate_entity(client: Any, entity: str) -> Optional[str]:
+    """Which module an entity lives in, so a caller holding only its name can
+    address it. One request, by name search rather than by walking every module.
+
+    An exact name match wins over a substring one: ``find`` matches loosely by
+    design, and "cards" must not resolve to "cards-archive" merely because that
+    entity sorted first.
+    """
+    found = client.find(entity)
+    if not found:
+        return None
+    for match in found.get("matches") or []:
+        path = match.get("path", "")
+        if match.get("level") == "entity" and "operation" not in match and path.split("/", 1)[-1] == entity:
+            return path.split("/", 1)[0]
+    return None
+
+
+def fetch_entity_schema(client: Any, entity: str) -> Optional[Dict[str, str]]:
+    """Read one entity's model by name: locate it, then describe it.
+
+    Two requests, deliberately not a whole-app fetch — the point of the
+    navigational surface is that a task touching two entities pays for two.
+    Callers repeating this across a session should cache against the app's
+    ``schemaVersion`` (A2APP-SPEC 2).
+    """
+    module = locate_entity(client, entity)
+    if module is None:
+        return None
+    level = client.describe_entity(module, entity)
+    return None if level is None else entity_to_schema(level)
+
+
+def fetch_entity_index(client: Any) -> Dict[str, str]:
+    """Every readable entity name, mapped to the module it lives in."""
+    out: Dict[str, str] = {}
+    root = client.describe_root()
+    if not root:
+        return out
+    for module in root.get("modules") or []:
+        if module.get("access") == "none" or not module.get("entities"):
+            continue
+        level = client.describe(module["name"], all=True)
+        if not level or level.get("level") != "module":
+            continue
+        for entity in level.get("entities") or []:
+            out[entity["name"]] = module["name"]
     return out

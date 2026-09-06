@@ -58,6 +58,23 @@ shows a message (not a silent failure); no crash on edge cases.
 implemented, works as described, and is reachable in the UI. Nothing requested is
 missing; nothing unrequested was added (no over-engineering).
 
+**8b. Operations** — check `## Operations` in `reference/requirements.md` too, not
+only Features. An agent-facing operation with no UI affordance is invisible to a
+browser walk, and the gate only proves it *resolves* — so without this step it is
+verified by nobody. For each one, walk to it and confirm it is really there:
+
+- `a2app <dir>` → the modules match `## Modules`; no module reads `0 entities`
+  unless it is genuinely operations-only.
+- `a2app <dir> <module> <entity>` → the operation appears on the entity it claims
+  to act on, and its signature shows the parameters it actually takes.
+- `a2app <dir> <module> <entity> <id>` on a real record → it is available when it
+  should be, and blocked with a truthful reason when it should not be.
+- Invoke every non-destructive one for real and read the result back. Destructive
+  ones are shape-checked, never fired.
+
+A declared operation that cannot be walked to, or whose blocked reason
+contradicts the record, is a defect — report it like any other.
+
 **9. No fabricated data** — an unreachable external source shows an honest
 empty/offline state, never generated or random values standing in for real data.
 

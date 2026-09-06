@@ -38,27 +38,109 @@ export interface DescribeField {
   format?: string;
 }
 
-export interface DescribeEntity {
-  label: string | null;
-  records: string;
-  auth?: boolean;
-  fields: Record<string, DescribeField>;
-}
-
 export interface OperationDecl {
   name: string;
   description?: string;
   destructive: boolean;
   readOnly?: boolean;
   idempotent?: boolean;
-  params?: Record<string, unknown>;
+  /** the entity this operation acts on; absent = module-level */
+  entity?: string;
+  /** typed parameters, in the same vocabulary as entity fields */
+  params: Record<string, DescribeField>;
 }
 
-/** `GET /api/_a2app/describe`. */
-export interface Describe {
-  entities: Record<string, DescribeEntity>;
-  operations: OperationDecl[];
+/* ------------------------------------------------- describe: the six levels */
+
+/**
+ * `GET /api/_a2app/describe[/{path}]` — one level of the navigational surface
+ * (A2APP-SPEC 3). Discriminated by `level`; every level carries `next`, the
+ * legal moves from where the caller landed.
+ */
+export type DescribeLevel =
+  | DescribeRoot
+  | DescribeModule
+  | DescribeEntity
+  | DescribeRecord
+  | DescribeRelation
+  | DescribeFind;
+
+/** How much of a module the calling credential can reach. */
+export type ModuleAccess = "full" | "read-only" | "none";
+
+/** The app's home screen: O(modules), never O(entities). */
+export interface DescribeRoot {
+  level: "root";
+  app: { id: string; name?: string | null };
+  modules: {
+    name: string;
+    summary?: string;
+    entities: number;
+    operations: number;
+    access: ModuleAccess;
+  }[];
   conventions: Record<string, unknown>;
+  next: string[];
+}
+
+/** A module's contents by name, never by schema. */
+export interface DescribeModule {
+  level: "module";
+  path: string;
+  summary?: string;
+  entities: { name: string; summary?: string }[];
+  operations: { name: string; summary?: string; destructive: boolean }[];
+  /** entries omitted to fit the budget; always reported, never silent */
+  truncated?: number;
+  next: string[];
+}
+
+/** The first level carrying schemas — for one entity. */
+export interface DescribeEntity {
+  level: "entity";
+  path: string;
+  label: string | null;
+  records: string;
+  auth?: boolean;
+  fields: Record<string, DescribeField>;
+  operations: OperationDecl[];
+  next: string[];
+}
+
+/** One record, and which operations its current state allows. */
+export interface DescribeRecord {
+  level: "record";
+  path: string;
+  id: string;
+  label: string | null;
+  operations: {
+    name: string;
+    available: boolean;
+    destructive?: boolean;
+    /** why, when `available` is false — derived from the record, never composed */
+    blocked?: string;
+  }[];
+  relations?: { name: string; entity: string; count?: number }[];
+  next: string[];
+}
+
+/** A record's sub-resource. */
+export interface DescribeRelation {
+  level: "relation";
+  path: string;
+  entity: string;
+  items: { id: string; label?: string | null }[];
+  truncated?: number;
+  next: string[];
+}
+
+/** Name search across the app, returning locations only. */
+export interface DescribeFind {
+  level: "find";
+  term: string;
+  matches: { path: string; level?: "module" | "entity"; operation?: string }[];
+  truncated?: number;
+  next: string[];
 }
 
 /** A single guard rejection. */

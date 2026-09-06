@@ -40,6 +40,9 @@ adapter = Adapter(
     operations=schema.OPERATIONS,
     store=Store(schema.SEED),
     token=_agent_token(),
+    # Modules are declared in the manifest and are what describe's root level
+    # lists; every entity and operation names one.
+    modules=manifest.get("modules", []),
     allowed_origins=[f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"],
     operation_runners=schema.OPERATION_RUNNERS,
 )

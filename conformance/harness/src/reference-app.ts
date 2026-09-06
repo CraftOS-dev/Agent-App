@@ -62,6 +62,8 @@ export function buildReferenceApp(): A2App {
     entities: {
       lists: {
         fields: listFields,
+        module: "board",
+        summary: "columns the cards move through",
         seed: [
           { id: "list_todo", title: "To Do", position: 1 },
           { id: "list_doing", title: "Doing", position: 2 },
@@ -69,20 +71,43 @@ export function buildReferenceApp(): A2App {
       },
       cards: {
         fields: cardFields,
+        module: "board",
+        summary: "the work itself",
         seed: [{ id: "card_seed", title: "Welcome card", list: "list_todo", priority: "low", created: "2026-07-30T00:00:00.000Z" }],
       },
     },
     operations: {
       "archive-board": () => ({ archived: true, at: "2026-07-31T09:15:00.000Z" }),
       "count-cards": () => ({ count: 1 }),
+      "finish-card": () => ({ ok: true }),
     },
   });
 
   return createA2App(binding, {
     credentials: grants,
+    modules: [{ name: "board", summary: "lists and the cards on them" }],
     operations: [
-      { name: "archive-board", description: "Archive every card on the board.", destructive: true },
-      { name: "count-cards", description: "Count the cards.", destructive: false, readOnly: true, idempotent: true },
+      { name: "archive-board", description: "Archive every card on the board.", destructive: true, module: "board", params: {} },
+      {
+        name: "count-cards",
+        description: "Count the cards.",
+        destructive: false,
+        readOnly: true,
+        idempotent: true,
+        module: "board",
+        params: {},
+      },
+      // Attached to an entity and gated on that record's state, so the record
+      // level has both an available and a blocked operation to report.
+      {
+        name: "finish-card",
+        description: "Mark one card done.",
+        destructive: false,
+        module: "board",
+        entity: "cards",
+        appliesWhen: { field: "done", ne: true },
+        params: { card: { type: "ref", entity: "cards", required: true } },
+      },
     ],
     events: [{ type: "card.due_soon" }],
     credentialHint: "Read the app's .agent-token file (mode 0600).",

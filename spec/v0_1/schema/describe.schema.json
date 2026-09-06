@@ -1,52 +1,512 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "a2app/describe.json",
-  "type": "object",
-  "required": ["entities", "operations", "conventions"],
-  "properties": {
-    "entities": {
+  "title": "A2App describe — one level of the navigational surface",
+  "description": "Describe answers for one place in the app, never for the whole app. `GET /api/_a2app/describe[/{path}]` returns exactly one of these shapes, selected by `level`. Every response carries `next` (the legal moves from here) and every response fits the per-response budget of requirement_A2App.md section 1.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/root"
+    },
+    {
+      "$ref": "#/$defs/module"
+    },
+    {
+      "$ref": "#/$defs/entity"
+    },
+    {
+      "$ref": "#/$defs/record"
+    },
+    {
+      "$ref": "#/$defs/relation"
+    },
+    {
+      "$ref": "#/$defs/find"
+    }
+  ],
+  "$defs": {
+    "next": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      },
+      "description": "the legal moves from this level. Never empty: it is the only navigation aid the surface provides."
+    },
+    "field": {
       "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["label", "records", "fields"],
-        "properties": {
-          "label": { "type": ["string", "null"] },
-          "records": { "type": "string" },
-          "auth": { "type": "boolean" },
-          "fields": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "object",
-              "required": ["type"],
-              "properties": {
-                "type": { "enum": ["string", "number", "boolean", "datetime", "enum", "ref", "list<enum>", "list<ref>", "json", "binary"] },
-                "required": { "type": "boolean" },
-                "readOnly": { "type": "boolean" },
-                "max": { "type": "number" },
-                "values": { "type": "array", "items": { "type": "string" } },
-                "entity": { "type": "string" },
-                "format": { "type": "string" }
-              }
-            }
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "datetime",
+            "enum",
+            "ref",
+            "list<enum>",
+            "list<ref>",
+            "json",
+            "binary"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "number"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entity": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": [
+        "name",
+        "destructive",
+        "params"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "readOnly": {
+          "type": "boolean",
+          "description": "the operation has no side effects; safe to call freely, result cacheable. Absent = not asserted"
+        },
+        "idempotent": {
+          "type": "boolean",
+          "description": "repeating the operation is safe; may be retried without an Idempotency-Key. Absent = not asserted"
+        },
+        "entity": {
+          "type": "string",
+          "description": "the entity this operation acts on. Absent = module-level: it appears on the module screen only"
+        },
+        "params": {
+          "type": "object",
+          "description": "typed parameters, using the same field vocabulary as entity fields. Required: the record level renders this as the operation's signature, and arguments described in prose cannot be rendered or checked.",
+          "additionalProperties": {
+            "$ref": "#/$defs/field"
           }
         }
       }
     },
-    "operations": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["name", "destructive"],
-        "properties": {
-          "name": { "type": "string" },
-          "description": { "type": "string" },
-          "destructive": { "type": "boolean" },
-          "readOnly": { "type": "boolean", "description": "the operation has no side effects; safe to call freely, result cacheable. Absent = not asserted" },
-          "idempotent": { "type": "boolean", "description": "repeating the operation is safe; may be retried without an Idempotency-Key. Absent = not asserted" },
-          "params": { "type": "object" }
+    "root": {
+      "type": "object",
+      "required": [
+        "level",
+        "app",
+        "modules",
+        "conventions",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "root"
+        },
+        "app": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "entities",
+              "operations",
+              "access"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "entities": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "operations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "access": {
+                "enum": [
+                  "full",
+                  "read-only",
+                  "none"
+                ],
+                "description": "computed from the caller's own grant. A module the caller cannot reach is still named; only its contents are withheld."
+              }
+            }
+          }
+        },
+        "conventions": {
+          "type": "object",
+          "description": "root only; too large to repeat per level"
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        },
+        "truncated": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "modules omitted to fit the budget. A root sheds module SUMMARIES before it sheds any module row, so every module stays named for as long as possible."
         }
       }
     },
-    "conventions": { "type": "object" }
+    "module": {
+      "type": "object",
+      "required": [
+        "level",
+        "path",
+        "entities",
+        "operations",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "module"
+        },
+        "path": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "destructive"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "destructive": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "truncated": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "entries omitted to fit the budget. ALWAYS reported when anything is omitted: a silent truncation is indistinguishable from a complete response. `?all=true` returns the full name list."
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "level",
+        "path",
+        "label",
+        "records",
+        "fields",
+        "operations",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "entity"
+        },
+        "path": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "records": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/field"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/operation"
+          }
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        },
+        "truncated": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "operations omitted to fit the budget. FIELDS are never trimmed — a client treats a field absent from describe as write-only and exempts it from the read-back check, so dropping one would silently disable that backstop."
+        }
+      }
+    },
+    "record": {
+      "type": "object",
+      "required": [
+        "level",
+        "path",
+        "id",
+        "label",
+        "operations",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "record"
+        },
+        "path": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "available"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "available": {
+                "type": "boolean"
+              },
+              "destructive": {
+                "type": "boolean"
+              },
+              "blocked": {
+                "type": "string",
+                "description": "why this operation is unavailable on this record, derived from its declared appliesWhen predicate and the record's stored values. An unavailable operation is shown with its reason, never hidden: a hidden action is indistinguishable from a non-existent one."
+              }
+            },
+            "if": {
+              "properties": {
+                "available": {
+                  "const": false
+                }
+              },
+              "required": [
+                "available"
+              ]
+            },
+            "then": {
+              "required": [
+                "name",
+                "available",
+                "blocked"
+              ]
+            }
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "entity"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "entity": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "required": [
+        "level",
+        "path",
+        "entity",
+        "items",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "relation"
+        },
+        "path": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "truncated": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        }
+      }
+    },
+    "find": {
+      "type": "object",
+      "required": [
+        "level",
+        "term",
+        "matches",
+        "next"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "const": "find"
+        },
+        "term": {
+          "type": "string"
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "level": {
+                "enum": [
+                  "module",
+                  "entity"
+                ]
+              },
+              "operation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "truncated": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "next": {
+          "$ref": "#/$defs/next"
+        }
+      }
+    }
   }
 }

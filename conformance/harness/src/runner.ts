@@ -18,6 +18,25 @@ export interface Expect {
   absent?: string[];
   /** array length at a path */
   len?: Record<string, number>;
+  /** number of keys of an OBJECT at a path (`len` only works on arrays, and a
+   *  describe level's `fields` is an object) */
+  keys?: Record<string, number>;
+  /**
+   * Serialized size ceiling, in characters, for the whole response or for a
+   * subtree of it.
+   *
+   * `maxChars` measures the response document; `maxCharsAt` measures one path
+   * within it. This is what makes the per-response describe budget checkable —
+   * the budget has been contractual since the first version of the protocol and
+   * had no assertion behind it, which is how the reference adapter came to
+   * exceed it unnoticed.
+   *
+   * Measured on the canonical JSON of the parsed document rather than the raw
+   * body, so pretty-printing or a transport's whitespace cannot change the
+   * verdict. The budget is a property of the content, not its formatting.
+   */
+  maxChars?: number;
+  maxCharsAt?: Record<string, number>;
   /** substring present in the raw response body / stdout */
   contains?: string;
   /** capture values from the response into vars: { varName: "json.path" } */
@@ -144,6 +163,22 @@ function evaluate(expect: Expect, actual: Actual, vars: Map<string, unknown>): s
     if (!Array.isArray(arr) || arr.length !== n) {
       failures.push(`len ${path}: expected ${n}, got ${Array.isArray(arr) ? arr.length : "not-an-array"}`);
     }
+  }
+  for (const [path, n] of Object.entries(expect.keys ?? {})) {
+    const obj = getPath(actual.json, path);
+    const count = obj !== null && typeof obj === "object" && !Array.isArray(obj) ? Object.keys(obj).length : null;
+    if (count !== n) {
+      failures.push(`keys ${path}: expected ${n}, got ${count === null ? "not-an-object" : count}`);
+    }
+  }
+  if (expect.maxChars !== undefined) {
+    const size = actual.json === null ? actual.body.length : JSON.stringify(actual.json).length;
+    if (size > expect.maxChars) failures.push(`maxChars: ${size} chars exceeds the ${expect.maxChars} budget`);
+  }
+  for (const [path, limit] of Object.entries(expect.maxCharsAt ?? {})) {
+    const value = getPath(actual.json, path);
+    const size = JSON.stringify(value ?? null).length;
+    if (size > limit) failures.push(`maxCharsAt ${path}: ${size} chars exceeds the ${limit} budget`);
   }
   if (expect.contains !== undefined && !actual.body.includes(expect.contains)) {
     failures.push(`contains: "${expect.contains}" not found`);

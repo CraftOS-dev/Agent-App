@@ -18,6 +18,12 @@ export interface Manifest {
   adapterVersion: string;
   appVersion?: string;
   authMode: "none" | "multi-user";
+  /**
+   * The app's organizing units. Every entity and operation belongs to exactly
+   * one, and these are the rows of describe's root level. Declared before
+   * anything that belongs to one.
+   */
+  modules: { name: string; summary?: string }[];
   modificationLock?: boolean;
   capabilities?: Record<string, unknown>;
   pipeline: { install: string; build: string; start: string; health: string };

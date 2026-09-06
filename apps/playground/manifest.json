@@ -3,8 +3,12 @@
   "name": "Playground Contacts",
   "agentAppVersion": "0.1.0",
   "adapterVersion": "0.1.0",
-  "appVersion": "0.1.0",
+  "appVersion": "0.2.0",
   "authMode": "none",
+  "modules": [
+    { "name": "directory", "summary": "people and the companies they belong to" },
+    { "name": "outreach", "summary": "every logged contact with a person" }
+  ],
   "modificationLock": false,
   "capabilities": { "integrations": [] },
   "pipeline": {

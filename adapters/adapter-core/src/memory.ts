@@ -22,6 +22,10 @@ import type { NormalizedField } from "@a2app/rules";
 
 export interface MemoryEntitySpec {
   fields: NormalizedField[];
+  /** the declared module this entity lives in (A2APP-SPEC 3) */
+  module: string;
+  /** one line, shown beside the entity's name on its module screen */
+  summary?: string;
   auth?: boolean;
   writeAllow?: string[];
   /** seed records */
@@ -86,6 +90,8 @@ export class MemoryBinding implements Binding {
     for (const [name, spec] of Object.entries(this.specs)) {
       out[name] = {
         fields: spec.fields,
+        module: spec.module,
+        ...(spec.summary ? { summary: spec.summary } : {}),
         ...(spec.auth ? { auth: true } : {}),
         ...(spec.writeAllow ? { writeAllow: spec.writeAllow } : {}),
       };

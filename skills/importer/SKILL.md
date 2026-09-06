@@ -62,11 +62,19 @@ declared operations; everything else passes through.
    OWN runner (its npm script, uvicorn, a static server, a compiled binary). Pick a
    health strategy the app satisfies (an HTTP path it answers, or process liveness
    for servers that 404 on `/`).
-3. **Map its controllable surface** into `operations.json` so agents can DRIVE it
-   over A2App. Each declared operation maps its A2App path onto the app's OWN
-   upstream endpoint (the reverse-proxy adapter forwards it). Probe in order: an
-   OpenAPI/Swagger spec in the repo → route definitions in code → the README. Mark
-   anything that deletes/overwrites `"destructive": true`. If the app has NO server
+3. **Group it into modules, then map its controllable surface** into
+   `operations.json` so agents can DRIVE it over A2App. Each declared operation
+   maps its A2App path onto the app's OWN upstream endpoint (the reverse-proxy
+   adapter forwards it). Probe in order: an OpenAPI/Swagger spec in the repo →
+   route definitions in code → the README.
+   **The grouping is already there — use it.** OpenAPI tags, route path prefixes,
+   and controller files each name an area a person would recognise; make those the
+   modules and declare them in `manifest.json`. Flattening two hundred routes into
+   one module produces a screen no agent can read and a budget the gate will fail.
+   Every operation needs typed `params`: derive them from the OpenAPI parameter
+   schema where one exists, and where none does, read the handler and declare them
+   explicitly — an operation whose arguments you cannot state does not ship.
+   Mark anything that deletes/overwrites `"destructive": true`. If the app has NO server
    API (a static site or client-side SPA), leave `operations` empty and say so —
    never invent verbs, never map direct DB writes. A foreign app exposes
    **operations only, no protocol entities** — its own API passes through.
@@ -98,8 +106,9 @@ use the **import** path instead.
 
 - Imported/installed projects are ordinary Agent Apps afterward: operate them via
   the `a2app` CLI (`ops` / `run` / `data`), modify them via the modify skill. Adopted
-  external apps speak the same operations surface through their adapter — `a2app ops`
-  / `a2app run` work against them too; only the `data` verbs don't apply (external
+  external apps speak the same operations surface through their adapter — the walk
+  reaches them too (`a2app <dir>` then the module), and an operation is invoked at
+  the path it was found under; only the `data` verbs don't apply (external
   apps expose operations only; the app's own API passes through instead).
 - Never edit system-owned files of an Agent App — the gate hashes them.
 - Re-verification (gate + walk-verify) is mandatory for every path except a

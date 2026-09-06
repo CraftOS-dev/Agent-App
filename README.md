@@ -40,13 +40,15 @@ Every Agent App follows **MVC-A**: Model, View, Controller, plus the **A**gent s
 | AG-UI / A2UI | How do agent runs stream into UIs / how is declarative UI generated? |
 | **A2App** | **How do agents safely operate full stateful applications?** |
 
-Three pillars: **Describe** (the app publishes its own data model, operations, conventions — generated live, it cannot drift) · **Guard** (the app validates every write before backend coercion; no silent 200s) · **Receipt** (what the user is told is generated from the stored record, never composed by the model). With hard budgets: describe ≤ 4,000 chars for a 10-entity app, a correct write in ≤ 2 round trips, every violation reported in one response.
+Three pillars: **Describe** (the app publishes its own data model, operations, conventions — generated live so it cannot drift, and answered one level at a time so cost follows the task, not the app) · **Guard** (the app validates every write before backend coercion; no silent 200s) · **Receipt** (what the user is told is generated from the stored record, never composed by the model). With hard budgets: every describe response ≤ 2,000 chars at any app size, a correct write in ≤ 2 round trips, every violation reported in one response.
 
 ## What an agent does
 
 ```bash
 # operate (A2App protocol, CLI-primary — HTTP is the required fallback)
-a2app <dir> data schema # describe: entities, operations, conventions
+a2app <dir>                     # arrive: the app’s modules
+a2app <dir> planning cards      # one entity: its fields and the operations on it
+a2app <dir> planning cards <id> # one record, and what its current state allows
 a2app <dir> data cards create --title "Buy milk" --due tomorrow
 # build / evolve (framework CLI)
 agent-app <dir> scaffold [--blueprint <id>] # scaffold: framework files + ownership canon
@@ -84,7 +86,7 @@ Humans use an Agent App like any other software: visually. You can also talk to 
 
 ### An agent harness using an Agent App
 
-Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by reading its self-description (`describe`) through the `a2app` operate client (`a2app <dir> data schema`).
+Agents use the app programmatically via the A2App protocol, while continuing to talk to you in their own chat session — not one built into the app. Agents are given the guide, skills, and context to operate any Agent App, above all by walking its self-description through the `a2app` operate client, starting at `a2app <dir>`.
 
 *More scenarios will be added as the ecosystem grows.*
 

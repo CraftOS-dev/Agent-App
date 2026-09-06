@@ -17,7 +17,7 @@ from .client import (
     ACCEPTED_PROTOCOLS,
     PROTOCOL_VERSION,
 )
-from .coerce import parse_date, describe_to_schema
+from .coerce import parse_date, entity_to_schema, fetch_entity_index, fetch_entity_schema, locate_entity
 
 SDK_VERSION = "0.1.0"
 
@@ -28,6 +28,9 @@ __all__ = [
     "ACCEPTED_PROTOCOLS",
     "PROTOCOL_VERSION",
     "parse_date",
-    "describe_to_schema",
+    "entity_to_schema",
+    "fetch_entity_schema",
+    "fetch_entity_index",
+    "locate_entity",
     "SDK_VERSION",
 ]

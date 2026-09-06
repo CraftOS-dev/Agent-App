@@ -42,6 +42,7 @@ function makeProjectDir(port: number, token: string): string {
         agentAppVersion: "0.1.0",
         adapterVersion: "0.1.0",
         authMode: "none",
+        modules: [{ name: "board", summary: "lists and the cards on them" }],
         pipeline: { install: "true", build: "true", start: "true", health: "/api/_a2app" },
         port,
       },

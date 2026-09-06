@@ -125,7 +125,11 @@ const binding = {
 
   entities() {
     const out = {};
-    for (const [name, def] of Object.entries(schema.entities)) out[name] = { fields: def.fields };
+    for (const [name, def] of Object.entries(schema.entities)) {
+      // module + summary travel with the entity: describe groups by module, so
+      // an entity that dropped them here would have no screen to appear on.
+      out[name] = { fields: def.fields, module: def.module, ...(def.summary ? { summary: def.summary } : {}) };
+    }
     return out;
   },
 
@@ -196,6 +200,9 @@ if (existsSync(TOKEN_FILE)) {
 const app = createA2App(binding, {
   credentials: [{ token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
   operations: schema.operations ?? [],
+  // Modules are declared in the manifest and are what describe's root level
+  // lists; every entity and operation names one.
+  modules: manifest.modules,
   allowedOrigins: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`],
   credentialHint: "Read the app's .agent-token file (mode 0600) in the project directory.",
   // Adapter-owned state (idempotency keys, tasks, events, grants, audit) lives

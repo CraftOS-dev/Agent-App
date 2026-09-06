@@ -6,6 +6,11 @@
  * back face) mapping their stack's schema and record store onto the protocol
  * vocabulary. The pure validation rules come from `@a2app/rules`, shared
  * verbatim so every backend rejects identical payloads identically.
+ *
+ * `app + A2App adapter = Agent App`: this package is the adapter's UNIVERSAL
+ * part, byte-identical in every app on this stack. What differs per app — its
+ * modules, its declared operations, its identity and pipeline — is the app part,
+ * supplied through {@link A2AppConfig} and the binding.
  */
 export { createA2App, ADAPTER_CORE_VERSION } from "./server.js";
 export type { A2App } from "./server.js";
@@ -18,4 +23,20 @@ export type { StateStore, StoredTask, StoredEvent } from "./store.js";
 export { RateLimiter, DEFAULT_RATE_LIMITS } from "./rate.js";
 export type { RateLimits, RouteClass, RateDecision } from "./rate.js";
 export { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
+/** Navigational describe: the level builders, the model check the build gate
+ *  reuses so it can never pass a model the adapter would refuse, and the size
+ *  measurement the per-response budget is stated in. */
+export {
+  buildRoot,
+  buildModule,
+  buildEntity,
+  buildRecord,
+  buildRelation,
+  buildFind,
+  modelProblems,
+  levelSize,
+  FULL_ACCESS,
+  NO_ACCESS,
+} from "./describe.js";
+export type { Access, DescribeDeps } from "./describe.js";
 export * from "./types.js";

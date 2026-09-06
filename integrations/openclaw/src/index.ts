@@ -53,9 +53,13 @@ export default definePluginEntry({
       }));
     };
 
-    tool("agent_app_describe", "Read an Agent App's entities, fields, and declared operations.",
-      Type.Object({ dir: DIR }),
-      (p) => [s(p.dir), "data", "schema"]);
+    // Describe is navigational: one tool taking a PATH, not a tool per operation.
+    tool("agent_app_describe",
+      'Describe ONE place in an Agent App. `path` is empty for the root (its modules), "sales" for a module, ' +
+        '"sales/invoices" for an entity, "sales/invoices/INV-1" for a record and the operations its state allows. ' +
+        "Every response names the legal next moves. No call returns the whole model.",
+      Type.Object({ dir: DIR, path: Type.Optional(Type.String()) }),
+      (p) => [s(p.dir), ...(p.path == null ? [] : s(p.path).split("/").filter((seg) => seg !== ""))]);
 
     tool("agent_app_list", "List records of an entity (optional filter/sort/limit).",
       Type.Object({ dir: DIR, entity: ENTITY, filter: Type.Optional(Type.String()), sort: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
@@ -83,14 +87,16 @@ export default definePluginEntry({
       Type.Object({ dir: DIR, entity: ENTITY, id: Type.String() }),
       (p) => [s(p.dir), "data", s(p.entity), "delete", s(p.id)]);
 
-    tool("agent_app_operations", "List the app's declared operations.",
-      Type.Object({ dir: DIR }),
-      (p) => [s(p.dir), "ops"]);
+    // No `agent_app_operations`: no global operation list exists. An operation is
+    // found on the screen it belongs to and invoked at the path identifying it.
+    tool("agent_app_find", "Search entity, operation and module names across the app; returns their locations.",
+      Type.Object({ dir: DIR, term: Type.String() }),
+      (p) => [s(p.dir), "--find", s(p.term)]);
 
-    tool("agent_app_run_operation", "Invoke a declared operation. A destructive op returns approval_required with a key; pass `approve` to execute.",
-      Type.Object({ dir: DIR, operation: Type.String(), fields: Type.Optional(Type.Record(Type.String(), Type.Unknown())), approve: Type.Optional(Type.String()) }),
+    tool("agent_app_run_operation", "Invoke a declared operation at the path that identifies it. A destructive op returns approval_required with a key; pass `approve` to execute.",
+      Type.Object({ dir: DIR, path: Type.String(), operation: Type.String(), fields: Type.Optional(Type.Record(Type.String(), Type.Unknown())), approve: Type.Optional(Type.String()) }),
       (p) => {
-        const a = [s(p.dir), "run", s(p.operation)];
+        const a = [s(p.dir), ...s(p.path).split("/").filter((seg) => seg !== ""), s(p.operation)];
         for (const [k, v] of Object.entries((p.fields as Args) ?? {})) a.push(`--${k}`, s(v));
         if (p.approve != null) a.push("--approve", s(p.approve));
         return a;

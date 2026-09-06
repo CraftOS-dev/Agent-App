@@ -1,5 +1,11 @@
 {
   "operations": [
-    { "name": "archive-done", "description": "Archive every completed task.", "destructive": true }
+    {
+      "name": "archive-done",
+      "description": "Archive every completed task.",
+      "destructive": true,
+      "module": "planning",
+      "params": {}
+    }
   ]
 }

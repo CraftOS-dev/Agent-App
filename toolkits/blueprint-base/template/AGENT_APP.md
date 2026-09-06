@@ -7,6 +7,13 @@ everywhere, back face specific to your stack —), replace
 the `pipeline` block in `manifest.json` with your real install/build/start
 commands, and build the app feature by feature per the creator skill.
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. Declare them in
+`manifest.json` BEFORE declaring anything that names one.
+- **core** — this app's first area. Rename it as the app takes shape; split a
+  module once its screen would exceed the 2,000-character describe budget.
+
 ## Entities
 None yet. Add each entity to your Model, then expose it through the adapter's
 `describe` so an agent sees it (fields mapped to protocol types).

@@ -4,42 +4,84 @@
  * — the app's guard is the authority and rejects anything wrong.
  */
 import { A2AppUnreachableError, type A2AppClient } from "./client.js";
-import type { Describe, DescribeEntity, DescribeField } from "./types.js";
+import type { DescribeEntity, DescribeField, OperationDecl } from "./types.js";
 
 export type FieldSchema = DescribeField & { name: string };
 
 export interface EntitySchema {
   name: string;
+  /** the module this entity lives in — the first segment of its describe path */
+  module: string;
   label: string | null;
   auth: boolean;
   records: string;
   fields: FieldSchema[];
+  /** the operations that act on this entity, with their typed signatures */
+  operations: OperationDecl[];
 }
 
 export type Schema = Map<string, EntitySchema>;
 
-/** Read the app's data model from the A2App surface into a convenient map. */
-export async function fetchSchema(client: A2AppClient): Promise<Schema> {
-  const out: Schema = new Map();
-  const described = await client.describe();
-  if (described === null) return out;
-  for (const [name, entity] of Object.entries(described.entities ?? {})) {
-    out.set(name, entityToSchema(name, entity));
+/**
+ * Where an entity lives, so a caller holding only its name can address it.
+ *
+ * Resolved by name search rather than by walking every module, so it costs one
+ * request regardless of how many modules the app has. An exact name match wins
+ * over a substring one: `find` matches loosely by design, and "cards" must not
+ * resolve to "cards-archive" merely because that entity sorted first.
+ */
+export async function locateEntity(client: A2AppClient, entity: string): Promise<string | null> {
+  const found = await client.find(entity);
+  if (found === null) return null;
+  const paths = found.matches
+    .filter((m) => m.level === "entity" && m.operation === undefined)
+    .map((m) => m.path);
+  const exact = paths.find((p) => p.slice(p.indexOf("/") + 1) === entity);
+  const chosen = exact ?? null;
+  return chosen === null ? null : chosen.slice(0, chosen.indexOf("/"));
+}
+
+/**
+ * Read ONE entity's model, by name, into the shape the coercion helpers use.
+ *
+ * Two requests: locate the entity, then describe it. This is deliberately not a
+ * whole-app fetch — there is no endpoint that returns one, and the point of the
+ * navigational surface is that a task touching two entities pays for two, not
+ * for the app. Callers that repeat this across a session should cache against
+ * the app's `schemaVersion` (A2APP-SPEC 2), which is what makes the ≤2
+ * round-trip write budget reachable.
+ *
+ * The returned entity carries EVERY readable field, not a summary. That is
+ * load-bearing: {@link nonReadableFields} treats a field absent from the model
+ * as write-only and exempts it from the read-back check, so a partial model here
+ * would silently disable the write-completeness backstop rather than fail loudly.
+ */
+export async function fetchEntitySchema(client: A2AppClient, entity: string): Promise<EntitySchema | null> {
+  const module = await locateEntity(client, entity);
+  if (module === null) return null;
+  const level = await client.describeEntity(module, entity);
+  if (level === null) return null;
+  return entityToSchema(entity, module, level);
+}
+
+/** Every entity name the app has, with the module each lives in. One request. */
+export async function fetchEntityIndex(client: A2AppClient): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const root = await client.describeRoot();
+  if (root === null) return out;
+  for (const m of root.modules) {
+    if (m.access === "none" || m.entities === 0) continue;
+    const level = await client.describe(m.name, { all: true });
+    if (level?.level !== "module") continue;
+    for (const e of level.entities) out.set(e.name, m.name);
   }
   return out;
 }
 
-export function describeToSchema(described: Describe): Schema {
-  const out: Schema = new Map();
-  for (const [name, entity] of Object.entries(described.entities ?? {})) {
-    out.set(name, entityToSchema(name, entity));
-  }
-  return out;
-}
-
-function entityToSchema(name: string, entity: DescribeEntity): EntitySchema {
+export function entityToSchema(name: string, module: string, entity: DescribeEntity): EntitySchema {
   return {
     name,
+    module,
     label: entity.label,
     auth: entity.auth === true,
     records: entity.records,
@@ -47,23 +89,45 @@ function entityToSchema(name: string, entity: DescribeEntity): EntitySchema {
       name: fieldName,
       ...spec,
     })),
+    operations: entity.operations ?? [],
   };
 }
 
-/** Compact one-line-per-entity rendering, for `data <dir> schema` and errors. */
-export function renderSchema(schema: Schema): string {
-  const lines: string[] = [];
-  for (const [name, entity] of schema) {
-    const fields = entity.fields
-      .filter((f) => !f.readOnly)
-      .map((f) => {
-        const type = f.entity !== undefined ? `->${f.entity}` : f.type;
-        return `${f.name}(${type}${f.required === true ? "*" : ""})`;
-      })
-      .join(" ");
-    lines.push(`  ${name}: ${fields}`);
+/**
+ * One entity's writable fields on a line, for `data <entity> schema` and errors.
+ *
+ * Enum values are shown inline. They are the single most common reason a write
+ * is rejected, and an agent that has to guess them spends a round trip finding
+ * out — which is the budget this surface exists to protect.
+ */
+export function renderEntity(entity: EntitySchema): string {
+  const fields = entity.fields
+    .filter((f) => !f.readOnly)
+    .map((f) => {
+      const type =
+        f.entity !== undefined
+          ? `->${f.entity}`
+          : f.values !== undefined && f.values.length > 0
+            ? `enum:${f.values.join("|")}`
+            : f.type;
+      return `${f.name}(${type}${f.required === true ? "*" : ""})`;
+    })
+    .join(" ");
+  return `  ${entity.name}: ${fields}`;
+}
+
+/** Entity names by module, for `data schema`. Names only — field detail is one
+ *  level in, which is what keeps this bounded however large the app grows. */
+export function renderEntityIndex(index: Map<string, string>): string {
+  const byModule = new Map<string, string[]>();
+  for (const [entity, module] of index) {
+    const list = byModule.get(module) ?? [];
+    list.push(entity);
+    byModule.set(module, list);
   }
-  return lines.join("\n");
+  return [...byModule]
+    .map(([module, entities]) => `  ${module}: ${entities.sort().join(" ")}`)
+    .join("\n");
 }
 
 /** Cheap did-you-mean (Levenshtein under a small threshold). */

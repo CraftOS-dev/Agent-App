@@ -22,25 +22,133 @@ checks:
       status: 200
       match: { a2app: true, app.id: conformance_kanban }
 
-  # --- Describe --------------------------------------------------------------
-  - name: describe reports entities, label, and the records URL
-    request: { method: GET, path: /api/_a2app/describe }
+  # --- Describe: navigational, one level per request (A2APP-SPEC 3) ----------
+  # Every assertion here addresses a level BY PATH, never by ordinal position in
+  # a list. An ordinal assertion certifies the flat shape it was written against
+  # and would pass an implementation that never subdivided anything.
+
+  - name: describe root lists modules with counts and the caller's access
+    request: { method: GET, path: /api/_a2app/describe, token: full }
     expect:
       status: 200
       match:
-        entities.cards.label: title
-        entities.cards.records: /api/collections/cards/records
-        entities.cards.fields.created.readOnly: true
-        entities.cards.fields.due.format: YYYY-MM-DD
+        level: root
+        app.id: conformance_kanban
+        modules.0.name: board
+        modules.0.entities: 2
+        modules.0.access: full
+      has: [conventions, next]
+      # The root is O(modules), never O(entities): it must not leak field detail.
+      absent: [entities, fields, operations.0.params]
+
+  - name: every describe level fits the per-response budget
+    request: { method: GET, path: /api/_a2app/describe, token: full }
+    expect:
+      status: 200
+      maxChars: 2000
+
+  - name: a module lists entity and operation NAMES, never their schemas
+    request: { method: GET, path: /api/_a2app/describe/board, token: full }
+    expect:
+      status: 200
+      maxChars: 2000
+      match:
+        level: module
+        path: board
+      has: [entities, operations, next]
+      # Names only — a field schema at this level would reintroduce the flat cost.
+      absent: [entities.0.fields, fields]
+
+  - name: an entity level carries its fields and the operations that act on it
+    request: { method: GET, path: /api/_a2app/describe/board/cards, token: full }
+    expect:
+      status: 200
+      maxChars: 2000
+      match:
+        level: entity
+        path: board/cards
+        label: title
+        records: /api/collections/cards/records
+        fields.created.readOnly: true
+        fields.due.format: YYYY-MM-DD
+        operations.0.name: finish-card
+        operations.0.entity: cards
+        operations.0.params.card.type: ref
+      has: [next]
+
+  - name: an operation appears on its entity, never in a global list
+    request: { method: GET, path: /api/_a2app/describe/board, token: full }
+    expect:
+      status: 200
+      # `finish-card` is attached to cards, so the module screen shows only the
+      # module-level operations. Two, not three.
+      len: { operations: 2 }
 
   - name: describe carries the optional operation flags (readOnly / idempotent)
-    request: { method: GET, path: /api/_a2app/describe }
+    request: { method: GET, path: /api/_a2app/describe/board, token: full }
     expect:
       status: 200
       match:
         operations.1.name: count-cards
-        operations.1.readOnly: true
-        operations.1.idempotent: true
+
+  - name: a record level marks each operation available for THIS record
+    request: { method: GET, path: /api/_a2app/describe/board/cards/card_seed, token: full }
+    expect:
+      status: 200
+      maxChars: 2000
+      match:
+        level: record
+        id: card_seed
+        label: Welcome card
+        operations.0.name: finish-card
+        operations.0.available: true
+      has: [next]
+
+  - name: an unavailable operation is shown with its reason, never hidden
+    request:
+      method: PATCH
+      path: /api/collections/cards/records/card_seed
+      token: full
+      body: { done: true }
+    expect: { status: 200 }
+
+  - name: the blocked reason is derived from the record, not composed
+    request: { method: GET, path: /api/_a2app/describe/board/cards/card_seed, token: full }
+    expect:
+      status: 200
+      match:
+        operations.0.name: finish-card
+        operations.0.available: false
+        operations.0.blocked: done is true
+
+  - name: search returns locations by name, across the app
+    request: { method: GET, path: /api/_a2app/describe, token: full, query: { find: card } }
+    expect:
+      status: 200
+      maxChars: 2000
+      match:
+        level: find
+        term: card
+      has: [matches, next]
+
+  - name: an unknown module is refused with the modules that exist
+    request: { method: GET, path: /api/_a2app/describe/nope, token: full }
+    expect:
+      status: 404
+      match: { code: unknown_module }
+      has: [modules]
+
+  - name: an entity addressed under the wrong module is not found
+    request: { method: GET, path: /api/_a2app/describe/board/nope, token: full }
+    expect:
+      status: 404
+      match: { code: unknown_entity }
+
+  - name: there is no endpoint returning the whole model
+    request: { method: GET, path: /api/_a2app/describe/board/cards/card_seed/nope, token: full }
+    expect:
+      status: 404
+      match: { code: unknown_relation }
 
   # --- Read ------------------------------------------------------------------
   - name: a credentialled read returns records

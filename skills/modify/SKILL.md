@@ -7,7 +7,7 @@ description: Modify an existing Agent App — add features, change design, fix b
 # Modify
 
 You are changing an EXISTING app. Everything in the **creator** skill applies
-(ownership rule, schema/operations/UI order, honesty rule) — this skill covers
+(ownership rule, modules-before-entities, schema/operations/UI order, honesty rule) — this skill covers
 only what differs.
 
 ## First, route the request
@@ -59,7 +59,16 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
   delete it, never drop-and-recreate collections that hold data. To alter a
   collection, write a new migration that loads and updates it. (Migration API and
   relation-field rules: **per your stack**.)
-- Record the delta in `AGENT_APP.md` (what changed, new entities/operations).
+- Record the delta in `AGENT_APP.md` (what changed, new modules/entities/operations).
+- **Adding an entity or operation? Name its module first.** Every one belongs to
+  exactly one declared module (`manifest.json`), and an operation also needs
+  typed `params` — plus `entity` and optionally `appliesWhen` when it acts on a
+  record. The gate rejects a declaration that names no module or an undeclared one.
+- **When a module outgrows its screen, split it.** Every describe level is capped
+  at 2,000 characters and the gate walks the running app to check it. Growth means
+  adding and splitting modules; lengthening a flat list is not an option the gate
+  will accept. Record the split in `## Modules` in both `AGENT_APP.md` and
+  `reference/requirements.md`.
 
 ## Finish
 

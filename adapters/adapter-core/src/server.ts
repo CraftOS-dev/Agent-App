@@ -13,9 +13,22 @@ import {
   labelFieldOf,
   schemaFingerprint,
   ERROR_CODES,
-  type NormalizedField,
+  type EntityPrint,
   type Violation,
 } from "@a2app/rules";
+import {
+  buildEntity,
+  buildFind,
+  buildModule,
+  buildRecord,
+  buildRelation,
+  buildRoot,
+  modelProblems,
+  FULL_ACCESS,
+  NO_ACCESS,
+  type Access,
+  type DescribeDeps,
+} from "./describe.js";
 import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
@@ -35,6 +48,7 @@ export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
+const DESCRIBE_PREFIX = "/api/_a2app/describe/";
 
 export interface A2App {
   /** Route a request. Resolves to a reply, or null if the path is not an A2App
@@ -53,7 +67,15 @@ export interface A2App {
   readonly store: StateStore;
 }
 
-export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
+/**
+ * Build the served surface for one app.
+ *
+ * `config` has no default: an app must declare its modules, and there is no
+ * sensible empty configuration — an adapter with no modules has no root screen
+ * and cannot be walked. Making the parameter required turns that into a compile
+ * error at every call site rather than a throw at boot.
+ */
+export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   const now = config.now ?? (() => new Date());
   // Durability by default: an explicit store wins; otherwise a supplied storePath
   // gives a restart-durable FileStateStore (the conforming posture — an in-memory
@@ -73,6 +95,20 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
 
   // Seed grants (the platform issues the default local grant at launch).
   for (const g of config.credentials ?? []) store.putGrant(g);
+
+  // Fail fast on an inconsistent app part. A model whose entities or operations
+  // name a module that was never declared cannot be walked — the entity would
+  // sit under no screen and the operation would be unreachable — so refusing at
+  // construction is the only honest outcome. Serving it would mean a describe
+  // that omits real capability while answering 200.
+  {
+    const problems = modelProblems({ binding, operations, modules: config.modules, conventions });
+    if (problems.length > 0) {
+      throw new Error(
+        `A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - ${problems.join("\n  - ")}`,
+      );
+    }
+  }
 
   /* --------------------------------------------------------- envelopes */
 
@@ -126,50 +162,116 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
 
   /* ------------------------------------------------------------ schema */
 
-  function normalizedEntities(): Record<string, NormalizedField[]> {
+  function entityPrints(): Record<string, EntityPrint> {
     const defs = binding.entities();
-    const out: Record<string, NormalizedField[]> = {};
-    for (const [name, def] of Object.entries(defs)) out[name] = def.fields;
+    const out: Record<string, EntityPrint> = {};
+    for (const [name, def] of Object.entries(defs)) {
+      out[name] = { fields: def.fields, ...(def.auth ? { auth: true } : {}), module: def.module };
+    }
     return out;
   }
 
   function schemaVersion(): string {
-    return schemaFingerprint(normalizedEntities(), config.operations ?? []);
+    return schemaFingerprint(entityPrints(), operations);
   }
 
-  function describeDoc(): Record<string, unknown> {
-    const defs = binding.entities();
-    const entities: Record<string, unknown> = {};
-    for (const [name, def] of Object.entries(defs)) {
-      const fields: Record<string, unknown> = {};
-      for (const f of def.fields) {
-        if (f.writeOnly) continue; // never advertised
-        const field: Record<string, unknown> = { type: f.type };
-        if (f.required) field.required = true;
-        if (f.readOnly) field.readOnly = true;
-        if (f.max !== undefined) field.max = f.max;
-        if (f.values) field.values = f.values;
-        if (f.entity) field.entity = f.entity;
-        if (f.dayKey) field.format = "YYYY-MM-DD";
-        fields[f.name] = field;
-      }
-      const entity: Record<string, unknown> = {
-        label: labelFieldOf(def.fields),
-        records: `/api/collections/${name}/records`,
-        fields,
-      };
-      if (def.auth) entity.auth = true;
-      entities[name] = entity;
+  const describeDeps: DescribeDeps = {
+    binding,
+    operations,
+    modules: config.modules,
+    conventions,
+  };
+
+  /**
+   * Serve one level of describe (A2APP-SPEC 3).
+   *
+   * `segments` is the path after `/api/_a2app/describe`, already decoded. Depth
+   * selects the level: none → root, module, module/entity, module/entity/id,
+   * module/entity/id/relation. `?find=` short-circuits to search.
+   *
+   * The record and relation levels read real records, which makes them data
+   * reads: they take the same `data:{entity}:read` scope and the same rate class
+   * as the records API. Without that, describe would be an unauthenticated,
+   * unmetered path around the entire scope model — the shallower levels can stay
+   * open because they publish only shape, never values.
+   */
+  async function handleDescribe(req: A2AppRequest, segments: string[]): Promise<A2AppReply> {
+    const access = accessFor(req);
+
+    const find = req.query["find"];
+    if (find !== undefined && segments.length === 0) {
+      if (find === "") return err(400, "usage", "find needs a term: describe?find={term}");
+      return ok(buildFind(describeDeps, find, access));
     }
-    const ops = operations.map((o) => {
-      const decl: Record<string, unknown> = { name: o.name, destructive: o.destructive };
-      if (o.description) decl.description = o.description;
-      if (o.readOnly) decl.readOnly = true;
-      if (o.idempotent) decl.idempotent = true;
-      if (o.params) decl.params = o.params;
-      return decl;
-    });
-    return { entities, operations: ops, conventions: conventions() };
+
+    if (segments.length === 0) return ok(buildRoot(describeDeps, access, { all: req.query["all"] === "true" }));
+
+    const [moduleName, entityName, recordId, relationName] = segments;
+    const module = describeDeps.modules.find((m) => m.name === moduleName);
+    if (!module) {
+      return err(404, "unknown_module", `No module "${moduleName}".`, {
+        modules: describeDeps.modules.map((m) => m.name),
+      });
+    }
+    if (entityName === undefined) {
+      return ok(buildModule(describeDeps, module, access, { all: req.query["all"] === "true" }));
+    }
+
+    const defs = binding.entities();
+    const def = defs[entityName];
+    if (!def) return err(404, "unknown_entity", `No such entity "${entityName}".`);
+    if (def.module !== moduleName) {
+      return err(404, "unknown_entity", `Entity "${entityName}" is in module "${def.module}", not "${moduleName}".`);
+    }
+
+    if (recordId === undefined) {
+      if (!access.canRead(entityName)) {
+        return err(403, ERROR_CODES.INSUFFICIENT_SCOPE, `This credential does not hold data:${entityName}:read.`, {
+          required: `data:${entityName}:read`,
+        });
+      }
+      return ok(buildEntity(describeDeps, moduleName!, entityName, def, access, { all: req.query["all"] === "true" }));
+    }
+
+    // From here the level reads stored records — authorize and meter as a read.
+    const limited = rateGate(req, "data");
+    if (limited) return limited;
+    const authz = authorize(req, { scope: `data:${entityName}:read`, isWrite: false });
+    if ("reply" in authz) return authz.reply;
+
+    const record = await binding.getRecord(entityName, recordId);
+    if (!record) return err(404, "record_not_found", `No ${entityName} record "${recordId}".`);
+
+    if (relationName === undefined) {
+      return ok(buildRecord(describeDeps, moduleName!, entityName, def, record, access));
+    }
+
+    const relationField = def.fields.find(
+      (f) => f.name === relationName && f.type === "list<ref>" && f.entity !== undefined && !f.writeOnly,
+    );
+    if (!relationField?.entity) {
+      return err(404, "unknown_relation", `"${relationName}" is not a sub-resource of ${entityName}.`, {
+        relations: def.fields.filter((f) => f.type === "list<ref>" && !f.writeOnly).map((f) => f.name),
+      });
+    }
+    const target = relationField.entity;
+    if (!access.canRead(target)) {
+      return err(403, ERROR_CODES.INSUFFICIENT_SCOPE, `This credential does not hold data:${target}:read.`, {
+        required: `data:${target}:read`,
+      });
+    }
+    const targetDef = defs[target];
+    const targetLabel = targetDef ? labelFieldOf(targetDef.fields) : null;
+    const ids = record[relationName];
+    const rows: { id: string; label: string | null }[] = [];
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const referenced = await binding.getRecord(target, String(id));
+      // A dangling reference is reported as the id it is, not dropped: silently
+      // shortening the list would hide a broken relation behind a shorter one.
+      const label = referenced && targetLabel !== null ? referenced[targetLabel] : null;
+      rows.push({ id: String(id), label: typeof label === "string" ? label : label == null ? null : String(label) });
+    }
+    return ok(buildRelation(moduleName!, entityName, recordId, relationName, target, rows));
   }
 
   function conventions(): Record<string, unknown> {
@@ -271,6 +373,27 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
       }
     }
     return { ctx: { credentialId: grant.credentialId, agentName: grant.agentName, principal: grant.principal } };
+  }
+
+  /**
+   * What this caller may do, for rendering access on a describe level.
+   *
+   * Mirrors {@link authorize}'s own precedence exactly, including its two
+   * bypasses: the app's own UI and an anonymous read on a single-user app both
+   * reach a context without ever meeting the scope check, so both genuinely have
+   * full access and must be shown as such. Deriving this separately from the
+   * scope set alone would tell those callers they cannot reach modules they can.
+   */
+  function accessFor(req: A2AppRequest): Access {
+    if (isSameOrigin(req)) return FULL_ACCESS;
+    const grant = credentialOf(req);
+    if (!grant) return binding.authMode === "multi-user" ? NO_ACCESS : FULL_ACCESS;
+    const held = expandScopes(grant);
+    return {
+      canRead: (entity) => held.has(`data:${entity}:read`),
+      canWrite: (entity) => held.has(`data:${entity}:write`),
+      canRun: (operation) => held.has(`op:${operation}`),
+    };
   }
 
   function writeAudit(
@@ -637,7 +760,19 @@ export function createA2App(binding: Binding, config: A2AppConfig = {}): A2App {
     if (path === "/.well-known/a2app.json" || path === "/api/_a2app") {
       return ok(identityDoc());
     }
-    if (path === "/api/_a2app/describe") return ok(describeDoc());
+    // Describe is navigational: the bare path is the root level, and each extra
+    // segment moves one level inward (A2APP-SPEC 3). Segments are decoded here
+    // because a record id or entity name may legitimately contain an escaped
+    // character, and the deeper levels look them up verbatim.
+    if (path === "/api/_a2app/describe") return handleDescribe(req, []);
+    if (path.startsWith(DESCRIBE_PREFIX)) {
+      const segments = path.slice(DESCRIBE_PREFIX.length).split("/").map(decodeURIComponent);
+      if (segments.length > 4) {
+        return err(404, "usage", "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.");
+      }
+      if (segments.some((s) => s === "")) return err(404, "usage", "describe path has an empty segment.");
+      return handleDescribe(req, segments);
+    }
     if (path === "/api/_a2app/whoami") {
       const grant = credentialOf(req);
       if (!grant) return err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "whoami requires a credential.");

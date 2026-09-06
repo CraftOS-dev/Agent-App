@@ -19,7 +19,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 RULES_VERSION = "0.1.0"
 PROTOCOL_VERSION = "0.1"
@@ -166,17 +166,229 @@ def label_field_of(fields: list[dict]) -> Optional[str]:
     return None
 
 
-def schema_fingerprint(entities: dict) -> str:
+def _field_print(f: dict) -> str:
+    """Every published attribute of a field, rendered deterministically.
+
+    Must match `fieldPrint` in @a2app/rules exactly: a client that caches
+    describe against this value is told never to write against a stale schema,
+    so narrowing an enum or tightening a max has to move the hash.
+    """
+    parts = [f"{f['name']}:{f['type']}"]
+    if f.get("required"):
+        parts.append("req")
+    if f.get("readOnly"):
+        parts.append("ro")
+    if f.get("writeOnly"):
+        parts.append("wo")
+    if f.get("dayKey"):
+        parts.append("day")
+    if f.get("max") is not None:
+        parts.append(f"max={f['max']}")
+    if f.get("entity"):
+        parts.append(f"entity={f['entity']}")
+    if f.get("values"):
+        parts.append("values=" + "|".join(sorted(f["values"])))
+    return ":".join(parts)
+
+
+def _stable_json(value: Any) -> str:
+    """JSON with keys sorted at every depth, so declaration order cannot move the hash."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _operation_print(o: dict) -> str:
+    flags = "".join(c for c, k in (("d", "destructive"), ("r", "readOnly"), ("i", "idempotent")) if o.get(k))
+    parts = [f"{o['name']}:{flags}" if flags else o["name"]]
+    if o.get("module"):
+        parts.append(f"mod={o['module']}")
+    if o.get("entity"):
+        parts.append(f"on={o['entity']}")
+    if o.get("params"):
+        parts.append("params=" + _stable_json(o["params"]))
+    if o.get("appliesWhen"):
+        parts.append("when=" + _stable_json(o["appliesWhen"]))
+    return ":".join(parts)
+
+
+def schema_fingerprint(entities: dict, operations: Optional[list[dict]] = None) -> str:
+    """Stable fingerprint of everything describe publishes.
+
+    Parity oracle: @a2app/rules `schemaFingerprint`. `entities` maps a name to
+    {"fields": [...], "module": str, "auth"?: bool}. `module` is required for the
+    same reason it is required there: an entity that could move between modules
+    without moving the hash would leave caches placing it in the old one.
+    """
     parts = []
-    for name, fields in entities.items():
-        pairs = sorted(f"{f['name']}:{f['type']}" for f in fields)
-        parts.append(f"{name}({','.join(pairs)})")
+    for name, value in entities.items():
+        attrs = [f"{name}({','.join(sorted(_field_print(f) for f in value['fields']))})"]
+        if value.get("auth"):
+            attrs.append("auth")
+        attrs.append(f"mod={value['module']}")
+        parts.append(":".join(attrs))
     parts.sort()
-    joined = ";".join(parts)
+    ops = sorted(_operation_print(o) for o in (operations or []))
+    joined = ";".join(parts) + "|" + ",".join(ops)
     h = 5381
     for ch in joined:
         h = ((h * 33) ^ ord(ch)) & 0xFFFFFFFF
     return "sv_" + format(h, "x")
+
+
+# -- availability predicates (A2APP-SPEC 3.4) -------------------------------
+# Parity oracle: adapters/rules/src/predicate.ts. Same predicate + same record
+# must yield the same availability and the same blocked reason on every stack.
+
+DESCRIBE_BUDGET_CHARS = 2000
+
+
+def _as_declared(value: Any, declared_type: Optional[str]) -> Any:
+    """Read a value as its field's DECLARED type.
+
+    A backend is only obliged to return what it stored, so `done: "true"` and
+    `done: True` are the same boolean. Deciding from the runtime type instead
+    would make availability depend on the storage engine.
+    """
+    if _is_blank(value):
+        return None
+    if declared_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+        return value
+    if declared_type == "number":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+        return _stable_json(a) == _stable_json(b)
+    if isinstance(a, bool) != isinstance(b, bool):
+        return False
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    return a == b
+
+
+def _read_field(record: dict, name: str, index: dict) -> Any:
+    return _as_declared(record.get(name), (index.get(name) or {}).get("type"))
+
+
+def evaluate_predicate(predicate: dict, record: dict, fields: list[dict]) -> bool:
+    index = {f["name"]: f for f in fields}
+    return _evaluate(predicate, record, index)
+
+
+def _evaluate(p: dict, record: dict, index: dict) -> bool:
+    if "all" in p:
+        return all(_evaluate(sub, record, index) for sub in p["all"])
+    if "any" in p:
+        return any(_evaluate(sub, record, index) for sub in p["any"])
+    if "not" in p:
+        return not _evaluate(p["not"], record, index)
+
+    actual = _read_field(record, p["field"], index)
+    declared = (index.get(p["field"]) or {}).get("type")
+    if "isBlank" in p:
+        return (actual is None) == p["isBlank"]
+    if "eq" in p:
+        return _same_value(actual, _as_declared(p["eq"], declared))
+    if "ne" in p:
+        return not _same_value(actual, _as_declared(p["ne"], declared))
+    if "in" in p:
+        return any(_same_value(actual, _as_declared(c, declared)) for c in p["in"])
+    if "notIn" in p:
+        return not any(_same_value(actual, _as_declared(c, declared)) for c in p["notIn"])
+    # Unrecognised form: refuse rather than default to available. An unknown
+    # condition must never silently unblock an action.
+    return False
+
+
+def _render_value(v: Any) -> str:
+    if v is None:
+        return "blank"
+    if isinstance(v, str):
+        return f'"{v}"'
+    if isinstance(v, (list, dict)):
+        return _stable_json(v)
+    return json.dumps(v)
+
+
+def _predicate_fields(predicate: dict) -> list[str]:
+    """Every field name a predicate reads, for declaration-time validation."""
+    out: list[str] = []
+
+    def collect(p: dict) -> None:
+        if "all" in p:
+            for sub in p["all"]:
+                collect(sub)
+        elif "any" in p:
+            for sub in p["any"]:
+                collect(sub)
+        elif "not" in p:
+            collect(p["not"])
+        elif p.get("field") and p["field"] not in out:
+            out.append(p["field"])
+
+    collect(predicate)
+    return out
+
+
+def _render_list(values: list) -> str:
+    parts = [_render_value(v) for v in values]
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + " or " + parts[-1]
+
+
+def explain_predicate(predicate: dict, record: dict, fields: list[dict]) -> str:
+    """Why this predicate does not hold, derived — never composed by a model."""
+    index = {f["name"]: f for f in fields}
+    if _evaluate(predicate, record, index):
+        return "the condition holds"
+    return _explain(predicate, record, index)
+
+
+def _explain(p: dict, record: dict, index: dict) -> str:
+    if "all" in p:
+        for sub in p["all"]:
+            if not _evaluate(sub, record, index):
+                return _explain(sub, record, index)
+        return "the condition holds"
+    if "any" in p:
+        return _explain(p["any"][0], record, index) if p["any"] else "no condition is satisfiable"
+    if "not" in p:
+        inner = p["not"]
+        if "isBlank" in inner:
+            return f"{inner['field']} is blank" if inner["isBlank"] else f"{inner['field']} is set"
+        if "eq" in inner:
+            return f"{inner['field']} is {_render_value(_read_field(record, inner['field'], index))}"
+        return "the condition is not met"
+
+    actual = _read_field(record, p["field"], index)
+    if "isBlank" in p:
+        if p["isBlank"]:
+            return f"{p['field']} is set to {_render_value(actual)}, not blank"
+        return f"{p['field']} is blank"
+    if "eq" in p:
+        return f"{p['field']} is {_render_value(actual)}, not {_render_value(p['eq'])}"
+    if "ne" in p:
+        return f"{p['field']} is {_render_value(actual)}"
+    if "in" in p:
+        return f"{p['field']} is {_render_value(actual)}, not {_render_list(p['in'])}"
+    if "notIn" in p:
+        return f"{p['field']} is {_render_value(actual)}"
+    return "the condition is not met"
 
 
 def describe_violation(v: dict, server_now: Optional[str] = None) -> str:
@@ -356,6 +568,7 @@ class Adapter:
         operations: list[dict],
         store: Store,
         token: str,
+        modules: Optional[list[dict]] = None,
         allowed_origins: Optional[list[str]] = None,
         operation_runners: Optional[dict[str, Callable]] = None,
         auth_mode: str = "none",
@@ -364,9 +577,20 @@ class Adapter:
     ):
         self.app_id = app_id
         self.app_name = app_name
-        self.entity_defs = entities  # {name: {"fields": [...], "auth"?: bool, "writeAllow"?: [...]}}
+        # {name: {"fields": [...], "module": str, "summary"?, "auth"?, "writeAllow"?}}
+        self.entity_defs = entities
         self.operations = operations
+        self.modules = modules or []
         self.op_by_name = {o["name"]: o for o in operations}
+        problems = self._model_problems()
+        if problems:
+            # Fail fast: a model whose entities or operations name a module that
+            # was never declared cannot be walked, so serving it would answer 200
+            # while omitting real capability.
+            raise ValueError(
+                "A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - "
+                + "\n  - ".join(problems)
+            )
         self.store = store
         self.auth_mode = auth_mode
         self.allowed_origins = set(allowed_origins or [])
@@ -382,6 +606,67 @@ class Adapter:
         for name, records in store.seed.items():
             for raw in records:
                 store.put_record(name, self._materialize(name, raw))
+
+    def _model_problems(self) -> list[str]:
+        """Everything wrong with the app part's module/operation declarations.
+
+        Parity oracle: `modelProblems` in adapters/adapter-core/src/describe.ts.
+        """
+        problems: list[str] = []
+        declared = {m["name"] for m in self.modules}
+        if not self.modules:
+            problems.append(
+                "no modules declared: every entity and operation belongs to one, and the root screen lists them"
+            )
+        seen = set()
+        for m in self.modules:
+            if m["name"] in seen:
+                problems.append(f'duplicate module "{m["name"]}"')
+            seen.add(m["name"])
+
+        for name, d in self.entity_defs.items():
+            module = d.get("module")
+            if not module:
+                problems.append(f'entity "{name}" declares no module')
+            elif module not in declared:
+                problems.append(f'entity "{name}" names undeclared module "{module}"')
+
+        for o in self.operations:
+            module = o.get("module")
+            if not module:
+                problems.append(f'operation "{o["name"]}" declares no module')
+            elif module not in declared:
+                problems.append(f'operation "{o["name"]}" names undeclared module "{module}"')
+            if not isinstance(o.get("params"), dict):
+                problems.append(
+                    f'operation "{o["name"]}" declares no typed params (declare {{}} if it takes none)'
+                )
+            entity = o.get("entity")
+            if entity is not None:
+                d = self.entity_defs.get(entity)
+                if d is None:
+                    problems.append(f'operation "{o["name"]}" acts on unknown entity "{entity}"')
+                else:
+                    if d.get("module") != module:
+                        problems.append(
+                            f'operation "{o["name"]}" is in module "{module}" but acts on entity '
+                            f'"{entity}" in module "{d.get("module")}"'
+                        )
+                    when = o.get("appliesWhen")
+                    if when:
+                        names = {f["name"] for f in d["fields"]}
+                        for referenced in _predicate_fields(when):
+                            if referenced not in names:
+                                problems.append(
+                                    f'operation "{o["name"]}" appliesWhen reads "{referenced}", '
+                                    f'not a field of "{entity}"'
+                                )
+            elif o.get("appliesWhen"):
+                problems.append(
+                    f'operation "{o["name"]}" declares appliesWhen but no entity: '
+                    "there is no record to evaluate it against"
+                )
+        return problems
 
     # -- schema helpers -----------------------------------------------------
     def _fields(self, entity: str) -> Optional[list[dict]]:
@@ -400,7 +685,11 @@ class Adapter:
         return rec
 
     def _schema_version(self) -> str:
-        return schema_fingerprint({n: d["fields"] for n, d in self.entity_defs.items()})
+        prints = {
+            n: {"fields": d["fields"], "auth": bool(d.get("auth")), "module": d["module"]}
+            for n, d in self.entity_defs.items()
+        }
+        return schema_fingerprint(prints, self.operations)
 
     # -- envelopes ----------------------------------------------------------
     @staticmethod
@@ -419,44 +708,218 @@ class Adapter:
             doc["env"] = self.env
         return doc
 
-    def _describe(self) -> dict:
-        entities: dict = {}
-        for name, d in self.entity_defs.items():
-            fields: dict = {}
-            for f in d["fields"]:
-                if f.get("writeOnly"):
-                    continue
-                field: dict = {"type": f["type"]}
-                if f.get("required"):
-                    field["required"] = True
-                if f.get("readOnly"):
-                    field["readOnly"] = True
-                if f.get("max") is not None:
-                    field["max"] = f["max"]
-                if f.get("values"):
-                    field["values"] = f["values"]
-                if f.get("entity"):
-                    field["entity"] = f["entity"]
-                if f.get("dayKey"):
-                    field["format"] = "YYYY-MM-DD"
-                fields[f["name"]] = field
-            entity: dict = {"label": label_field_of(d["fields"]), "records": f"/api/collections/{name}/records", "fields": fields}
-            if d.get("auth"):
-                entity["auth"] = True
-            entities[name] = entity
+    # -- navigational describe (A2APP-SPEC 3) -------------------------------
+    # One request answers for one place in the app, never for the whole app.
+    # Parity oracle: adapters/adapter-core/src/describe.ts.
+
+    @staticmethod
+    def _field_doc(f: dict) -> dict:
+        field: dict = {"type": f["type"]}
+        if f.get("required"):
+            field["required"] = True
+        if f.get("readOnly"):
+            field["readOnly"] = True
+        if f.get("max") is not None:
+            field["max"] = f["max"]
+        if f.get("values"):
+            field["values"] = f["values"]
+        if f.get("entity"):
+            field["entity"] = f["entity"]
+        if f.get("dayKey"):
+            field["format"] = "YYYY-MM-DD"
+        return field
+
+    @staticmethod
+    def _readable_fields(d: dict) -> list[dict]:
+        """Everything except write-only.
+
+        Load-bearing beyond describe: a client treats a field absent here as
+        write-only and exempts it from the read-back check, so dropping anything
+        else would quietly disable that backstop.
+        """
+        return [f for f in d["fields"] if not f.get("writeOnly")]
+
+    def _fit_list(self, build: Callable[[list, int], dict], items: list) -> dict:
+        """Trim a list until the level fits, always reporting what was dropped."""
+        whole = build(list(items), 0)
+        if len(json.dumps(whole)) <= DESCRIBE_BUDGET_CHARS:
+            return whole
+        lo, hi = 0, len(items)
+        while lo < hi:
+            mid = -(-(lo + hi) // 2)
+            if len(json.dumps(build(items[:mid], len(items) - mid))) <= DESCRIBE_BUDGET_CHARS:
+                lo = mid
+            else:
+                hi = mid - 1
+        return build(items[:lo], len(items) - lo)
+
+    def _entities_of(self, module: str) -> list[tuple]:
+        return [(n, d) for n, d in self.entity_defs.items() if d.get("module") == module]
+
+    def _describe_root(self, access: dict) -> dict:
+        modules = []
+        for m in self.modules:
+            owned = self._entities_of(m["name"])
+            ops = [o for o in self.operations if o.get("module") == m["name"]]
+            readable = sum(1 for n, _ in owned if access["read"](n))
+            writable = sum(1 for n, _ in owned if access["write"](n))
+            runnable = sum(1 for o in ops if access["run"](o["name"]))
+            if not owned:
+                reach = "none" if runnable == 0 else "full"
+            elif readable == 0 and runnable == 0:
+                reach = "none"
+            elif writable == len(owned) and runnable == len(ops):
+                reach = "full"
+            else:
+                reach = "read-only"
+            row = {"name": m["name"], "entities": len(owned), "operations": len(ops), "access": reach}
+            if m.get("summary"):
+                row["summary"] = m["summary"]
+            modules.append(row)
+        return {
+            "level": "root",
+            "app": {"id": self.app_id, "name": self.app_name},
+            "modules": modules,
+            "conventions": self._conventions(),
+            "next": ["describe/{module}", "describe?find={term}"],
+        }
+
+    def _describe_module(self, module: dict, access: dict, show_all: bool) -> dict:
+        owned = []
+        for name, d in self._entities_of(module["name"]):
+            if not access["read"](name):
+                continue
+            row = {"name": name}
+            if d.get("summary"):
+                row["summary"] = d["summary"]
+            owned.append(row)
         ops = []
         for o in self.operations:
-            decl = {"name": o["name"], "destructive": o.get("destructive", False)}
+            if o.get("module") != module["name"] or o.get("entity") is not None:
+                continue
+            if not access["run"](o["name"]):
+                continue
+            row = {"name": o["name"], "destructive": o.get("destructive", False)}
+            if o.get("description"):
+                row["summary"] = o["description"]
+            ops.append(row)
+
+        base_next = [f"describe/{module['name']}/{{entity}}"]
+        if ops:
+            base_next.append(f"{module['name']} <operation> [--params]")
+
+        def build(entity_rows: list, truncated: int) -> dict:
+            level = {
+                "level": "module",
+                "path": module["name"],
+                "entities": entity_rows,
+                "operations": ops,
+                "next": base_next + ([f"describe/{module['name']}?all=true"] if truncated else []),
+            }
+            if module.get("summary"):
+                level["summary"] = module["summary"]
+            if truncated:
+                level["truncated"] = truncated
+            return level
+
+        return build(owned, 0) if show_all else self._fit_list(build, owned)
+
+    def _describe_entity(self, module: str, name: str, d: dict, access: dict) -> dict:
+        fields = {f["name"]: self._field_doc(f) for f in self._readable_fields(d)}
+        ops = []
+        for o in self.operations:
+            if o.get("entity") != name or not access["run"](o["name"]):
+                continue
+            decl = {"name": o["name"], "destructive": o.get("destructive", False), "params": o.get("params", {})}
             if o.get("description"):
                 decl["description"] = o["description"]
             if o.get("readOnly"):
                 decl["readOnly"] = True
             if o.get("idempotent"):
                 decl["idempotent"] = True
-            if o.get("params"):
-                decl["params"] = o["params"]
+            decl["entity"] = name
             ops.append(decl)
-        return {"entities": entities, "operations": ops, "conventions": self._conventions()}
+        level = {
+            "level": "entity",
+            "path": f"{module}/{name}",
+            "label": label_field_of(d["fields"]),
+            "records": f"/api/collections/{name}/records",
+            "fields": fields,
+            "operations": ops,
+            "next": [f"describe/{module}/{name}/{{id}}", f"data {name} list"],
+        }
+        if d.get("auth"):
+            level["auth"] = True
+        return level
+
+    def _describe_record(self, module: str, name: str, d: dict, record: dict, access: dict) -> dict:
+        fields = self._readable_fields(d)
+        label_field = label_field_of(d["fields"])
+        label = record.get(label_field) if label_field else None
+
+        ops = []
+        for o in self.operations:
+            if o.get("entity") != name or not access["run"](o["name"]):
+                continue
+            row = {"name": o["name"], "available": True}
+            if o.get("destructive"):
+                row["destructive"] = True
+            when = o.get("appliesWhen")
+            if when and not evaluate_predicate(when, record, fields):
+                row["available"] = False
+                row["blocked"] = explain_predicate(when, record, fields)
+            ops.append(row)
+
+        # Sub-resources are the record's own list<ref> fields: a forward relation
+        # is derivable from the type vocabulary alone, with no query grammar.
+        relations = []
+        for f in fields:
+            if f["type"] != "list<ref>" or not f.get("entity"):
+                continue
+            row = {"name": f["name"], "entity": f["entity"]}
+            value = record.get(f["name"])
+            if isinstance(value, list):
+                row["count"] = len(value)
+            relations.append(row)
+
+        path = f"{module}/{name}/{record['id']}"
+        level = {
+            "level": "record",
+            "path": path,
+            "id": record["id"],
+            "label": label if isinstance(label, str) or label is None else str(label),
+            "operations": ops,
+            "next": (
+                [f"describe/{path}/{r['name']}" for r in relations]
+                + [f"{path} {o['name']}" for o in ops if o["available"]]
+                + [f"data {name} get {record['id']}"]
+            ),
+        }
+        if relations:
+            level["relations"] = relations
+        return level
+
+    def _describe_find(self, term: str, access: dict) -> dict:
+        needle = term.lower()
+        matches = []
+        for m in self.modules:
+            if needle in m["name"].lower():
+                matches.append({"path": m["name"], "level": "module"})
+        for name, d in self.entity_defs.items():
+            if access["read"](name) and needle in name.lower():
+                matches.append({"path": f"{d.get('module')}/{name}", "level": "entity"})
+        for o in self.operations:
+            if access["run"](o["name"]) and needle in o["name"].lower():
+                path = f"{o['module']}/{o['entity']}" if o.get("entity") else o.get("module", "")
+                matches.append({"path": path, "operation": o["name"]})
+
+        def build(items: list, truncated: int) -> dict:
+            level = {"level": "find", "term": term, "matches": items, "next": ["describe/{path}"]}
+            if truncated:
+                level["truncated"] = truncated
+            return level
+
+        return self._fit_list(build, matches)
 
     @staticmethod
     def _conventions() -> dict:
@@ -508,6 +971,114 @@ class Adapter:
         return self._err(429, ERROR_CODES["RATE_LIMITED"], f"Rate limit exceeded ({decision['limit']} per window). Slow down and retry.", retryAfterSeconds=decision["retryAfterSeconds"])
 
     # -- dispatch -----------------------------------------------------------
+    def _access_for(self, headers: dict) -> dict:
+        """What this caller may do, for rendering access on a describe level.
+
+        Mirrors `_authorize`'s precedence including its two bypasses — the app's
+        own UI and an anonymous read on a single-user app both reach a context
+        without meeting the scope check, so both genuinely have full access.
+        """
+        if self._is_same_origin(headers):
+            return {"read": lambda _e: True, "write": lambda _e: True, "run": lambda _o: True}
+        grant = self._credential_of(headers)
+        if not grant:
+            allow = self.auth_mode != "multi-user"
+            return {"read": lambda _e: allow, "write": lambda _e: allow, "run": lambda _o: allow}
+        held = self._expand_scopes(grant)
+        return {
+            "read": lambda e: f"data:{e}:read" in held,
+            "write": lambda e: f"data:{e}:write" in held,
+            "run": lambda o: f"op:{o}" in held,
+        }
+
+    def _handle_describe(self, headers: dict, segments: list, q: dict):
+        """Serve one level of describe.
+
+        The record and relation levels read real records, which makes them data
+        reads: they take the same scope and rate class as the records API.
+        Without that, describe would be an unmetered path around the scope model.
+        """
+        access = self._access_for(headers)
+
+        find = q.get("find")
+        if find is not None and not segments:
+            if find == "":
+                return self._err(400, "usage", "find needs a term: describe?find={term}")
+            return 200, self._describe_find(find, access)
+
+        if not segments:
+            return 200, self._describe_root(access)
+
+        module_name = segments[0]
+        module = next((m for m in self.modules if m["name"] == module_name), None)
+        if module is None:
+            return self._err(404, "unknown_module", f'No module "{module_name}".',
+                             {"modules": [m["name"] for m in self.modules]})
+        if len(segments) == 1:
+            return 200, self._describe_module(module, access, q.get("all") == "true")
+
+        entity = segments[1]
+        d = self.entity_defs.get(entity)
+        if d is None:
+            return self._err(404, "unknown_entity", f'No such entity "{entity}".')
+        if d.get("module") != module_name:
+            return self._err(404, "unknown_entity",
+                             f'Entity "{entity}" is in module "{d.get("module")}", not "{module_name}".')
+        if len(segments) == 2:
+            if not access["read"](entity):
+                return self._err(403, ERROR_CODES["INSUFFICIENT_SCOPE"],
+                                 f"This credential does not hold data:{entity}:read.",
+                                 {"required": f"data:{entity}:read"})
+            return 200, self._describe_entity(module_name, entity, d, access)
+
+        limited = self._rate_gate(headers, "data")
+        if limited:
+            return limited
+        ctx, reply = self._authorize(headers, f"data:{entity}:read", False)
+        if reply:
+            return reply
+
+        record_id = segments[2]
+        record = self.store.get_record(entity, record_id)
+        if record is None:
+            return self._err(404, "record_not_found", f'No {entity} record "{record_id}".')
+        if len(segments) == 3:
+            return 200, self._describe_record(module_name, entity, d, record, access)
+
+        relation = segments[3]
+        field = next(
+            (f for f in d["fields"]
+             if f["name"] == relation and f["type"] == "list<ref>" and f.get("entity") and not f.get("writeOnly")),
+            None,
+        )
+        if field is None:
+            return self._err(404, "unknown_relation", f'"{relation}" is not a sub-resource of {entity}.')
+        target = field["entity"]
+        if not access["read"](target):
+            return self._err(403, ERROR_CODES["INSUFFICIENT_SCOPE"],
+                             f"This credential does not hold data:{target}:read.",
+                             {"required": f"data:{target}:read"})
+        target_def = self.entity_defs.get(target)
+        target_label = label_field_of(target_def["fields"]) if target_def else None
+        items = []
+        for rid in (record.get(relation) or []):
+            referenced = self.store.get_record(target, str(rid))
+            label = referenced.get(target_label) if (referenced and target_label) else None
+            items.append({"id": str(rid), "label": label if isinstance(label, str) or label is None else str(label)})
+
+        path = f"{module_name}/{entity}/{record_id}/{relation}"
+
+        def build(rows: list, truncated: int) -> dict:
+            level = {
+                "level": "relation", "path": path, "entity": target, "items": rows,
+                "next": [f"data {target} get {{id}}", f"describe/{module_name}/{entity}/{record_id}"],
+            }
+            if truncated:
+                level["truncated"] = truncated
+            return level
+
+        return 200, self._fit_list(build, items)
+
     def dispatch(self, method: str, path: str, headers: dict, body: Optional[dict], query: Optional[dict] = None):
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         method = method.upper()
@@ -519,8 +1090,17 @@ class Adapter:
 
         if path in ("/.well-known/a2app.json", "/api/_a2app"):
             return 200, self.identity()
+        # Describe is navigational: the bare path is the root level, and each
+        # extra segment moves one level inward (A2APP-SPEC 3).
         if path == "/api/_a2app/describe":
-            return 200, self._describe()
+            return self._handle_describe(headers, [], q)
+        if path.startswith("/api/_a2app/describe/"):
+            segments = [unquote(s) for s in path[len("/api/_a2app/describe/"):].split("/")]
+            if len(segments) > 4:
+                return self._err(404, "usage", "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.")
+            if any(s == "" for s in segments):
+                return self._err(404, "usage", "describe path has an empty segment.")
+            return self._handle_describe(headers, segments, q)
         if path == "/api/_a2app/whoami":
             grant = self._credential_of(headers)
             if not grant:
@@ -766,3 +1346,96 @@ class Adapter:
         if capability:
             task_id = self.store.enqueue_task(ev["id"], capability, payload)["id"]
         return {"eventId": ev["id"], "taskId": task_id}
+
+
+# ---------------------------------------------------------------- self-test
+# Rules-parity oracle, run by the toolkit gate (`python a2app_adapter.py
+# --selftest`). Its job is to prove this port and `@a2app/rules` agree, so a
+# FastAPI app and a Node app reject identical payloads identically and block
+# identical operations for identical stated reasons.
+#
+# Until this existed, the gate step ran, imported the module, and exited 0
+# without asserting anything — a vacuously passing check, which is worse than
+# no check because it reads as coverage.
+
+def _selftest() -> int:
+    failures: list[str] = []
+
+    def check(label: str, actual: Any, expected: Any) -> None:
+        if actual != expected:
+            failures.append(f"{label}\n    expected: {expected!r}\n    actual:   {actual!r}")
+
+    fields = [
+        {"name": "title", "type": "string", "required": True, "max": 200},
+        {"name": "status", "type": "enum", "values": ["todo", "doing", "done"]},
+        {"name": "due", "type": "string", "max": 10, "dayKey": True},
+        {"name": "created", "type": "datetime", "readOnly": True},
+    ]
+
+    # 1. Guard: every violation, by code, sorted.
+    bad = {"nope": 1, "created": "x", "status": "nonsense", "due": "31-12-2026"}
+    check(
+        "guard reports every violation",
+        sorted(v["code"] for v in validate(fields, bad)),
+        ["invalid_daykey", "invalid_enum", "read_only_field", "unknown_field"],
+    )
+    check("a good body yields no violations", validate(fields, {"title": "ok", "status": "todo"}), [])
+    check("label field resolution", label_field_of(fields), "title")
+
+    # 2. Predicates: availability AND the stated reason. Both are contractual —
+    #    a blocked operation must say the same thing on every stack.
+    record = {"id": "t1", "title": "Ship it", "status": "doing"}
+    check("ne holds", evaluate_predicate({"field": "status", "ne": "done"}, record, fields), True)
+    check("eq fails", evaluate_predicate({"field": "status", "eq": "done"}, record, fields), False)
+    check(
+        "eq explains with both values",
+        explain_predicate({"field": "status", "eq": "done"}, record, fields),
+        'status is "doing", not "done"',
+    )
+    check(
+        "in explains with the full set",
+        explain_predicate({"field": "status", "in": ["todo", "done"]}, record, fields),
+        'status is "doing", not "todo" or "done"',
+    )
+    check(
+        "all reports the first failing branch",
+        explain_predicate(
+            {"all": [{"field": "status", "ne": "done"}, {"field": "title", "eq": "Other"}]}, record, fields
+        ),
+        'title is "Ship it", not "Other"',
+    )
+    check("isBlank on an absent field", evaluate_predicate({"field": "due", "isBlank": True}, record, fields), True)
+    # A backend may store a boolean as text; both are the same boolean.
+    bool_fields = [{"name": "done", "type": "boolean"}]
+    check(
+        "boolean compares by declared type, not storage shape",
+        evaluate_predicate({"field": "done", "eq": True}, {"id": "x", "done": "true"}, bool_fields),
+        True,
+    )
+    # An unrecognised form must refuse, never default to available.
+    check("unknown predicate form refuses", evaluate_predicate({"field": "status"}, record, fields), False)
+
+    # 3. Fingerprint: stable, and moved by anything describe publishes.
+    base = {"tasks": {"fields": fields, "module": "planning"}}
+    check("fingerprint is deterministic", schema_fingerprint(base), schema_fingerprint(base))
+    moved = {"tasks": {"fields": fields, "module": "other"}}
+    if schema_fingerprint(base) == schema_fingerprint(moved):
+        failures.append("fingerprint ignores an entity's module")
+    if schema_fingerprint(base, [{"name": "op", "params": {}}]) == schema_fingerprint(
+        base, [{"name": "op", "params": {"x": {"type": "string"}}}]
+    ):
+        failures.append("fingerprint ignores operation params")
+
+    if failures:
+        print("a2app_adapter selftest FAILED:\n  - " + "\n  - ".join(failures))
+        return 1
+    print("a2app_adapter selftest ok (guard, predicates, fingerprint)")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--selftest" in sys.argv:
+        raise SystemExit(_selftest())
+    print("a2app_adapter is a library; run main.py to serve. Use --selftest to check rules parity.")

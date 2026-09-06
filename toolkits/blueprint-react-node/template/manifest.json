@@ -5,6 +5,12 @@
   "adapterVersion": "0.1.0",
   "appVersion": "0.1.0",
   "authMode": "none",
+  "modules": [
+    {
+      "name": "planning",
+      "summary": "tasks and the work in front of you"
+    }
+  ],
   "modificationLock": false,
   "capabilities": {
     "integrations": []

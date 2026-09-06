@@ -98,9 +98,48 @@ class A2AppClient:
     def protocol_supported(protocol: str) -> bool:
         return protocol in ACCEPTED_PROTOCOLS
 
-    def describe(self) -> Optional[Dict[str, Any]]:
-        res = self.request("GET", "/api/_a2app/describe")
+    def describe(self, path: str = "", all: bool = False) -> Optional[Dict[str, Any]]:
+        """Fetch ONE level of describe (A2APP-SPEC 3).
+
+        ``path`` is the location to describe — ``""`` for the root (the app's
+        modules), ``"sales"`` for a module, ``"sales/invoices"`` for an entity,
+        ``"sales/invoices/INV-1"`` for a record and the operations its current
+        state allows, plus one more segment for a sub-resource. Segments are
+        encoded here because entity names and record ids are the app's own.
+
+        There is no call that returns the whole model: a task touching two
+        entities pays for two, not for the app.
+        """
+        segments = [urllib.parse.quote(s, safe="") for s in path.split("/") if s]
+        suffix = "/" + "/".join(segments) if segments else ""
+        query = "?all=true" if all else ""
+        res = self.request("GET", f"/api/_a2app/describe{suffix}{query}")
         return res.json if res.ok else None
+
+    def describe_root(self) -> Optional[Dict[str, Any]]:
+        """The app's root screen: its modules, their sizes, and this caller's access."""
+        level = self.describe("")
+        return level if level and level.get("level") == "root" else None
+
+    def describe_entity(self, module: str, entity: str) -> Optional[Dict[str, Any]]:
+        """One entity's fields and the operations that act on it."""
+        level = self.describe(f"{module}/{entity}")
+        return level if level and level.get("level") == "entity" else None
+
+    def describe_record(self, module: str, entity: str, record_id: str) -> Optional[Dict[str, Any]]:
+        """One record, and which operations its current state allows."""
+        level = self.describe(f"{module}/{entity}/{record_id}")
+        return level if level and level.get("level") == "record" else None
+
+    def find(self, term: str) -> Optional[Dict[str, Any]]:
+        """Search entity, operation and module names; returns locations.
+
+        Without this the walk is a linked list: an agent that picks the wrong
+        branch pays a full backtrack to correct itself.
+        """
+        res = self.request("GET", f"/api/_a2app/describe?find={urllib.parse.quote(term, safe='')}")
+        level = res.json if res.ok else None
+        return level if level and level.get("level") == "find" else None
 
     def whoami(self) -> Optional[Dict[str, Any]]:
         res = self.request("GET", "/api/_a2app/whoami")

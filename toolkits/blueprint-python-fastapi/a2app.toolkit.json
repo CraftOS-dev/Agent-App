@@ -1,17 +1,28 @@
 {
- "id": "blueprint-python-fastapi",
- "description": "Agent App blueprint: FastAPI backend with a native Python A2App adapter (the served surface and pure rules in Python). NOT part of the framework.",
- "template": "template",
- "adapterVersionFrom": "a2app_adapter.py",
- "systemPaths": ["manifest.json", "a2app_adapter.py", "main.py"],
- "adapterPaths": ["a2app_adapter.py", "main.py"],
- "gate": [
- {
- "name": "python syntax + adapter self-test",
- "run": "python -m py_compile a2app_adapter.py main.py schema.py && python a2app_adapter.py --selftest"
- }
- ],
- "lifecycle": {
- "dataDir": "data"
- }
+  "id": "blueprint-python-fastapi",
+  "description": "Agent App blueprint: FastAPI backend with a native Python A2App adapter (the served surface and pure rules in Python). NOT part of the framework.",
+  "template": "template",
+  "adapterVersionFrom": "a2app_adapter.py",
+  "systemPaths": [
+    "manifest.json",
+    "a2app_adapter.py",
+    "main.py"
+  ],
+  "adapterPaths": [
+    "a2app_adapter.py",
+    "main.py"
+  ],
+  "gate": [
+    {
+      "name": "python syntax + adapter self-test",
+      "run": "python -m py_compile a2app_adapter.py main.py schema.py && python a2app_adapter.py --selftest"
+    },
+    {
+      "name": "operations resolve (every declared op has a runner)",
+      "run": "python -c \"import schema,sys; missing=[o['name'] for o in schema.OPERATIONS if o['name'] not in schema.OPERATION_RUNNERS]; sys.exit('declared with no runner: '+', '.join(missing)) if missing else print('operations resolve ok')\""
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data"
+  }
 }

@@ -15,6 +15,7 @@
 import { createA2App, createA2AppServer, type Binding, type EntityDef, type Grant, type StoredRecord } from "@a2app/adapter-core";
 import type { NormalizedField } from "@a2app/rules";
 import { randomBytes } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 export const ADAPTER_VERSION = "0.1.0";
 
@@ -35,7 +36,9 @@ export class NotesBinding implements Binding {
   private notes = new Map<string, StoredRecord>();
 
   entities(): Record<string, EntityDef> {
-    return { notes: { fields: NOTE_FIELDS } };
+    // Every entity names the module it lives in: describe groups by module,
+    // and an entity outside every module has no screen to appear on.
+    return { notes: { fields: NOTE_FIELDS, module: "notes", summary: "what you wrote down" } };
   }
   listRecords(): { items: StoredRecord[] } {
     return { items: [...this.notes.values()] };
@@ -71,6 +74,7 @@ export function startNotesApp(port = 8091, token = "a2app_starter_token"): Retur
   const grant: Grant = { token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] };
   const app = createA2App(new NotesBinding(), {
     credentials: [grant],
+    modules: [{ name: "notes", summary: "what you wrote down" }],
     allowedOrigins: [`http://localhost:${port}`, `http://127.0.0.1:${port}`],
   });
   const server = createA2AppServer(app);
@@ -79,4 +83,8 @@ export function startNotesApp(port = 8091, token = "a2app_starter_token"): Retur
 }
 
 // Run directly: `node dist/index.js`
-if (import.meta.url === `file://${process.argv[1]}`) startNotesApp();
+//
+// pathToFileURL, not "file://" + argv[1]: on Windows the latter never matches
+// (argv[1] is a backslash path, import.meta.url is `file:///C:/...`), so the
+// starter would exit 0 without starting anything.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) startNotesApp();

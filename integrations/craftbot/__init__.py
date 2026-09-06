@@ -137,13 +137,13 @@ def agent_app_delete(input_data: dict) -> dict:
 
 
 @action(
-    name="agent_app_operations",
+    name="agent_app_find",
     description="List the app's declared operations.",
     mode="CLI", action_sets=["agent_app"],
     input_schema={"dir": _DIR}, output_schema=_OUT,
 )
-def agent_app_operations(input_data: dict) -> dict:
-    return _run([str(input_data["dir"]), "ops"])
+def agent_app_find(input_data: dict) -> dict:
+    return _run([str(input_data["dir"]), "--find", str(input_data["term"])])
 
 
 @action(
@@ -154,7 +154,7 @@ def agent_app_operations(input_data: dict) -> dict:
     output_schema=_OUT,
 )
 def agent_app_run_operation(input_data: dict) -> dict:
-    a = [str(input_data["dir"]), "run", str(input_data["operation"])]
+    a = [str(input_data["dir"]), *[p for p in str(input_data["path"]).split("/") if p], str(input_data["operation"])]
     for key, value in (input_data.get("fields") or {}).items():
         a += [f"--{key}", str(value)]
     if input_data.get("approve"):

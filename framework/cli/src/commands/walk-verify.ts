@@ -42,12 +42,16 @@ export async function run(_args: string[], app: string): Promise<number> {
     detail: id ? `protocol ${id.protocol}, adapter ${id.adapterVersion}` : "no marker",
   });
 
-  // 3. Describe reachable.
-  const described = await client.describe();
+  // 3. Describe reachable. The root level is the cheapest proof the surface is
+  //    alive and is what an agent reaches first, so it is what we check.
+  const root = await client.describeRoot();
   checks.push({
-    name: "describe (data model)",
-    ok: described !== null,
-    detail: described ? `${Object.keys(described.entities).length} entities` : "unreachable",
+    name: "describe (root: modules)",
+    ok: root !== null && root.modules.length > 0,
+    detail:
+      root === null
+        ? "unreachable"
+        : `${root.modules.length} module(s), ${root.modules.reduce((n, m) => n + m.entities, 0)} entities`,
   });
 
   // 4. Requirements features enumerated.

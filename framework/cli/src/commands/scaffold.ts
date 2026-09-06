@@ -99,6 +99,13 @@ export async function run(args: string[], app: string): Promise<number> {
     manifest.agentAppVersion = AGENT_APP_VERSION;
     manifest.adapterVersion = adapterVersion;
     if (manifest.authMode === undefined) manifest.authMode = "none";
+    // Every app needs at least one module before it can declare an entity, so a
+    // blueprint that ships none gets a single starter to rename. Seeding it here
+    // rather than leaving the key absent means a freshly scaffolded app serves a
+    // valid root screen immediately, instead of failing its own gate on step one.
+    if (manifest.modules === undefined) {
+      manifest.modules = [{ name: "core", summary: `${name} — rename this module as the app takes shape` }];
+    }
     // Assign a port no registered app claims and nothing is listening on, so two
     // apps are never mutually unreachable to their own tooling (section 5.6).
     // Pick AND claim in one locked step; an explicit --port is honoured when free.
@@ -194,11 +201,18 @@ function writeHarnessGuides(dir: string, name: string): void {
         "## Operate it (no rebuild)",
         "",
         "```bash",
-        "agent-app . serve        # launch (never start a server by hand)",
-        "a2app . data schema      # the data model",
-        "a2app . ops              # declared operations",
-        "a2app . run <op> ...     # invoke one (destructive ops need approval)",
+        "agent-app . serve                       # launch (never start a server by hand)",
+        "a2app .                                 # the app's modules — start here",
+        "a2app . <module>                        # its entities and operations",
+        "a2app . <module> <entity>               # fields, and the operations that act on it",
+        "a2app . <module> <entity> <id>          # one record, and what its state allows",
+        "a2app . <module> <entity> <id> <op> …   # invoke, at the path that identifies it",
+        "a2app . --find <term>                   # search names, get locations",
+        "a2app . data <entity> list|create|…     # raw record access",
         "```",
+        "",
+        "The CLI is a walk: each argument names a place in the app, and every screen",
+        "ends by naming the legal next moves — read that line, you never have to guess.",
         "",
         "Read and write through the adapter only. Never drive the UI to operate this app;",
         "the UI is for humans and for walk-verify.",
@@ -267,11 +281,17 @@ function scaffoldMinimal(dir: string, name: string): void {
       "## Plan",
       "One paragraph describing what this app is. (Fill me in.)",
       "",
+      "## Modules",
+      "Each module: what it covers, which entities sit in it. Decide these FIRST —",
+      "an entity cannot be declared until there is a module to hold it, and the root",
+      "screen of describe lists them.",
+      "- core — (rename me) this app's first area",
+      "",
       "## Entities",
-      "Each entity: purpose, key fields.",
+      "Each entity: its module, purpose, key fields.",
       "",
       "## Operations",
-      "Each declared operation: what it does, destructive?",
+      "Each declared operation: its module, the entity it acts on, what it does, destructive?",
       "",
       "## Conventions",
       "App-specific rules an operating agent must follow.",
@@ -292,14 +312,18 @@ function scaffoldMinimal(dir: string, name: string): void {
       "## Features",
       '- The user can … (each feature a checkable capability — walk-verify drives them).',
       "",
+      "## Modules",
+      "How the app divides: one line per module, its scope.",
+      "- core — (rename me) this app's first area",
+      "",
       "## Data",
-      "Entities and the fields each must hold.",
+      "Entities and the fields each must hold, each under a module.",
       "",
       "## Design",
       "Layout, theme, any visual requirements.",
       "",
       "## Operations",
-      "What the agent must be able to do on the user's behalf.",
+      "What the agent must be able to do on the user's behalf, each under a module.",
       "",
       "## Quality of life",
       "Nice-to-haves, explicitly non-binding.",

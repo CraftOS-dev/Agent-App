@@ -1,5 +1,31 @@
 {
   "operations": [
-    { "name": "count-tasks", "description": "Count the tasks.", "destructive": false, "readOnly": true, "idempotent": true }
+    {
+      "name": "count-tasks",
+      "description": "Count the tasks.",
+      "destructive": false,
+      "readOnly": true,
+      "idempotent": true,
+      "module": "planning",
+      "params": {}
+    },
+    {
+      "name": "complete-task",
+      "description": "Mark one task done.",
+      "destructive": false,
+      "module": "planning",
+      "entity": "tasks",
+      "appliesWhen": {
+        "field": "status",
+        "ne": "done"
+      },
+      "params": {
+        "task": {
+          "type": "ref",
+          "entity": "tasks",
+          "required": true
+        }
+      }
+    }
   ]
 }

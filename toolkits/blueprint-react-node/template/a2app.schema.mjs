@@ -6,11 +6,19 @@
  * `describe` and `schemaVersion` are DERIVED from this, so an agent always sees
  * the live model — you never hand-write describe.
  *
+ * MODULES COME FIRST. Every entity names the module it lives in, and every
+ * operation names the module it appears under; the modules themselves are
+ * declared in `manifest.json`. That is what gives describe a root screen to
+ * serve and keeps discovery bounded however large the app grows — an entity or
+ * operation outside every module has no screen and cannot be reached by walking.
+ *
  * This starter models a to-do list. Replace it with your own entities.
  */
 export const schema = {
   entities: {
     tasks: {
+      module: "planning",
+      summary: "what needs doing, and what is done",
       fields: [
         { name: "title", type: "string", required: true, max: 200 },
         { name: "status", type: "enum", values: ["todo", "doing", "done"] },
@@ -24,11 +32,28 @@ export const schema = {
     },
   },
 
-  // Declared operations (operations.json is the framework-file mirror an agent
-  // keeps in sync; the adapter reads this list for describe + approval).
+  // Declared operations (operations.json is the mirror an agent keeps in sync;
+  // the adapter reads this list for describe + approval).
+  //
+  // `params` is REQUIRED and typed — the record screen renders it as the
+  // operation's signature, so arguments described only in prose can neither be
+  // shown nor checked before a call. Declare `{}` for one that takes none.
+  //
+  // `entity` attaches an operation to a record screen; `appliesWhen` decides
+  // whether it is available on a given record, and the adapter derives the
+  // "blocked" reason from it. Comparisons only — never a natural-language rule.
   operations: [
-    { name: "clear-done", description: "Delete every task whose status is done.", destructive: true },
-    { name: "count-tasks", description: "Count the tasks.", destructive: false, readOnly: true, idempotent: true },
+    { name: "clear-done", description: "Delete every task whose status is done.", destructive: true, module: "planning", params: {} },
+    { name: "count-tasks", description: "Count the tasks.", destructive: false, readOnly: true, idempotent: true, module: "planning", params: {} },
+    {
+      name: "complete-task",
+      description: "Mark one task done.",
+      destructive: false,
+      module: "planning",
+      entity: "tasks",
+      appliesWhen: { field: "status", ne: "done" },
+      params: { task: { type: "ref", entity: "tasks", required: true } },
+    },
   ],
 
   operationRunners: {
@@ -44,5 +69,12 @@ export const schema = {
       return { removed };
     },
     "count-tasks": (_args, _ctx, { db }) => ({ count: Object.keys(db.tasks ?? {}).length }),
+    "complete-task": (args, _ctx, { db, persist }) => {
+      const task = db.tasks?.[args?.task];
+      if (!task) return { ok: false, reason: "no such task" };
+      task.status = "done";
+      persist();
+      return { ok: true, task: task.id, status: task.status };
+    },
   },
 };

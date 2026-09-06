@@ -5,8 +5,19 @@
   "adapterVersion": "0.1.0",
   "appVersion": "0.1.0",
   "authMode": "none",
+  "modules": [
+    {
+      "name": "planning",
+      "summary": "tasks and the work in front of you",
+      "entities": [
+        "tasks"
+      ]
+    }
+  ],
   "modificationLock": false,
-  "capabilities": { "integrations": [] },
+  "capabilities": {
+    "integrations": []
+  },
   "pipeline": {
     "install": "node -e \"process.stdout.write('download the pocketbase binary into ./pb, then re-run\\n')\"",
     "build": "node --check pb/pb_hooks/_a2app.pb.js",

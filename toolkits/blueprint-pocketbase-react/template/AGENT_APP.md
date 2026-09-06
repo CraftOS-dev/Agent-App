@@ -8,6 +8,13 @@ guard that validates the raw body before PocketBase coerces it. Evolve the app b
 editing collections (migrations) and the React UI — never the hook files
 (system-owned, hash-locked).
 
+## Modules
+Modules are the organizing unit: every entity and every operation belongs to
+exactly one, and describe's root screen lists them. PocketBase collections
+cannot carry a module of their own, so `manifest.json` maps them: each
+`modules[].entities` lists the collections in that module.
+- **planning** — tasks and the work in front of you.
+
 ## Entities
 Define collections in PocketBase (via migrations or the admin UI). `describe`
 derives entities from the live collection schema, so it cannot drift. A starter

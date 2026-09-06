@@ -21,7 +21,7 @@
       "agent_app_create",
       "agent_app_update",
       "agent_app_delete",
-      "agent_app_operations",
+      "agent_app_find",
       "agent_app_run_operation",
       "agent_app_poll_tasks",
       "agent_app_build",

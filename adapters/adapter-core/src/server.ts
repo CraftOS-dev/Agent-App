@@ -504,7 +504,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
     // Guard the RAW body before any backend coercion. Required-field presence is
     // enforced on CREATE only (POST) — a PATCH is a legitimate partial write.
-    const allow: Record<string, unknown> = {};
+    // Null prototype: `allow` is probed with keys from the request body, and on a
+    // plain object `allow["constructor"]` is truthy, which makes validate() skip
+    // that field entirely rather than guard it.
+    const allow: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const k of def.writeAllow ?? []) allow[k] = true;
     const violations = validate(def.fields, body, { allow, requireRequired: req.method === "POST" });
     if (violations.length) {

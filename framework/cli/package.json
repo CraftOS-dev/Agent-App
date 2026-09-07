@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node test/copy-tree.test.mjs",
+    "test": "tsc -p tsconfig.json && node test/copy-tree.test.mjs && node test/containment.test.mjs",
     "bundle-blueprints": "node scripts/bundle-blueprints.mjs",
     "bundle-skills": "node scripts/bundle-skills.mjs",
     "bundle": "node scripts/bundle-blueprints.mjs && node scripts/bundle-skills.mjs",

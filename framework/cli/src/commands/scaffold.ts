@@ -80,6 +80,7 @@ export async function run(args: string[], app: string): Promise<number> {
         throw new UsageError(err instanceof Error ? err.message : String(err));
       }
       vendorPaths(tk, dir, allTemplateFiles(tk));
+      ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
       recordProjectToolkit(dir, tk);
       systemPaths = tk.manifest.systemPaths;
       adapterVersion = adapterVersionOf(tk);
@@ -246,29 +247,52 @@ function allTemplateFiles(_tk: ResolvedToolkit): string[] {
   return ["."];
 }
 
+/**
+ * Guarantee the ignore rules that keep runtime artifacts out of a repository.
+ *
+ * Blueprints ship their own `.gitignore`, but npm strips dotfiles named
+ * `.gitignore` out of a published tarball, so a CLI installed with `npm i -g`
+ * scaffolds an app carrying none at all — and the next `git add -A` publishes
+ * the agent token, the principal password and the live database. The rules the
+ * framework depends on are therefore written here, from the CLI, on every path.
+ *
+ * Existing lines are kept and only missing ones appended: a blueprint's own
+ * rules (node_modules, the PocketBase binary, __pycache__) are none of the
+ * framework's business, and re-running must not churn the file.
+ */
+function ensureIgnoreRules(dir: string, dataDir?: string): void {
+  const rules = [
+    ".agent-token",
+    ".principal",
+    ".superuser",
+    ".a2app/serve.json",
+    ".a2app/serve.log",
+    ".a2app/dev/",
+    ".a2app/backups/",
+  ];
+  // The database lives wherever the toolkit says it does, so the rule follows
+  // the declaration rather than assuming "data/".
+  if (dataDir !== undefined && dataDir.trim() !== "") {
+    rules.push(dataDir.trim().replace(/[\/]+$/, "") + "/");
+  }
+  const file = join(dir, ".gitignore");
+  const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  const missing = rules.filter((rule) => !present.has(rule));
+  if (missing.length === 0) return;
+  const header = [
+    "# Written by agent-app: credentials, framework state and the live database",
+    "# are runtime artifacts and must never be committed.",
+  ];
+  const prefix = existing.trim() === "" ? "" : existing.replace(/\s*$/, "") + "\n\n";
+  writeFileSync(file, prefix + [...header, ...missing, ""].join("\n"));
+}
+
 /** A stack-free skeleton: just the framework files, so `scaffold` without a
  *  blueprint still yields a conforming artifact shell an agent then fills in. */
 function scaffoldMinimal(dir: string, name: string): void {
   mkdirSync(join(dir, "reference"), { recursive: true });
-  // Credentials are runtime artifacts that must never be committed (section 4.1).
-  // A blueprint ships its own ignore rules; a hand-assembled app has no other
-  // source for them, and the token is minted into this directory moments later.
-  writeFileSync(
-    join(dir, ".gitignore"),
-    [
-      "# Credentials are runtime artifacts: never shipped, exported, or committed.",
-      ".agent-token",
-      ".principal",
-      ".superuser",
-      "",
-      "# Framework runtime state: serve records, logs, dev copies, and backups.",
-      ".a2app/serve.json",
-      ".a2app/serve.log",
-      ".a2app/dev/",
-      ".a2app/backups/",
-      "",
-    ].join("\n"),
-  );
+  ensureIgnoreRules(dir);
   writeFileSync(
     join(dir, "operations.json"),
     JSON.stringify({ operations: [] }, null, 2) + "\n",

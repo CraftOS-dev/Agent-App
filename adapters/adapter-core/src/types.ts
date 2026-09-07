@@ -238,6 +238,9 @@ export interface A2AppConfig {
   conventions?: Record<string, unknown>;
   /** the app's own origins; a write from any other Origin is refused 403. */
   allowedOrigins?: string[];
+  /** Host names to answer on, beyond loopback and the hosts of allowedOrigins.
+   *  Set this only when the app is deliberately reachable under another name. */
+  allowedHosts?: string[];
   /** declared event types. */
   events?: EventTypeDecl[];
   /** injectable clock, for deterministic tests. */

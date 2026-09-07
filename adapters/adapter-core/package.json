@@ -1,32 +1,42 @@
 {
- "name": "@a2app/adapter-core",
- "version": "0.1.0",
- "description": "Stack-agnostic A2App served surface: identity, describe, guard+read-back, operations, tasks/events, context, whoami, IAM — driven by a pluggable backend binding",
- "license": "MIT",
- "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "adapters/adapter-core" },
- "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
- "bugs": "https://github.com/CraftOS-dev/Agent-App/issues",
- "publishConfig": { "access": "public" },
- "type": "module",
- "main": "./dist/index.js",
- "types": "./dist/index.d.ts",
- "exports": {
- ".": {
- "types": "./dist/index.d.ts",
- "default": "./dist/index.js"
- }
- },
- "files": ["dist"],
- "engines": { "node": ">=20" },
- "dependencies": {
- "@a2app/rules": "workspace:*"
- },
- "devDependencies": {
- "@types/node": "^20.19.0"
- },
- "scripts": {
- "build": "tsc -p tsconfig.json",
- "typecheck": "tsc -p tsconfig.json --noEmit",
- "test": "echo \"no tests\" && exit 0"
- }
+  "name": "@a2app/adapter-core",
+  "version": "0.1.0",
+  "description": "Stack-agnostic A2App served surface: identity, describe, guard+read-back, operations, tasks/events, context, whoami, IAM — driven by a pluggable backend binding",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CraftOS-dev/Agent-App.git",
+    "directory": "adapters/adapter-core"
+  },
+  "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
+  "bugs": "https://github.com/CraftOS-dev/Agent-App/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@a2app/rules": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node test/host.test.mjs"
+  }
 }

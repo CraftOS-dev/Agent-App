@@ -92,6 +92,16 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   const opByName = new Map(operations.map((o) => [o.name, o]));
   const eventTypes = knownEventTypes(config.events);
   const allowedOrigins = new Set(config.allowedOrigins ?? []);
+  // Host names this app will answer to. Derived from the origins it already
+  // declares, so an app that configures its own UI origin keeps working.
+  const allowedHosts = new Set((config.allowedHosts ?? []).map((h) => h.toLowerCase()));
+  for (const origin of config.allowedOrigins ?? []) {
+    try {
+      allowedHosts.add(new URL(origin).host.toLowerCase());
+    } catch {
+      /* not a URL - ignore */
+    }
+  }
   const audit = config.audit ?? ((e: AuditEntry) => store.appendAudit(e));
   const limiter = new RateLimiter({ ...DEFAULT_RATE_LIMITS, ...(config.rateLimits ?? {}) }, () => now().getTime());
 
@@ -322,6 +332,25 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     const token = req.headers["x-a2app-token"] ?? req.headers["x-lui-token"];
     if (!token) return null;
     return store.grantByToken(token);
+  }
+
+  /**
+   * Is this request addressed to the loopback interface by name?
+   *
+   * Binding to 127.0.0.1 does not stop a browser reaching the app: an attacker
+   * page on evil.com whose DNS re-resolves to 127.0.0.1 is then *same-origin*
+   * with this server as far as the browser is concerned, so it sends no Origin
+   * on a GET and can read every response. The origin rule cannot catch that —
+   * there is no origin to judge. The Host header can: a rebound request still
+   * carries `evil.com`, because that is the name the page was fetched from.
+   */
+  function isAllowedHost(raw: string): boolean {
+    const host = raw.toLowerCase();
+    if (allowedHosts.has(host)) return true;
+    // Strip the port; an IPv6 literal is bracketed, so scan past the bracket.
+    const name = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : (host.split(":")[0] ?? "");
+    if (name === "localhost" || name === "[::1]" || name === "::1") return true;
+    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
   }
 
   function isForeignOrigin(req: A2AppRequest): boolean {
@@ -792,6 +821,13 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
   async function handle(req: A2AppRequest): Promise<A2AppReply | null> {
     const path = req.path.replace(/\/+$/, "") || "/";
+
+    // Before any route, including the unauthenticated identity document, which
+    // is otherwise a free fingerprint of the app for a rebound page.
+    const hostHeader = req.headers["host"];
+    if (hostHeader !== undefined && !isAllowedHost(hostHeader)) {
+      return err(403, "forbidden_host", `Refused: this app answers only on its own host, not "${hostHeader}".`);
+    }
 
     // Identity (unauthenticated).
     if (path === "/.well-known/a2app.json" || path === "/api/_a2app") {

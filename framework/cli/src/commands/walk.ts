@@ -145,15 +145,19 @@ async function invokeOperation(
   args: string[],
   app: string,
 ): Promise<number> {
-  if (record) {
-    const declared = record.operations.find((o) => o.name === operation);
-    if (declared && declared.available === false) {
-      log.error(`"${operation}" is not available on ${record.label ?? record.id}: ${declared.blocked}`);
-      return 1;
-    }
+  const declared = record?.operations.find((o) => o.name === operation);
+  if (record && declared && declared.available === false) {
+    log.error(`"${operation}" is not available on ${record.label ?? record.id}: ${declared.blocked}`);
+    return 1;
   }
 
   const params = collectFields(args, WALK_FLAGS);
+  // The path already named the record, so fill in the parameter that takes it
+  // rather than making the caller repeat the id. The record level names that
+  // parameter; an explicit flag still wins, so a caller can always be exact.
+  if (record && declared?.targetParam && params[declared.targetParam] === undefined) {
+    params[declared.targetParam] = record.id;
+  }
   const approvalKey = flag(args, "approve");
   const res = await client.callOperation(operation, params, approvalKey);
 

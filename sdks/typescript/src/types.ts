@@ -119,6 +119,9 @@ export interface DescribeRecord {
     destructive?: boolean;
     /** why, when `available` is false — derived from the record, never composed */
     blocked?: string;
+    /** the parameter that takes this record, when the operation names one
+     *  unambiguously; absent when the caller must pass the target explicitly */
+    targetParam?: string;
   }[];
   relations?: { name: string; entity: string; count?: number }[];
   next: string[];

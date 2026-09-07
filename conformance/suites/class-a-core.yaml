@@ -259,6 +259,25 @@ checks:
       match: { credentialId: cred_ro, principal: owner }
       has: [scopes]
 
+  # --- Guard: an operation's arguments are guarded like a write --------------
+  - name: an operation's required parameter is enforced
+    request: { method: POST, path: /api/ops/finish-card, token: full, body: {} }
+    expect:
+      status: 400
+      match: { a2app: true, ok: false }
+      len: { violations: 1 }
+
+  - name: an operation refuses an undeclared parameter
+    request:
+      method: POST
+      path: /api/ops/finish-card
+      token: full
+      body: { card: "card_seed", bogus: 1 }
+    expect:
+      status: 400
+      match: { a2app: true, ok: false }
+      len: { violations: 1 }
+
   # --- Approval --------------------------------------------------------------
   - name: a destructive op without approval returns the content-addressed key
     request: { method: POST, path: /api/ops/archive-board, token: full, body: {} }

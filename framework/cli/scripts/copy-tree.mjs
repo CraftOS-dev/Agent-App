@@ -8,9 +8,17 @@
  * helper in `src/lib/fsx.ts`, which the build scripts cannot import.
  */
 import { copyFileSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export function copyTree(src, dest) {
+  // Mirrors cpSync's ERR_FS_CP_EINVAL: copying a directory into itself would
+  // otherwise walk the destination it is creating until the disk fills.
+  const s = resolve(src);
+  const d = resolve(dest);
+  const rel = relative(s, d);
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+    throw new Error(`Cannot copy ${s} into itself (${d})`);
+  }
   const st = lstatSync(src);
   if (st.isSymbolicLink()) {
     mkdirSync(dirname(dest), { recursive: true });

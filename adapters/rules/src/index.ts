@@ -253,7 +253,11 @@ export function validate(
     // Unknown fields are silently dropped by most backends and absent from the
     // response, so the caller cannot tell they were ignored.
     if (!field) {
-      out.push(violation(ERROR_CODES.UNKNOWN_FIELD, key, "one of: " + writable.join(", "), body[key]));
+      // An operation may legitimately declare no parameters at all, and "one
+      // of: " with nothing after it reads as a truncated message rather than as
+      // the answer it is.
+      const accepted = writable.length ? "one of: " + writable.join(", ") : "nothing — no writable fields are declared";
+      out.push(violation(ERROR_CODES.UNKNOWN_FIELD, key, accepted, body[key]));
       continue;
     }
     if (field.readOnly) {

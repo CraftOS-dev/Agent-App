@@ -264,7 +264,11 @@ checks:
     request: { method: POST, path: /api/ops/finish-card, token: full, body: {} }
     expect:
       status: 400
-      match: { a2app: true, ok: false }
+      match:
+        a2app: true
+        ok: false
+        violations.0.code: missing_required
+        violations.0.field: card
       len: { violations: 1 }
 
   - name: an operation refuses an undeclared parameter
@@ -275,7 +279,11 @@ checks:
       body: { card: "card_seed", bogus: 1 }
     expect:
       status: 400
-      match: { a2app: true, ok: false }
+      match:
+        a2app: true
+        ok: false
+        violations.0.code: unknown_field
+        violations.0.field: bogus
       len: { violations: 1 }
 
   # --- Approval --------------------------------------------------------------

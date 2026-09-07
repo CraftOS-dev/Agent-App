@@ -6,9 +6,10 @@
  *
  * Only directories carrying an `a2app.toolkit.json` are bundled.
  */
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyTree } from "./copy-tree.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here, "..", "..", "..", "toolkits");
@@ -26,7 +27,7 @@ let n = 0;
 for (const name of readdirSync(src)) {
   const dir = join(src, name);
   if (!existsSync(join(dir, "a2app.toolkit.json"))) continue; // blueprints only, not @a2app/kit
-  cpSync(dir, join(dest, name), { recursive: true });
+  copyTree(dir, join(dest, name));
   n += 1;
   console.log(`bundled blueprint: ${name}`);
 }

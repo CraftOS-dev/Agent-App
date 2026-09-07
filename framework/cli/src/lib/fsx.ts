@@ -9,15 +9,18 @@
  */
 import {
   closeSync,
-  cpSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -73,6 +76,35 @@ function syncDir(dir: string): void {
 }
 
 /**
+ * Recursive copy. Deliberately does NOT use `fs.cpSync`.
+ *
+ * Node's native recursive copy fail-fasts the entire process on Windows when
+ * the SOURCE path contains non-ASCII characters — no exception, no stderr, just
+ * exit 0xC0000409 — so scaffold, vendor, backup and restore all died silently
+ * for anyone whose checkout lives under a path like `C:\Users\...\デスクトップ`.
+ * A plain readdir/copyFile walk has no such limit. Matches the native defaults:
+ * overwrites existing entries, and copies symlinks as symlinks.
+ */
+export function copyTree(src: string, dest: string): void {
+  const st = lstatSync(src);
+  if (st.isSymbolicLink()) {
+    mkdirSync(dirname(dest), { recursive: true });
+    rmSync(dest, { force: true });
+    symlinkSync(readlinkSync(src), dest);
+    return;
+  }
+  if (!st.isDirectory()) {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+    return;
+  }
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    copyTree(join(src, entry.name), join(dest, entry.name));
+  }
+}
+
+/**
  * Copy `src` into a NEW directory `dest`, atomically. Stages to a sibling temp,
  * verifies the file count matches, fsyncs, then renames into place. Refuses to
  * overwrite an existing `dest` (a backup id must never merge two snapshots).
@@ -83,7 +115,7 @@ export function copyDirAtomic(src: string, dest: string): void {
   const staged = `${dest}.staging-${tmpSuffix()}`;
   rmSync(staged, { recursive: true, force: true });
   mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, staged, { recursive: true });
+  copyTree(src, staged);
   const want = countFiles(src);
   const got = countFiles(staged);
   if (got !== want) {
@@ -108,7 +140,7 @@ export function replaceDirAtomic(src: string, live: string): void {
   const old = `${live}.old-${tmpSuffix()}`;
   rmSync(staged, { recursive: true, force: true });
   rmSync(old, { recursive: true, force: true });
-  cpSync(src, staged, { recursive: true });
+  copyTree(src, staged);
   const want = countFiles(src);
   const got = countFiles(staged);
   if (got !== want) {

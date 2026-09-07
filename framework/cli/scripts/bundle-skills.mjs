@@ -8,9 +8,10 @@
  * with the binary is what makes "an agent with the skills and the files needs
  * nothing from any host" true for a plain `npm i -g agent-app`.
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyTree } from "./copy-tree.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here, "..", "..", "..", "skills");
@@ -39,6 +40,6 @@ if (missing.length > 0) {
 
 rmSync(dest, { recursive: true, force: true });
 mkdirSync(dest, { recursive: true });
-cpSync(src, dest, { recursive: true });
+copyTree(src, dest);
 
 console.log(`bundle-skills: ${index.skills.length} skill(s) → ${dest}`);

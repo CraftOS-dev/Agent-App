@@ -79,6 +79,17 @@ checks:
     expect:
       exit: 0
       contains: "From the CLI"
+      save: { probe: id }
+
+  # The path names the record, so the caller must not have to repeat it: the
+  # record level names the parameter that takes it and the client fills it in.
+  # Asserted on a record created here, because the seed card is deliberately
+  # marked done earlier and this operation is correctly blocked on it.
+  - name: an operation invoked at a record path receives that record
+    cli: { args: ["<APPDIR>", "board", "cards", "${probe}", "finish-card"] }
+    expect:
+      exit: 0
+      match: { result.card: "${probe}" }
 
   - name: data create with a bad enum is rejected (exit 1)
     cli: { args: ["<APPDIR>", "data", "cards", "create", "--title", "x", "--priority", "nope"] }

@@ -14,6 +14,7 @@ import {
   schemaFingerprint,
   ERROR_CODES,
   type EntityPrint,
+  type NormalizedField,
   type Violation,
 } from "@a2app/rules";
 import {
@@ -42,6 +43,7 @@ import {
   type Binding,
   type CallContext,
   type Grant,
+  type OperationDecl,
 } from "./types.js";
 
 export const ADAPTER_CORE_VERSION = "0.1.0";
@@ -543,6 +545,28 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   }
 
   /* ---------------------------------------------------------- operations */
+  /**
+   * A declared operation's parameters, in the shape the shared guard validates.
+   *
+   * An operation IS a write — many of them destructive — so its arguments belong
+   * on the same rules as a record write rather than on a second, weaker path.
+   * Without this the chain in this file's header skipped `guard` for every
+   * operation: an undeclared parameter, a value outside a declared enum, a
+   * malformed ref and a missing REQUIRED parameter all reached the binding and
+   * came back `ok: true` — the silent success the protocol exists to prevent.
+   */
+  function paramFields(decl: OperationDecl): NormalizedField[] {
+    return Object.entries(decl.params ?? {}).map(([name, p]) => {
+      const field: NormalizedField = { name, type: p.type };
+      if (p.required !== undefined) field.required = p.required;
+      if (p.max !== undefined) field.max = p.max;
+      if (p.values !== undefined) field.values = p.values;
+      if (p.entity !== undefined) field.entity = p.entity;
+      return field;
+    });
+  }
+
+
 
   async function handleOperation(req: A2AppRequest, name: string): Promise<A2AppReply> {
     const limited = rateGate(req, "ops");
@@ -553,6 +577,16 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     if ("reply" in authz) return authz.reply;
     const ctx = authz.ctx;
     const args = (req.body ?? {}) as Record<string, unknown>;
+
+    // Guard the RAW args before anything acts on them, and before an approval
+    // key is minted: a human must never be asked to approve a call that cannot
+    // run. Every parameter is supplied fresh on each invocation — there is no
+    // partial-update case here — so a declared `required` is always enforced.
+    const argViolations = validate(paramFields(decl), args, { requireRequired: true });
+    if (argViolations.length) {
+      writeAudit(ctx, `op:${name}`, null, "rejected", argViolations[0]!.code);
+      return guardEnvelope(argViolations, now().toISOString());
+    }
 
     // Idempotency: a non-idempotent operation carrying an Idempotency-Key must not
     // double-execute on a retry. A replayed key is a 409 (reject-duplicate), same

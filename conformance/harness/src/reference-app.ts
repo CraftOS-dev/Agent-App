@@ -79,7 +79,10 @@ export function buildReferenceApp(): A2App {
     operations: {
       "archive-board": () => ({ archived: true, at: "2026-07-31T09:15:00.000Z" }),
       "count-cards": () => ({ count: 1 }),
-      "finish-card": () => ({ ok: true }),
+      // Echoes its target: the record id reaches an operation only when the
+      // caller's path was bound to the declared parameter, and a runner that
+      // returned a bare ok would make that indistinguishable from a no-op.
+      "finish-card": (args) => ({ ok: true, card: String((args as { card?: unknown }).card ?? "") }),
     },
   });
 

@@ -1,0 +1,5 @@
+# The ownership canon hashes framework files byte-for-byte, so a CRLF checkout
+# makes every system file read as "modified outside tooling" and fails the gate
+# on a fresh clone. Normalize to LF in the repository and in the working tree, on
+# every platform, regardless of the contributor's core.autocrlf setting.
+* text=auto eol=lf

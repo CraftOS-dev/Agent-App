@@ -15,10 +15,11 @@
  * Selection stays the agent's job: this command never picks a skill, it only
  * makes them reachable.
  */
-import { cpSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { flag, hasFlag } from "../lib/args.js";
 import { UsageError } from "../lib/project.js";
+import { copyTree } from "../lib/fsx.js";
 import { findSkillsDir, readSkillsIndex } from "../lib/skills.js";
 import { log } from "../lib/log.js";
 
@@ -57,7 +58,7 @@ export async function run(args: string[]): Promise<number> {
     // Copy the whole tree, index included: the index is what makes skill
     // selection deterministic, and a harness that ignores it loses nothing.
     // Overwriting is intended — re-running this is how skills get updated.
-    cpSync(dir, dest, { recursive: true });
+    copyTree(dir, dest);
     for (const skill of index.skills) log.step(`installed ${skill.name}`);
     log.ok(`Installed ${index.skills.length} framework skill(s) into ${dest}`);
     log.raw(

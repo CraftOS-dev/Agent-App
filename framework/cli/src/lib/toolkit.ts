@@ -21,10 +21,10 @@
  * The app records which toolkit it came from in `.a2app/toolkit.json`
  * `{ "id": "...", "source": "<abs path>" }` so sync commands can find it again.
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertInside } from "./fsx.js";
+import { assertInside, copyTree } from "./fsx.js";
 
 export interface GateStep {
   name: string;
@@ -123,7 +123,7 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
     if (!existsSync(src)) continue;
     const dest = assertInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
-    cpSync(src, dest, { recursive: true });
+    copyTree(src, dest);
     written.push(rel);
   }
   return written;

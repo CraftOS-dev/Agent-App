@@ -1,5 +1,6 @@
 # deps & builds
 node_modules/
+.pnpm-store/
 dist/
 build/
 *.tsbuildinfo
@@ -45,6 +46,11 @@ backups/
 # `**/` because a pattern with an inner slash is anchored to this file's
 # directory, and these land under apps/<app>/.a2app/, not the repo root.
 **/.a2app/describe-cache.json
+# `agent-app <dir> serve` bookkeeping: the pid/port record `stop` reads, and
+# the lock that serializes two concurrent serves. Both are per-machine and
+# both are removed on a clean stop.
+**/.a2app/serve.json
+**/.a2app/serve.lock
 **/data/db.json
 **/data/a2app-state.json
 a2app-state.json
@@ -77,3 +83,14 @@ agent-app-user-journey.drawio
 
 # internal audit notes — kept on disk, not part of the distribution
 blocker_checklist.md
+
+# skills copied into a harness by `agent-app skills --install <dir>` — generated
+# from skills/ in this repo, so tracking them would commit the same six twice
+# and let the copies drift from the source
+.claude/skills/
+
+# local machine setup helpers — machine-specific paths, not part of the distribution
+setup-windows.ps1
+
+# copied Claude Code session transcripts, for analysis only
+_session/

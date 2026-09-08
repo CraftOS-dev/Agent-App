@@ -76,8 +76,31 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 agent-app <dir> dev        # boot a disposable dev copy (fresh, migration-replayed DB)
 agent-app <dir> validate   # the gate, against the dev copy
 # then the walk-verify skill against the dev URL
+agent-app <dir> stop       # promote refuses to run while the app is serving
 agent-app <dir> promote    # pre-promote backup, then apply new migrations to live
+agent-app <dir> serve      # bring the changed app back up
+agent-app <dir> open       # and show it to the user (see below)
 ```
+
+`promote` applies migrations and launches NOTHING, so a change is not in front of
+the user until you serve again. Do not end a modify at `promote`.
+
+**Showing the app to the user.** A running app is not a delivered app until the
+person can see it. The framework cannot know what your harness can do, so YOU
+decide which of these you are:
+
+- **You have a browser tool** (a built-in browser pane, a Chrome extension):
+  run `agent-app <dir> open --print-only` and open the returned `url` with your
+  own tool, so the app appears in context. `--print-only` is what stops the CLI
+  also spawning a separate window — without it the user gets two.
+- **You do not**: run `agent-app <dir> open`. It uses the opener the harness
+  declared (`AGENT_APP_OPEN_CMD`), else the OS browser.
+
+Either way, give the user the URL in your reply. `"opened": false` in the result
+is NOT a failure — it means the environment has no browser to spawn (SSH, CI,
+headless) and the printed URL is how the user gets there. `agent-app <dir> serve
+--open` does the serve and the open in one step where you do not need the URL
+first.
 
 `agent-app dev` boots a disposable copy of your new CODE on a hidden port with a
 **FRESH, EMPTY database** — migrations replay at boot, so only data your migrations

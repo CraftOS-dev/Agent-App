@@ -189,6 +189,27 @@ events. (Manifest format and fire API: per your stack.)
    the running app in a real browser against `reference/requirements.md`. A pass
    is what promotes and announces the app. Failing features come back as a report:
    fix them, then repeat step 1 and step 3.
+4. **Launch it and put it in front of the user.** `agent-app <dir> serve` runs the
+   manifest pipeline as a managed background process and polls health until the
+   app answers; it prints the URL. Then open it — see **Showing the app to the
+   user** below. Never start a server by hand.
+
+**Showing the app to the user.** A running app is not a delivered app until the
+person can see it. The framework cannot know what your harness can do, so YOU
+decide which of these you are:
+
+- **You have a browser tool** (a built-in browser pane, a Chrome extension):
+  run `agent-app <dir> open --print-only` and open the returned `url` with your
+  own tool, so the app appears in context. `--print-only` is what stops the CLI
+  also spawning a separate window — without it the user gets two.
+- **You do not**: run `agent-app <dir> open`. It uses the opener the harness
+  declared (`AGENT_APP_OPEN_CMD`), else the OS browser.
+
+Either way, give the user the URL in your reply. `"opened": false` in the result
+is NOT a failure — it means the environment has no browser to spawn (SSH, CI,
+headless) and the printed URL is how the user gets there. `agent-app <dir> serve
+--open` does the serve and the open in one step where you do not need the URL
+first.
 
 Test data is fine during the build — the dev DB is disposable; at delivery the
 LIVE app boots with a fresh database built purely from your migrations, so records

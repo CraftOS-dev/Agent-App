@@ -56,6 +56,7 @@ const COMMANDS: Record<string, CommandMeta> = {
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
   serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", surface: "agent-app", scope: "app" },
   stop: { summary: "Stop an app launched with `agent-app <app> serve`", surface: "agent-app", scope: "app" },
+  open: { summary: "Open a running app in a browser (harness opener, else the OS browser; always prints the URL)", surface: "agent-app", scope: "app" },
   dev: { summary: "Boot a dev copy on a hidden port with a fresh, migration-replayed database", surface: "agent-app", scope: "app" },
   promote: { summary: "Pre-promote backup, then apply the dev copy's migrations to live", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },

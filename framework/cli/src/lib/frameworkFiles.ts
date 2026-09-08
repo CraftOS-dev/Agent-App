@@ -209,11 +209,38 @@ export function validateAgentAppDoc(projectDir: string): FrameworkFileProblem[] 
 }
 
 export function validateRequirementsDoc(projectDir: string): FrameworkFileProblem[] {
-  return checkMarkdownSections(
-    projectDir,
-    join("reference", "requirements.md"),
-    REQUIREMENTS_SECTIONS,
-  );
+  const file = join("reference", "requirements.md");
+  const problems = checkMarkdownSections(projectDir, file, REQUIREMENTS_SECTIONS);
+  // Features must carry at least one checkable statement, not just the heading:
+  // walk-verify is an agent driving the app against these items one by one, and
+  // an empty list would let a build claim "verified" with nothing verified.
+  // Skipped when the file or the section is already reported — a second problem
+  // derived from the first buries the real cause.
+  if (problems.length === 0 && requirementsFeatures(projectDir).length === 0) {
+    problems.push({
+      file,
+      message: 'section "## Features" has no list items — each feature must be a checkable capability statement for walk-verify to drive',
+    });
+  }
+  return problems;
+}
+
+/** The "## Features" list items: the checkable capability statements a
+ *  walk-verify agent drives one by one. */
+export function requirementsFeatures(projectDir: string): string[] {
+  const path = join(projectDir, "reference", "requirements.md");
+  if (!existsSync(path)) return [];
+  const src = readFileSync(path, "utf8").split("\n");
+  const out: string[] = [];
+  let inFeatures = false;
+  for (const line of src) {
+    if (/^#{1,3}\s+/.test(line)) inFeatures = /^#{1,3}\s+features\b/i.test(line);
+    else if (inFeatures) {
+      const m = line.match(/^\s*[-*]\s+(.*\S)/);
+      if (m) out.push(m[1]!);
+    }
+  }
+  return out;
 }
 
 /** Run every framework-file check. */

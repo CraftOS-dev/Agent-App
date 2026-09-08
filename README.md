@@ -78,7 +78,7 @@ a2app <dir> data cards create --title "Buy milk" --due tomorrow
 agent-app <dir> scaffold [--blueprint <id>] # scaffold: framework files + ownership canon
 agent-app <dir> validate # the validation + security gate
 agent-app <dir> dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
-agent-app <dir> walk-verify # independent verification vs requirements.md
+# walk-verify is a skill, not a command: a verifier agent (never the builder) drives the UI vs requirements.md
 ```
 
 ## Scenarios

@@ -13,8 +13,9 @@
  *      --blueprint), so imported system CODE is replaced with known-good code,
  *      not merely re-hashed. Then re-record the ownership canon.
  *
- * The caller then runs `agent-app <dir> validate` + `serve` + walk-verify: an
- * import is fully re-verified, never trusted on origin.
+ * The caller then runs `agent-app <dir> validate` + `serve`, and a verifier
+ * agent runs the walk-verify skill: an import is fully re-verified, never
+ * trusted on origin.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -121,7 +122,7 @@ export async function run(args: string[], dir: string): Promise<number> {
     );
     log.raw(
       JSON.stringify(
-        { ok: true, id: manifest.id, previousId: oldId, dir: appDir, port: assigned, next: ["validate", "serve", "walk-verify"] },
+        { ok: true, id: manifest.id, previousId: oldId, dir: appDir, port: assigned, next: ["validate", "serve", "walk-verify skill (verifier agent)"] },
         null,
         2,
       ),

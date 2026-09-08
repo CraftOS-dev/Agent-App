@@ -37,7 +37,7 @@ export async function run(_args: string[], app: string): Promise<number> {
       );
       return 1;
     }
-    log.ok("dev copy prepared — run `agent-app validate` and walk-verify against it, then `agent-app promote`");
+    log.ok("dev copy prepared — run `agent-app validate`, have a verifier agent walk-verify against it (skill), then `agent-app promote`");
     return 0;
   });
 }

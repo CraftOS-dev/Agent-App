@@ -25,7 +25,7 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
  *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
 export const FRAMEWORK_VERBS = new Set([
   "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
-  "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
+  "list", "global", "skills", "dev", "promote", "backup", "restore",
 ]);
 
 /** The closed set of verbs that address every app rather than one, and so take
@@ -278,12 +278,6 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
       description: "Run the validation + security gate on an Agent App.",
       parameters: obj({ dir: DIR, noBuild: { type: "boolean" } }, ["dir"]),
       handler: (a) => build(a.noBuild ? [String(a.dir), "validate", "--no-build"] : [String(a.dir), "validate"]),
-    },
-    {
-      name: "agent_app_walk_verify",
-      description: "Independently verify a running app against its requirements (walk-verify).",
-      parameters: obj({ dir: DIR }, ["dir"]),
-      handler: (a) => build([String(a.dir), "walk-verify"]),
     },
   ];
 }

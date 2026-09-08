@@ -335,6 +335,26 @@ export function buildEntity(
 /* ------------------------------------------------------------------ record */
 
 /**
+ * The parameter that takes THIS record, when the operation names one
+ * unambiguously: exactly one required `ref` pointing at this entity.
+ *
+ * The record screen invites the caller to invoke an operation at the record's
+ * own path, so the path already carries the id — but the wire call is just
+ * `{operation, args}` and cannot see the path. Naming the parameter here is
+ * what lets a client fill it in without a second describe, and without any
+ * client guessing a convention. Two candidate parameters (a `move` taking
+ * `from` and `to`, say) means the record is genuinely ambiguous, so nothing is
+ * named and the caller passes it explicitly — the framework never guesses which
+ * record an operation meant.
+ */
+function targetParamOf(op: OperationDecl, entity: string): string | null {
+  const candidates = Object.entries(op.params ?? {})
+    .filter(([, p]) => p.type === "ref" && p.entity === entity && p.required === true)
+    .map(([name]) => name);
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+/**
  * One record, and the operations available *given its current state*.
  *
  * A blocked operation is shown with the reason it is blocked, never hidden: an
@@ -364,6 +384,8 @@ export function buildRecord(
   const operations = entityOperations(deps, entity, access).map((o) => {
     const row: Record<string, unknown> = { name: o.name, available: true };
     if (o.destructive) row.destructive = true;
+    const target = targetParamOf(o, entity);
+    if (target !== null) row.targetParam = target;
     if (o.appliesWhen && !evaluatePredicate(o.appliesWhen, record, index)) {
       row.available = false;
       row.blocked = explainPredicate(o.appliesWhen, record, index);

@@ -9,7 +9,8 @@ this app exists to be *walked*.
 pnpm --filter @a2app/playground build
 node apps/playground/dist/server.js          # http://127.0.0.1:8092
 
-export A2APP_TOKEN=a2app_playground_token
+# writes need the app's agent credential; the CLI reads it from .agent-token (gitignored)
+printf 'a2app_playground_token' > apps/playground/.agent-token
 node framework/cli/dist/a2app.js apps/playground                              # root: 2 modules
 node framework/cli/dist/a2app.js apps/playground directory                    # module
 node framework/cli/dist/a2app.js apps/playground directory people             # entity: fields + ops

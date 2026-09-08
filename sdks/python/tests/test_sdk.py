@@ -104,8 +104,11 @@ check("null fields yields an empty schema", entity_to_schema({"fields": None}), 
 
 # --- locate_entity ----------------------------------------------------------
 
+# The decoy sits in a DIFFERENT module and sorts first, so a substring match
+# would return "archive" and only the exact match can return "board". Putting
+# both candidates in one module would make this assertion pass either way.
 exact_last = StubClient(matches=[
-    {"level": "entity", "path": "board/cards-archive"},
+    {"level": "entity", "path": "archive/cards-archive"},
     {"level": "entity", "path": "board/cards"},
 ])
 check("an exact name beats a substring match, whatever the order",

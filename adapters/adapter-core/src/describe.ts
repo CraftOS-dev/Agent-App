@@ -335,20 +335,6 @@ export function buildEntity(
 /* ------------------------------------------------------------------ record */
 
 /**
- * One record, and the operations available *given its current state*.
- *
- * A blocked operation is shown with the reason it is blocked, never hidden: an
- * agent that cannot see why an action is unavailable will retry it, or invent a
- * worse route to the same goal, and a hidden action is indistinguishable from
- * one that does not exist. The reason is derived from the declared predicate and
- * the stored values — deterministic, and identical on every stack.
- *
- * Field VALUES are never echoed here beyond the record's label. This level
- * answers "what can I do to this record", and the data API answers "what is in
- * it"; keeping that line means describe cannot become a second, unguarded read
- * path around the scope model.
- */
-/**
  * The parameter that takes THIS record, when the operation names one
  * unambiguously: exactly one required `ref` pointing at this entity.
  *
@@ -368,6 +354,20 @@ function targetParamOf(op: OperationDecl, entity: string): string | null {
   return candidates.length === 1 ? candidates[0]! : null;
 }
 
+/**
+ * One record, and the operations available *given its current state*.
+ *
+ * A blocked operation is shown with the reason it is blocked, never hidden: an
+ * agent that cannot see why an action is unavailable will retry it, or invent a
+ * worse route to the same goal, and a hidden action is indistinguishable from
+ * one that does not exist. The reason is derived from the declared predicate and
+ * the stored values — deterministic, and identical on every stack.
+ *
+ * Field VALUES are never echoed here beyond the record's label. This level
+ * answers "what can I do to this record", and the data API answers "what is in
+ * it"; keeping that line means describe cannot become a second, unguarded read
+ * path around the scope model.
+ */
 export function buildRecord(
   deps: DescribeDeps,
   module: string,

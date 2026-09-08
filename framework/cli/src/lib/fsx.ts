@@ -86,6 +86,17 @@ function syncDir(dir: string): void {
  * overwrites existing entries, and copies symlinks as symlinks.
  */
 export function copyTree(src: string, dest: string): void {
+  // cpSync refuses to copy a directory into itself (ERR_FS_CP_EINVAL). Dropping
+  // that check does not merely lose an error message: the walk would copy the
+  // destination it is creating, on and on, until the disk or the path limit
+  // stops it. `agent-app <app> skills --install ./skills/somewhere` is enough to
+  // reach it, so the guard is restored here rather than left to the caller.
+  const s = resolve(src);
+  const d = resolve(dest);
+  const rel = relative(s, d);
+  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+    throw new Error(`Cannot copy ${s} into itself (${d})`);
+  }
   const st = lstatSync(src);
   if (st.isSymbolicLink()) {
     mkdirSync(dirname(dest), { recursive: true });

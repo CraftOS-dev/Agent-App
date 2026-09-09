@@ -19,11 +19,14 @@ re-verify.
 - **Verify against the spec, not the code.** Take `reference/requirements.md` —
   its Features and every unstruck `## Changes` entry — as your checklist. A
   `~~struck-through~~` entry is history, not a requirement.
-- **Data safety.** After a code change you verify the dev copy's fresh database,
-  never real user data. Verification does not run after data-only changes.
+- **Data safety.** Verify against a dev instance's fresh database where the stack
+  provides one; no shipped toolkit does yet (`agent-app dev` prepares a database
+  and starts no server), so in practice you verify the served app after a promote
+  whose mandatory pre-promote backup is the way back. Never create test records in
+  an app holding real user data. Verification does not run after data-only changes.
 - Confirm the app is up first: poll the manifest health endpoint; confirm identity
-  (`a2app <dir> identity`) returns the intended `app.id` (and `env: "dev"` after a
-  code change).
+  (`a2app <dir> identity`) returns the intended `app.id` (and `env: "dev"` where the
+  stack marks one).
 
 ## The checklist
 

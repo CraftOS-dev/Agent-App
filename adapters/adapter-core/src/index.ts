@@ -18,6 +18,12 @@ export { MemoryBinding } from "./memory.js";
 export type { MemoryBindingOptions, MemoryEntitySpec, OperationRunner } from "./memory.js";
 export { a2appMiddleware, createA2AppServer, toA2AppRequest } from "./http.js";
 export type { NextHandler } from "./http.js";
+/** Serving the human View: cache-correct static files (ETag / Last-Modified /
+ *  Cache-Control, conditional requests honoured) and the `appVersion` marker over
+ *  the bytes served, which is what lets an already-open tab notice a UI change
+ *  `schemaVersion` is blind to. */
+export { createStaticView, fingerprintPaths, DEFAULT_MIME } from "./static.js";
+export type { StaticView, StaticViewOptions } from "./static.js";
 export { InMemoryStateStore, FileStateStore, newCredentialId } from "./store.js";
 export type { StateStore, StoredTask, StoredEvent } from "./store.js";
 export { RateLimiter, DEFAULT_RATE_LIMITS } from "./rate.js";

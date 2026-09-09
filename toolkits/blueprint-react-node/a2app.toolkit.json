@@ -5,15 +5,17 @@
   "adapterVersionFrom": "server.mjs",
   "systemPaths": [
     "manifest.json",
-    "server.mjs"
+    "server.mjs",
+    "a2app-update.js"
   ],
   "adapterPaths": [
-    "server.mjs"
+    "server.mjs",
+    "a2app-update.js"
   ],
   "gate": [
     {
       "name": "schema loads (fresh, additive)",
-      "run": "node --check server.mjs && node --input-type=module -e \"import('./a2app.schema.mjs').then(m=>{if(!m.schema||!m.schema.entities)throw new Error('a2app.schema.mjs must export { schema: { entities, operations } }');process.stdout.write('schema ok\\n')})\""
+      "run": "node --check server.mjs && node --check a2app-update.js && node --input-type=module -e \"import('./a2app.schema.mjs').then(m=>{if(!m.schema||!m.schema.entities)throw new Error('a2app.schema.mjs must export { schema: { entities, operations } }');process.stdout.write('schema ok\\n')})\""
     },
     {
       "name": "operations resolve (every declared op has a runner)",

@@ -34,3 +34,6 @@ list below, a small count in the footer.
 ## Quality of life
 - Keyboard submit on the add form.
 - SPA fallback so deep links still load.
+- A tab left open when the app is updated says so, and offers a reload. It never
+  reloads on its own: this is a data-entry app, and discarding what someone has
+  typed is worse than showing them a slightly old screen.

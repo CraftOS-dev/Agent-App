@@ -21,6 +21,20 @@
  * Failing to open is therefore NOT a failure exit — the app is running and the
  * URL is valid, which is the thing the caller asked about. Only an app that is
  * not actually answering is an error (exit 3, the unreachable contract).
+ *
+ * WHAT THIS COMMAND CANNOT DO: reload a tab the user already has open.
+ *
+ * It hands a URL to the operating system and the browser decides what that
+ * means — a new tab for some, focus on an existing tab for others. Neither is a
+ * reload, and no flag here can make it one: a loaded page can only be replaced
+ * by code running inside it, which is not reachable from a child process. So
+ * `open` deliberately does not pretend to. After a promote, the tab that was
+ * already open is reached by the View's own update watcher
+ * (`/_a2app/update.js`), which notices `appVersion` move and offers the person a
+ * reload — offers, because these are data-entry apps and a reload nobody asked
+ * for destroys whatever is half-typed. A NEW tab is a separate matter and is
+ * already correct: static assets carry ETag/Last-Modified with
+ * `Cache-Control: no-cache`, so it revalidates and gets the current code.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -186,8 +200,13 @@ export async function run(args: string[], app: string): Promise<number> {
 
   // The URL is reported on every path, opened or not — it is the part that is
   // always useful, and the only part some harnesses can act on.
-  if (outcome.opened) log.ok(`opened ${url} (${outcome.via})`);
-  else if (outcome.via === "print-only") log.info(`open this in your browser: ${url}`);
+  if (outcome.opened) {
+    log.ok(`opened ${url} (${outcome.via})`);
+    // Whether this landed on a new tab or focused an old one is the browser's
+    // call, and a focused old tab is still running old code. Say so rather than
+    // let "opened" be read as "showing the current build".
+    log.info("if this focused a tab you already had open, it will offer a reload rather than take one");
+  } else if (outcome.via === "print-only") log.info(`open this in your browser: ${url}`);
   else log.warn(`could not open a browser (${outcome.reason ?? "unknown"}) — open this yourself: ${url}`);
 
   log.raw(

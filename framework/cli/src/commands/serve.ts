@@ -206,6 +206,12 @@ export async function run(args: string[], app: string): Promise<number> {
         "\n",
     );
     log.ok(`serving "${project.manifest.name}" on ${project.baseUrl} (pid ${pid})`);
+    // A relaunch after a code change is the moment a tab opened earlier goes
+    // stale, and the person looking at it has no way to know. The View's update
+    // watcher tells them; say so here so the loop is visible from the terminal
+    // too, and so `--open` is not mistaken for "everyone now has the new build".
+    if (!wantOpen) log.info(`show it to someone: agent-app ${app} open`);
+    log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");
     const shown = await show();
     log.raw(
       JSON.stringify(

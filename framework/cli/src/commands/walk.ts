@@ -40,12 +40,17 @@ export async function run(args: string[], app: string): Promise<number> {
   const segments = positionals(args);
   const wantAll = args.includes("--all");
 
-  // Discovery is cached against the app's own schemaVersion, so a repeated walk
+  // Discovery is cached against the app's own version markers, so a repeated walk
   // costs one identity probe rather than a fresh descent. Without this the
-  // ≤2 round-trip write budget would be spent navigating.
+  // ≤2 round-trip write budget would be spent navigating. Both markers key the
+  // cache: schemaVersion does not move for everything describe publishes (an
+  // operation's description, for one), so it alone would keep serving text the
+  // app has already changed.
   const identity = await client.identity();
   const cache =
-    identity === null ? null : DescribeCache.open(project.dir, identity.app.id, identity.schemaVersion);
+    identity === null
+      ? null
+      : DescribeCache.open(project.dir, identity.app.id, identity.schemaVersion, identity.appVersion);
 
   // Walk down as far as the path goes, one level per segment. Each level is
   // fetched (or read from cache) before the next, because only the level knows
@@ -91,11 +96,11 @@ export async function run(args: string[], app: string): Promise<number> {
 type Client = Awaited<ReturnType<typeof clientFor>>;
 
 /**
- * Levels that may be cached against `schemaVersion`.
+ * Levels that may be cached against the app's version markers.
  *
- * ONLY these three. Root, module, and entity are derived from the app's model,
- * so `schemaVersion` is a complete cache key for them: when the model changes the
- * key changes, and until it does they cannot go stale.
+ * ONLY these three. Root, module, and entity are derived from the app's code and
+ * model, so the key is complete for them: when either changes the key changes,
+ * and until it does they cannot go stale.
  *
  * A record or relation level is derived from DATA. Its operations are marked
  * available or blocked from that record's current values, which change on every

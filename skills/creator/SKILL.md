@@ -160,12 +160,13 @@ events. (Manifest format and fire API: per your stack.)
 1. **`agent-app <dir> validate`** runs the gate (app-part consistency → build →
    migrations-on-a-fresh-db → operations resolve → ownership canon → describe
    budget). On errors: read ALL of them, fix ALL of them, run it again. Then
-   `agent-app <dir> dev` boots your code in a DEV copy on a hidden port with a
-   fresh post-migration DB. Test and read logs THERE; keep editing in the real
-   project dir. Never start servers by hand.
+   `agent-app <dir> dev` proves your code loads and builds a fresh post-migration
+   DB in an isolated dev directory — it starts NO server and there is no dev URL,
+   so run the app with `agent-app <dir> serve` and read logs from
+   `.a2app/serve.log`. Never start servers by hand.
    A step the gate reports **UNCHECKED** did not pass — it could not run. The
-   budget step needs the app running, so re-run `validate` after `serve`/`dev`
-   rather than treating the warning as a pass.
+   budget step needs the app running, so re-run `validate` after `serve` rather
+   than treating the warning as a pass.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
    - `a2app <dir>` → does the root show the modules you declared, with the entity

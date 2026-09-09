@@ -302,6 +302,11 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       serverTzOffsetMinutes: -d.getTimezoneOffset(),
     };
     if (config.env) doc.env = config.env;
+    // Published only when the app actually has one: a field that is sometimes an
+    // empty string would make a client's "did it change?" comparison lie the
+    // first time the app could not compute it.
+    const appVersion = typeof config.appVersion === "function" ? config.appVersion() : config.appVersion;
+    if (typeof appVersion === "string" && appVersion !== "") doc.appVersion = appVersion;
     return doc;
   }
 

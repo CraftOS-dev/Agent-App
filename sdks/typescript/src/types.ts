@@ -23,6 +23,17 @@ export interface Identity {
   serverTzOffsetMinutes: number;
   /** non-normative extension used by safe-evolve: "dev" | "live" */
   env?: string;
+  /**
+   * Non-normative extension: an opaque marker of the app's own CODE version.
+   *
+   * `schemaVersion` fingerprints the model, so it is blind to anything that does
+   * not change entities or operations — a View edit, reworded copy, an
+   * operation's description. `appVersion` moves for those. A client that must
+   * know whether the app it loaded has been superseded compares BOTH; one that
+   * only caches describe still keys on `schemaVersion` alone. Absent on apps
+   * that do not publish it.
+   */
+  appVersion?: string;
 }
 
 /** A field as `describe` reports it — protocol types, not the backend's. */

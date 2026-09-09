@@ -246,6 +246,26 @@ export interface A2AppConfig {
   credentialHint?: string;
   /** dev|live marker for identity.env (safe-evolve, non-normative). */
   env?: string;
+  /**
+   * The app's own CODE version, published as identity's `appVersion`.
+   *
+   * `schemaVersion` fingerprints the MODEL and nothing else, on purpose: it is
+   * the key clients cache describe against, so it must move for exactly the
+   * changes that invalidate describe. That makes it blind to everything else the
+   * app is built from — a new View control, a CSS change, reworded copy, an
+   * operation's description — and therefore useless as an "is my code stale?"
+   * signal for a browser tab that loaded the View minutes ago.
+   *
+   * `appVersion` is that second marker, and it is deliberately NOT part of the
+   * describe cache key at the protocol level: the two answer different questions
+   * and collapsing them would make every asset edit look like a model change.
+   *
+   * A function is re-evaluated per request, so a value derived from files on
+   * disk stays truthful while the process runs. Return null/undefined (or omit
+   * the field) and identity simply carries no `appVersion` — it is an optional
+   * extension, and no client may require it.
+   */
+  appVersion?: string | (() => string | null | undefined);
   /** append-only audit sink. Defaults to an in-memory ring. */
   audit?: (entry: AuditEntry) => void;
 }

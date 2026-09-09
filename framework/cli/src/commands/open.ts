@@ -38,9 +38,9 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { loadProject } from "../lib/project.js";
+import { loadProject, readAgentToken } from "../lib/project.js";
 import { hasFlag } from "../lib/args.js";
-import { identifyApp } from "../lib/net.js";
+import { countViewers, identifyApp } from "../lib/net.js";
 import { log } from "../lib/log.js";
 
 /** How the URL was surfaced. `none` still printed it. */
@@ -194,6 +194,29 @@ export async function run(args: string[], app: string): Promise<number> {
     );
     log.raw(JSON.stringify({ ok: false, url, error: "port held by another app", servingId }, null, 2));
     return 1;
+  }
+
+  // `--if-needed`: open only when nobody already has the app on screen.
+  //
+  // This is the "if open, refresh — if not, open" half that this command could
+  // not previously express. The refresh half belongs to the page (its update
+  // watcher reloads itself, or re-reads on a data change); this half is about
+  // not stacking up duplicate tabs on the way. A browser given a URL it already
+  // has open does NOT reliably focus that tab — Chrome opens another — so
+  // "open every time" is not a harmless no-op.
+  //
+  // Only ever suppresses on a POSITIVE answer. An unknown count (older adapter,
+  // no credential) opens, because a possibly-redundant tab is a smaller failure
+  // than an update that reaches nobody.
+  if (hasFlag(args, "if-needed")) {
+    const viewers = await countViewers(port, readAgentToken(project.dir));
+    if (viewers !== null && viewers > 0) {
+      log.ok(`${viewers} open tab${viewers === 1 ? "" : "s"} on ${url} — leaving them to refresh themselves`);
+      log.raw(
+        JSON.stringify({ ok: true, id: project.manifest.id, name: project.manifest.name, url, opened: false, via: "already-open", viewers }, null, 2),
+      );
+      return 0;
+    }
   }
 
   const outcome = await openUrl(url, hasFlag(args, "print-only"));

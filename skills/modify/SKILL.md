@@ -103,11 +103,20 @@ decide which of these you are:
   declared (`AGENT_APP_OPEN_CMD`), else the OS browser.
 
 `open` hands a URL to the browser; it CANNOT reload a tab the user already had
-open, and no flag makes it. A loaded page can only be replaced from inside itself.
-That is what the View's update watcher (`/_a2app/update.js` — see the blueprint's
-README) is for: it notices identity's `appVersion` move and offers the person a
-reload. It never takes one, because reloading a half-filled form destroys work.
+open. A loaded page can only be replaced from inside itself, which is what the
+View's update watcher (`/_a2app/update.js` — see the blueprint's README) is for.
+After a code change it reloads the tab itself when the page holds no unsaved
+input, and falls back to offering a reload when it does — a half-filled form is
+never discarded without asking. **Use `agent-app <dir> open --if-needed`** after a
+promote: it opens a browser only when nobody already has the app on screen, so a
+tab that is about to reload itself does not also get a duplicate opened over it.
 Keep that script tag when you rewrite a View.
+
+A DATA change is different and must not reload: the watcher announces it as a
+`a2app:datachange` event on `window` (identity's `dataVersion` moved) and the
+View re-reads. If you rewrite a View, keep a listener for it, and guard the
+re-render the same way — re-rendering over a form someone is filling in loses
+their work exactly as a reload would.
 
 Either way, give the user the URL in your reply. `"opened": false` in the result
 is NOT a failure — it means the environment has no browser to spawn (SSH, CI,

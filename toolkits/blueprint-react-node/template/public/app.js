@@ -6,6 +6,13 @@
  * token. A human edits here; an agent operates the same data through A2App —
  * both see each other's changes on the next read.
  */
+// The update watcher (system-owned, loaded by index.html) reports two different
+// kinds of staleness. A CODE change it handles itself, by reloading when the
+// page holds nothing unsaved. A DATA change it only announces — because only
+// this file knows how to re-read without discarding a form someone is filling
+// in. Borrow its check so both paths apply the same rule.
+import { hasUnsavedInput } from "/_a2app/update.js";
+
 const API = "/api/collections/tasks/records";
 
 const els = {
@@ -88,6 +95,16 @@ els.form.addEventListener("submit", async (e) => {
   await api(API, { method: "POST", body: JSON.stringify({ title, status: els.status.value }) });
   els.title.value = "";
   await load();
+});
+
+// Someone else changed the data — an agent through A2App, or another tab. Re-read
+// and re-render: the code we are running is current, so a reload would cost
+// whatever is half-typed to fix a problem that was never about this page.
+window.addEventListener("a2app:datachange", () => {
+  if (hasUnsavedInput()) return; // the next write re-reads anyway
+  load().catch((e) => {
+    els.foot.textContent = `Could not refresh: ${e.message}`;
+  });
 });
 
 load().catch((e) => {

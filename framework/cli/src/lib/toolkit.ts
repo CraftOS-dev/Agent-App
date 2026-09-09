@@ -59,11 +59,22 @@ function toolkitSearchRoots(): string[] {
   const roots = [process.cwd(), join(process.cwd(), "toolkits")];
   const envRoot = process.env["A2APP_TOOLKITS_DIR"];
   if (envRoot) roots.unshift(envRoot);
+  // In-repo dev BEFORE the bundle: dist/lib -> package -> framework -> repo root.
+  //
+  // Order matters, and having it the other way round was a trap. The bundled
+  // copy is a build artifact refreshed only at pack time, so in a checkout it is
+  // whatever the last `npm pack` left behind. Searched first, it silently won
+  // over the source: you edit `toolkits/<id>/template`, scaffold, and get an app
+  // built from the STALE blueprint — with no error, and nothing in the output
+  // naming which copy was used. Every symptom then looks like your edit having
+  // no effect.
+  //
+  // A published CLI has no repo above it, so this path simply does not exist
+  // there and the bundle still wins.
+  roots.push(resolve(CLI_DIR, "..", "..", "..", "..", "toolkits"));
   // Bundled with a published CLI: dist/lib -> package root -> toolkits/
   // (blueprints are copied here by scripts/bundle-blueprints.mjs at pack time).
   roots.push(resolve(CLI_DIR, "..", "..", "toolkits"));
-  // In-repo dev: dist/lib -> package -> framework -> repo root -> toolkits
-  roots.push(resolve(CLI_DIR, "..", "..", "..", "..", "toolkits"));
   return roots;
 }
 

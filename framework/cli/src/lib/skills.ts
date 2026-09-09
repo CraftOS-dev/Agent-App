@@ -33,11 +33,15 @@ function skillsSearchRoots(): string[] {
   const roots: string[] = [];
   const envRoot = process.env["A2APP_SKILLS_DIR"];
   if (envRoot && envRoot.trim() !== "") roots.push(resolve(envRoot));
+  // In-repo dev BEFORE the bundle: dist/lib -> package -> framework -> repo root.
+  // Same ordering rule as the toolkits — the bundled copy is a pack-time
+  // artifact, so searching it first meant `skills --install` shipped a stale
+  // skill while the edited source sat there ignored. A published CLI has no repo
+  // above it, so the bundle still wins there.
+  roots.push(resolve(LIB_DIR, "..", "..", "..", "..", "skills"));
   // Bundled with a published CLI: dist/lib -> package root -> skills/
   // (copied here by scripts/bundle-skills.mjs at pack time).
   roots.push(resolve(LIB_DIR, "..", "..", "skills"));
-  // In-repo dev: dist/lib -> package -> framework -> repo root -> skills/
-  roots.push(resolve(LIB_DIR, "..", "..", "..", "..", "skills"));
   return roots;
 }
 

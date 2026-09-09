@@ -56,7 +56,7 @@ const COMMANDS: Record<string, CommandMeta> = {
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
   serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", surface: "agent-app", scope: "app" },
   stop: { summary: "Stop an app launched with `agent-app <app> serve`", surface: "agent-app", scope: "app" },
-  open: { summary: "Open a running app in a browser (harness opener, else the OS browser; always prints the URL)", surface: "agent-app", scope: "app" },
+  open: { summary: "Open a running app in a browser (--if-needed opens only when no tab is already on it)", surface: "agent-app", scope: "app", args: "[--if-needed] [--print-only]" },
   dev: { summary: "Prepare a fresh, migration-replayed dev database (no server is started)", surface: "agent-app", scope: "app" },
   promote: { summary: "Pre-promote backup, then apply the dev copy's migrations to live", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },
@@ -136,6 +136,26 @@ function usage(surface: Surface): void {
 }
 
 /**
+ * Whether a verb's arguments are asking for that verb's usage.
+ *
+ * This exists because the alternative was destructive. `--help` used to fall
+ * through to the command as an ordinary argument, and commands ignore arguments
+ * they do not recognise — so `agent-app <dir> scaffold --help` did not print
+ * help, it SCAFFOLDED AN APP. A flag that reads as a question must never be
+ * answered with a side effect.
+ */
+function wantsHelp(args: string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
+}
+
+/** One verb's usage: how it is written, and what it does. */
+function verbUsage(surface: Surface, cmd: string, meta: CommandMeta): void {
+  log.raw(`${shape(surface, cmd, meta)}\n`);
+  log.raw(`  ${meta.summary}\n`);
+  log.raw(`  All commands: ${surface} help`);
+}
+
+/**
  * Parse `<binary> <app> <verb> [args]` (spec 5.1).
  *
  * The first positional is the app, unconditionally — it is never inspected to
@@ -158,6 +178,10 @@ export async function main(surface: Surface): Promise<number> {
   const asRegistry = COMMANDS[first];
   if (asRegistry?.scope === "registry") {
     if (asRegistry.surface !== surface) return wrongBinary(surface, first, asRegistry, rest);
+    if (wantsHelp(rest)) {
+      verbUsage(surface, first, asRegistry);
+      return 0;
+    }
     const mod = (await import(`./commands/${first}.js`)) as { run: (args: string[]) => Promise<number> };
     return mod.run(rest);
   }
@@ -211,6 +235,15 @@ export async function main(surface: Surface): Promise<number> {
   // Right command, wrong binary: name the one that has it. Guessing on the
   // caller's behalf would hide the split instead of teaching it.
   if (meta.surface !== surface) return wrongBinary(surface, name, meta, rest.slice(1), app);
+
+  // `data` is exempt: its flags are record FIELDS, and `help` is a legal field
+  // name, so intercepting there would make a column unwritable from the CLI.
+  // Every other verb takes a closed set of flags, where `--help` can only be a
+  // question.
+  if (name !== "data" && wantsHelp(rest.slice(1))) {
+    verbUsage(surface, name, meta);
+    return 0;
+  }
 
   const mod = (await import(`./commands/${name}.js`)) as {
     run: (args: string[], app: string) => Promise<number>;

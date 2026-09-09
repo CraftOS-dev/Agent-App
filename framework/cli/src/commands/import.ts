@@ -23,6 +23,7 @@ import { writeSystemHashes } from "../lib/canon.js";
 import { flag, hasFlag } from "../lib/args.js";
 import { mintAgentToken, stripCredentials } from "../lib/credential.js";
 import { writeFileAtomic } from "../lib/home.js";
+import { mergeManifest } from "../lib/manifest.js";
 import { loadProject, UsageError } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
 import { canonPaths } from "../lib/canon.js";
@@ -97,10 +98,20 @@ export async function run(args: string[], dir: string): Promise<number> {
       // Replace system/adapter code with the trusted toolkit's, then re-canonize
       // so the canon reflects known-good code — not the imported bytes.
       const written = vendorPaths(tk, appDir, tk.manifest.systemPaths);
-      manifest.adapterVersion = adapterVersionOf(tk);
-      writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      // `manifest.json` is one of those system paths, so the vendor above just
+      // laid down the toolkit's. Merge: identity and modules stay the imported
+      // app's, while `pipeline` — whose build/start strings this CLI executes —
+      // comes from the trusted toolkit. Keeping the imported pipeline here would
+      // have left the one part of an untrusted app that runs shell commands in
+      // place, which is precisely what re-vendoring is meant to replace.
+      const template = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+      const merged = mergeManifest(template, manifest, adapterVersionOf(tk));
+      writeFileAtomic(manifestPath, JSON.stringify(merged, null, 2) + "\n");
       writeSystemHashes(appDir, tk.manifest.systemPaths);
       log.step(`re-vendored ${written.length} system file(s) from trusted toolkit "${tk.manifest.id}"`);
+      if (JSON.stringify(manifest.pipeline) !== JSON.stringify(merged.pipeline)) {
+        log.step("replaced the imported build/start pipeline with the trusted toolkit's");
+      }
     } else {
       // No toolkit to re-vendor from: we cannot replace imported system code.
       // Record the canon from the existing declared system paths so drift is at

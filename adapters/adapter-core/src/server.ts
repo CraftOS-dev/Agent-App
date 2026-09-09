@@ -98,6 +98,85 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   // Seed grants (the platform issues the default local grant at launch).
   for (const g of config.credentials ?? []) store.putGrant(g);
 
+  /* ------------------------------------------- data version + viewers */
+
+  /**
+   * `dataVersion` — the marker that moves when RECORDS change.
+   *
+   * A loaded page has two different reasons to be wrong, and until now identity
+   * published a marker for only one of them. `appVersion` fingerprints the View
+   * bytes and `schemaVersion` the model, so BOTH are byte-identical after an
+   * agent creates a record — which is exactly when every open tab is showing a
+   * list that no longer matches the database. A watcher polling those two can
+   * not distinguish "nothing happened" from "everything changed", so it reported
+   * nothing.
+   *
+   * Kept deliberately separate from the other two rather than folded in, because
+   * the right response differs: a code change means the page must be REPLACED,
+   * while a data change means it must RE-READ. Collapsing them would force a
+   * reload — and the loss of whatever is half-typed — for the common case of
+   * someone else adding a row.
+   *
+   * The boot component makes a restart count as a change: a server that came
+   * back up may have been migrated or restored under a page that is still
+   * holding rows from before, and re-reading is the cheap, always-correct answer.
+   */
+  const bootMark = now().getTime().toString(36);
+  let dataWrites = 0;
+  const dataVersion = (): string => `${bootMark}.${dataWrites}`;
+  const markDataChanged = (): void => {
+    dataWrites++;
+  };
+
+  /**
+   * Connected viewers, by the opaque per-tab id their update watcher sends.
+   *
+   * This exists to answer one local question — "is anyone actually looking at
+   * this app, or should the CLI open a browser?" — without which every update
+   * either opens a duplicate tab or reaches nobody.
+   *
+   * It records a COUNT and never identities: in a multi-user deployment "who is
+   * looking at this right now" is a different, more sensitive question than "is
+   * anyone", and only the second one is needed here. The ids are opaque, held in
+   * memory only, and never published.
+   */
+  const VIEWER_TTL_MS = 60_000;
+  const VIEWER_CAP = 1_000;
+  const viewers = new Map<string, number>();
+
+  /** Record a heartbeat, if this request carried one. The watcher rides its
+   *  existing identity poll rather than adding a request of its own. */
+  function noteViewer(req: A2AppRequest): void {
+    // Header on the ordinary poll; query string for the goodbye, because that is
+    // sent with `navigator.sendBeacon` — the only request a closing page can
+    // rely on delivering, and one that cannot carry custom headers.
+    const id = req.headers["x-a2app-viewer"] ?? req.query["viewer"];
+    if (typeof id !== "string" || id === "" || id.length > 64) return;
+    // A closing tab says goodbye on its way out, so the count drops at once
+    // rather than at the end of the TTL. Without it, closing the last tab leaves
+    // up to a minute in which `open --if-needed` believes someone is still
+    // watching and silently declines to open anything.
+    if (req.headers["x-a2app-viewer-leaving"] !== undefined || req.query["leaving"] !== undefined) {
+      viewers.delete(id);
+      return;
+    }
+    viewers.set(id, now().getTime());
+    // A page that reloads gets a fresh id, so the map would otherwise grow with
+    // every reload of every tab until the process restarts.
+    if (viewers.size > VIEWER_CAP) countViewers();
+  }
+
+  /** Live viewers, pruning the expired as it goes. */
+  function countViewers(): number {
+    const cutoff = now().getTime() - VIEWER_TTL_MS;
+    let live = 0;
+    for (const [id, seen] of viewers) {
+      if (seen < cutoff) viewers.delete(id);
+      else live++;
+    }
+    return live;
+  }
+
   // Fail fast on an inconsistent app part. A model whose entities or operations
   // name a module that was never declared cannot be walked — the entity would
   // sit under no screen and the operation would be unreachable — so refusing at
@@ -298,6 +377,9 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       adapterVersion: binding.adapterVersion,
       app: { id: binding.appId, name: binding.appName },
       schemaVersion: schemaVersion(),
+      // Moves on every record write. A View watcher compares this separately
+      // from appVersion/schemaVersion so it can re-read data without reloading.
+      dataVersion: dataVersion(),
       serverNow: d.toISOString(),
       serverTzOffsetMinutes: -d.getTimezoneOffset(),
     };
@@ -479,6 +561,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       const okDel = await binding.deleteRecord(entity, recordId);
       writeAudit(ctx, `data:${entity}`, recordId, okDel ? "ok" : "rejected");
       if (!okDel) return err(404, "record_not_found", `No ${entity} record "${recordId}".`);
+      markDataChanged();
       return ok({ a2app: true, ok: true, deleted: recordId });
     }
 
@@ -546,6 +629,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
     if (idemActive) store.idempotencyPut(idemScope, idemKey!, stored.id);
     writeAudit(ctx, `data:${entity}`, stored.id, "ok");
+    markDataChanged();
     return ok(stored, 200);
   }
 
@@ -632,6 +716,11 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     try {
       const result = await binding.runOperation(name, args, ctx);
       if (idemKey) store.idempotencyPut(idemScope, idemKey, name);
+      // A declared read-only operation promises no side effects; everything else
+      // is assumed to have touched data, because the adapter cannot see into the
+      // binding to check. Erring towards "changed" costs an open tab one refetch;
+      // erring the other way leaves it silently stale, which is the bug.
+      if (decl.readOnly !== true) markDataChanged();
       writeAudit(ctx, `op:${name}`, null, "ok");
       return ok({ a2app: true, ok: true, operation: name, result });
     } catch (e) {
@@ -797,7 +886,19 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
     // Identity (unauthenticated).
     if (path === "/.well-known/a2app.json" || path === "/api/_a2app") {
+      // The update watcher polls this every few seconds anyway, so its "I am
+      // still here" rides along as a header. Adding a second endpoint would have
+      // doubled every open tab's request rate to learn the same fact.
+      noteViewer(req);
       return ok(identityDoc());
+    }
+    // How many people have this app open. A COUNT only, and behind a credential:
+    // unauthenticated, "how many people are using this right now" is a fact a
+    // deployed app should not hand to anyone who asks.
+    if (path === "/api/_a2app/viewers") {
+      const authz = authorize(req, { scope: null, isWrite: false });
+      if ("reply" in authz) return authz.reply;
+      return ok({ a2app: true, viewers: countViewers(), ttlMs: VIEWER_TTL_MS });
     }
     // Describe is navigational: the bare path is the root level, and each extra
     // segment moves one level inward (A2APP-SPEC 3). Segments are decoded here

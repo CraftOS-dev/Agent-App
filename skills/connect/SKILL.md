@@ -14,11 +14,10 @@ app is local or remote. What differs is getting in, and the fact that a connecte
 app can be **operated but never modified**: an Agent App is only modifiable on its
 host.
 
-> **Status: reserved.** Full connect needs deployed mode (TLS, real origins,
-> grant-based access), which is not yet built. Concretely, today the CLI resolves
-> an app through a local `manifest.json` and talks to `127.0.0.1` — it cannot be
-> pointed at a remote base URL. The flow, the scope grammar and the grant model
-> are fixed here now so that connecting later breaks no wire format. Until then a
+> **Status: reserved.** Full connect needs deployed mode — TLS, real origins,
+> grant-based access — which is not yet built, and today's tooling reaches only an
+> app running on this machine. The flow, the scope grammar and the grant model are
+> fixed here now so that connecting later breaks no wire format. Until then a
 > remote app is reachable only by LAN URL or tunnel, gated by its own account auth.
 
 ## Procedure
@@ -42,26 +41,43 @@ talking to before it says anything. Confirm all three:
 
 - **`a2app: true`** — the marker. Absent means this is not an Agent App, whatever
   else the response looks like.
-- **`protocol`** — you recognise the **major** version. If you do not, you may
-  read nothing and write nothing: an unknown major means the guarantees below are
-  not the guarantees this app is offering.
+- **`protocol`** — you recognise the exact version. While the protocol is `0.x`
+  each minor is its own contract: `0.1` and `0.2` are different protocols, not
+  compatible ones, so match against the versions you actually know — today that is
+  `0.1` alone. Majors become the unit of compatibility once a `1.0` exists. A
+  version you do not recognise means you read nothing and write nothing: the
+  guarantees below are not the guarantees this app is offering.
 - **`app.id`** — matches the app you were told to connect to. A URL that resolves
   to a different app is the interesting failure here, not a harmless one; stop and
   report it rather than operating whatever answered.
 
-`schemaVersion` is worth keeping: it changes when the app's model changes, and is
-what tells you a cached describe is stale.
+  Given only a link or a URL you have no id to compare against, and the check
+  quietly has nothing to run on. Pin instead: record the `app.id` that answers on
+  first contact, tell the user which app that was, and treat it as the expected id
+  from then on. An id that changes later is this gate failing, not a detail.
+
+The same document carries the validators that say when something you cached has
+gone stale: `schemaVersion` moves when the app's model changes, `dataVersion` when
+any record is written, and `appVersion` — optional, so never require it — when the
+app's own code changes. A cached describe is stale on `schemaVersion`; cached
+records are stale on `dataVersion`.
 
 ### 39. Acquire an owner-issued credential
 
-A call needing a credential answers `401` with code `agent_token_required` and a
-`how` field describing the way in. That field explains **how** access is obtained;
-it is not access. Obtaining it is the **owner's act** — the owner hands you a
-credential, or mints one with chosen scopes.
+A call needing a credential answers `401` with code `agent_token_required`, and
+usually a `how` field describing the way in. That field explains **how** access is
+obtained; it is not access. Obtaining it is the **owner's act** — the owner hands
+you a credential, or mints one with chosen scopes.
 
 **Never self-provision.** Do not create, guess, extend or reuse a credential you
 were not given. An agent that assigns itself access at first contact has ambient
 authority, which is the thing this step exists to prevent.
+
+Two things about `how` worth expecting. It is sometimes absent — a bare `401` is
+still a `401`, and the answer is to ask the owner, not to look harder. And it is
+written for whoever runs the app: a hint that describes reading a file on the
+app's own host is addressed to its owner, not to you. A path on someone else's
+machine is not an instruction you can follow.
 
 The owner mints scopes from this grammar:
 
@@ -84,17 +100,28 @@ Returns `credentialId`, `principal`, `agentName` and `scopes`. Read it **before*
 planning work, not after a refusal — a plan built on scopes you do not hold wastes
 the user's turn and produces a confident wrong answer.
 
+`scopes` arrives expanded. A `*` grant is rendered as the concrete scopes the app
+declares *at the moment you asked*, so you never see `*` itself, and an entity
+added afterwards sits inside your grant without appearing in the list you read.
+Re-read `whoami` when `schemaVersion` moves.
+
 Two rules bound what you can do:
 
-- **Your ceiling is the intersection.** Effective permission is your granted scopes
-  ∩ the principal's own. A scope you hold over a principal who lacks it grants
-  nothing. You can never exceed the user you act for.
 - **The grant is a snapshot.** It is individually revocable and takes effect on the
   next request. Do not assume continued access, and do not cache a grant across a
   long task without re-checking.
+- **Your ceiling is the intersection** — *deployed mode*. Effective permission is
+  meant to be your granted scopes ∩ the principal's own, so an agent can never
+  exceed the user it acts for. Deployed mode is where that is enforced; today a
+  grant is checked on its own scopes alone. Plan as though the ceiling holds, and
+  do not rely on it to stop a call that should not be made.
 
-If `whoami` itself answers `401`, the credential is absent or wrong. That is step
-39 unfinished — return there rather than retrying.
+`whoami` needs a credential of its own, so a `401` here means yours is absent or
+wrong. That is step 39 unfinished — return there rather than retrying. It does not
+by itself mean nothing is reachable: on a single-user app an uncredentialled read
+may still be permitted. What each level of `describe` reports as **`access`**
+(`full`, `read-only` or `none`) is the authority on what you may actually read,
+write and run; `whoami` tells you which credential you are.
 
 ### 41. Enter Operate
 
@@ -105,8 +132,24 @@ From here, follow the **operator** skill unchanged:
 - run permitted operations — approval still required for destructive ones
 - `context`, `tasks`, `events` — the app→agent plane
 
-Every call carries your agent credential. On a multi-user app an operation also
-carries the acting user's own auth token.
+Every call carries your agent credential in the **`X-A2App-Token`** header. On a
+multi-user app an operation also carries the acting user's own auth token, as
+**`Authorization`**. That second token is the user's, obtained the way that app
+authenticates its people — it is given to you or the user supplies it. Do not
+assemble it from credentials you were handed for something else.
+
+### Refusals, and the gate each returns you to
+
+| Status | `code` | Meaning | Return to |
+|---|---|---|---|
+| `401` | `agent_token_required` | no credential, or one this app does not know | 39 |
+| `403` | `insufficient_scope` | the credential is valid, this scope is not held — `required` names it | 39, to ask the owner for that scope |
+| `403` | `forbidden_origin` | the request carried a browser origin the app does not accept | not yours to route around |
+| `403` | `forbidden_host` | the app answers only on its own host | 37 — you have the wrong address |
+
+Telling these apart is what keeps a retry from being aimed at the wrong gate: a
+missing scope is a conversation with the owner, a missing credential is step 39,
+and a wrong host is a wrong app.
 
 ## What connect is not
 
@@ -117,14 +160,15 @@ until deployed mode.**
 Spelled out, because each of these is a real temptation with a real reason behind
 the refusal:
 
-- **No code modification.** A connected app is not yours to change. `scaffold`,
-  `dev`, `promote`, `toolkit-sync` and `adapter-sync` all act on a local checkout
-  and have no meaning here.
+- **No code modification.** A connected app is not yours to change. Its source is
+  not here, and nothing that edits, builds or configures an app has any meaning
+  against one you reached over a URL.
+- **No lifecycle.** Promoting a version, backing up, restoring — anything that
+  decides which build is live — belongs to the host.
 - **No import.** Importing is how a codebase becomes *your* Agent App. Connecting
   is how you use *someone else's*. If you want your own copy, ask the owner for
-  the source and use the **importer** skill on it — that is a different act, with
-  the owner's consent, not a side effect of connecting.
-- **No promote, no restore, no backup.** Lifecycle belongs to the host.
+  the source — that is a separate act, with the owner's consent, and not a side
+  effect of connecting.
 - **Revocation is the owner's.** Losing access mid-task is normal and is not an
   error to route around.
 

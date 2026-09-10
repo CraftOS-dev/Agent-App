@@ -196,8 +196,16 @@ export function isDayKeyField(field: Pick<NormalizedField, "type" | "max" | "nam
   return /^(due|day|date)$|_(date|day)$/i.test(field.name);
 }
 
+/**
+ * Field lookup keyed by name. The map has a NULL prototype because its keys come
+ * from the request body: on a plain object, `map["constructor"]` resolves up the
+ * prototype chain and returns a truthy value, so an undeclared field named after
+ * any Object.prototype member reads as declared. It then passes the unknown-field
+ * check and every check after it — the one guarantee this module exists to make,
+ * silently voided by the field's name.
+ */
 function fieldMap(fields: NormalizedField[]): Record<string, NormalizedField> {
-  const m: Record<string, NormalizedField> = {};
+  const m: Record<string, NormalizedField> = Object.create(null) as Record<string, NormalizedField>;
   for (const f of fields) m[f.name] = f;
   return m;
 }
@@ -244,11 +252,18 @@ export function validate(
   const map = fieldMap(fields);
   const writable = writableNames(fields);
   const out: Violation[] = [];
+  // Every lookup below is keyed by a name taken from the request body, so it
+  // must be an OWN-property test. `allow["constructor"]` and `map["toString"]`
+  // are truthy on any plain object, which let a field named after an
+  // Object.prototype member skip the allow check, read as declared, and pass
+  // every remaining rule — the guard silently voided by the field's name.
+  const has = (o: Record<string, unknown> | Record<string, NormalizedField>, k: string): boolean =>
+    Object.prototype.hasOwnProperty.call(o, k);
 
   for (const key of Object.keys(body)) {
-    if (allow[key]) continue;
+    if (has(allow, key) && allow[key]) continue;
 
-    const field = map[key];
+    const field = has(map, key) ? map[key] : undefined;
 
     // Unknown fields are silently dropped by most backends and absent from the
     // response, so the caller cannot tell they were ignored.

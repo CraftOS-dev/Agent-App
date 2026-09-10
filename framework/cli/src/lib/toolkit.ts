@@ -24,7 +24,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertInside, copyTree } from "./fsx.js";
+import { assertInside, assertRealInside, copyTree } from "./fsx.js";
 
 export interface GateStep {
   name: string;
@@ -132,7 +132,7 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
     // the project. assertInside throws on a `../` or absolute escape.
     const src = assertInside(templateRoot, rel, "template path");
     if (!existsSync(src)) continue;
-    const dest = assertInside(projectDir, rel, "vendored path");
+    const dest = assertRealInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
     copyTree(src, dest);
     written.push(rel);

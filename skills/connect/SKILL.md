@@ -41,6 +41,27 @@ environment, or from `credentials.json` in the framework home, keyed by origin.
 An app that could tell an agent how to authenticate to it could tell it to
 authenticate to something else.
 
+### When a cloud app refuses you and neither of you is wrong
+
+An adapter binds loopback and answers only on hostnames it is configured for.
+Deployed behind a proxy or a tunnel, the app receives its **public** hostname in
+`Host` and refuses it unless its own config names it:
+
+    → https://kanban.example.com is an Agent App, but it does not answer to that
+      hostname. It replied 403 forbidden_host … the app's adapter needs
+      "kanban.example.com" in its allowedHosts.
+
+The app is running, reachable, and genuinely an Agent App. It has not been told
+what it is called. **This is the owner's to fix, not yours** — no credential, no
+retry and no other URL will change the answer, so report it rather than hunting
+for a way in. Deploying an Agent App for others to reach means setting
+`allowedHosts` (or an `allowedOrigins` entry carrying the host) to the name it is
+served under.
+
+A `401` on the identity document means the same kind of thing. That document is
+unauthenticated by design, so a refusal there is something *in front of* the app —
+a proxy, a tunnel's own auth, a login page — and not the app's access control.
+
 ## Procedure
 
 Each step is a gate. A gate that does not pass ends the procedure — say what
@@ -214,7 +235,7 @@ assemble it from credentials you were handed for something else.
 | `401` | `agent_token_required` | no credential, or one this app does not know | 39 |
 | `403` | `insufficient_scope` | the credential is valid, this scope is not held — `required` names it | 39, to ask the owner for that scope |
 | `403` | `forbidden_origin` | the request carried a browser origin the app does not accept | not yours to route around |
-| `403` | `forbidden_host` | the app answers only on its own host | 37 — you have the wrong address |
+| `403` | `forbidden_host` | the app does not answer to the hostname you reached it by | nothing — the owner configures `allowedHosts` |
 
 Telling these apart is what keeps a retry from being aimed at the wrong gate: a
 missing scope is a conversation with the owner, a missing credential is step 39,

@@ -79,6 +79,61 @@ export function resolveTarget(app: string): Target {
 }
 
 /**
+ * Say why the identity document did not arrive.
+ *
+ * `identity()` reports absence, not cause — it returns null for a 404, a 403 and
+ * a page of HTML alike, because from the protocol's side those are the same
+ * answer. For a remote app they are not the same problem, and one of them is
+ * both common and completely opaque if reported as "not an Agent App":
+ *
+ * An adapter answers only on hosts it recognises. Deployed behind a proxy or a
+ * tunnel, the app receives its PUBLIC hostname in `Host` and refuses it with
+ * `forbidden_host` unless its own config lists that name. The app is running,
+ * it is reachable, and it is an Agent App — it has not been told what it is
+ * called. That is the owner's fix, and an agent that is told "not an Agent App"
+ * will go looking for a different URL instead of reporting it.
+ *
+ * So the failing response is read once, on the failure path only, to name the
+ * cause. Diagnosis never changes what is refused: nothing here makes a request
+ * succeed that did not.
+ */
+async function noIdentity(target: RemoteTarget): Promise<UsageError> {
+  const generic = new UsageError(
+    `Not an Agent App: ${target.origin} did not return the \`a2app: true\` marker at ` +
+      `/.well-known/a2app.json or /api/_a2app.`,
+  );
+  try {
+    const res = await fetch(`${target.baseUrl}/api/_a2app`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.ok) return generic;
+    const body = (await res.json().catch(() => null)) as { code?: string; error?: string } | null;
+    if (res.status === 403 && body?.code === "forbidden_host") {
+      return new UsageError(
+        `${target.origin} is an Agent App, but it does not answer to that hostname.\n` +
+          `It replied ${res.status} forbidden_host: an adapter serves only the hosts it is configured for, ` +
+          `and a deployed app receives its public hostname in \`Host\`.\n` +
+          `This is the owner's to fix — the app's adapter needs "${new URL(target.baseUrl).host}" in its ` +
+          `allowedHosts (or an allowedOrigins entry carrying it). Nothing you can send will change the answer.`,
+      );
+    }
+    if (res.status === 401 || res.status === 403) {
+      return new UsageError(
+        `${target.origin} refused the identity document (${res.status}${body?.code ? ` ${body.code}` : ""}).\n` +
+          `That document is unauthenticated by design, so a refusal here is the host in front of the app — ` +
+          `a proxy, a tunnel's own auth, or a login page — not the app's own access control.`,
+      );
+    }
+    return generic;
+  } catch {
+    // The probe is a courtesy. If it cannot run, the original answer stands.
+    return generic;
+  }
+}
+
+/**
  * Verify a remote app's identity before anything is said to it.
  *
  * This is the gate the connect skill calls step 38, and it runs here rather than
@@ -97,12 +152,7 @@ export function resolveTarget(app: string): Target {
  */
 async function verifyRemote(client: A2AppClient, target: RemoteTarget): Promise<void> {
   const id = await client.identity();
-  if (id === null) {
-    throw new UsageError(
-      `Not an Agent App: ${target.origin} did not return the \`a2app: true\` marker at ` +
-        `/.well-known/a2app.json or /api/_a2app.`,
-    );
-  }
+  if (id === null) throw await noIdentity(target);
   if (!A2AppClient.protocolSupported(id.protocol)) {
     throw new UsageError(
       `Unsupported protocol "${id.protocol}" at ${target.origin}. This client speaks 0.1; ` +

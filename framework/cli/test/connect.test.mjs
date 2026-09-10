@@ -254,6 +254,49 @@ await withHome(async () => {
   });
 });
 
+// The deployed-app failure: it IS an Agent App, it just has not been told what
+// hostname it is served under. Reporting that as "not an Agent App" sends the
+// agent hunting for another URL instead of telling the owner what to configure.
+await withHome(async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(403, { "content-type": "application/json" });
+    res.end(JSON.stringify({ a2app: true, ok: false, code: "forbidden_host", error: "Refused." }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const err = await thrown(() => clientForTarget(resolveTarget(base)));
+    ok("a host-refusing app is refused", err !== null);
+    ok("it is NOT reported as 'not an Agent App'", err !== null && !/Not an Agent App/.test(err.message));
+    ok("the cause is named", err !== null && /forbidden_host/.test(err.message));
+    ok("the fix is attributed to the owner", err !== null && /owner's to fix/.test(err.message));
+    ok("the setting to change is named", err !== null && /allowedHosts/.test(err.message));
+    check("nothing is pinned for an app that would not answer", pinnedAppId(originOf(base)), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// A proxy or tunnel sitting in front of the app, refusing before it is reached.
+await withHome(async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "authentication required" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const err = await thrown(() => clientForTarget(resolveTarget(base)));
+    ok("a 401 on the identity document is refused", err !== null);
+    ok(
+      "it is explained as the host in front, not the app's access control",
+      err !== null && /not the app's own access control/.test(err.message),
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 // The pin survives as a file, so a later process sees the same expectation.
 await withHome(async () => {
   await withApp(identityFor("durable"), async (base) => {

@@ -23,7 +23,8 @@
  */
 import type { DescribeLevel, DescribeModule, DescribeRecord, DescribeRoot } from "@a2app/sdk";
 import { collectFields, flag, positionals } from "../lib/args.js";
-import { clientFor, loadProject, UsageError } from "../lib/project.js";
+import { UsageError } from "../lib/project.js";
+import { cacheDirFor, clientForTarget, connect } from "../lib/target.js";
 import { DescribeCache } from "../lib/describeCache.js";
 import { log } from "../lib/log.js";
 
@@ -31,8 +32,7 @@ import { log } from "../lib/log.js";
 const WALK_FLAGS = new Set(["find", "all", "approve", "idempotency-key"]);
 
 export async function run(args: string[], app: string): Promise<number> {
-  const project = loadProject(app);
-  const client = await clientFor(project);
+  const { client, target } = await connect(app);
 
   const term = flag(args, "find");
   if (term !== undefined) return renderLevel(await fetchFind(client, term), app);
@@ -50,7 +50,7 @@ export async function run(args: string[], app: string): Promise<number> {
   const cache =
     identity === null
       ? null
-      : DescribeCache.open(project.dir, identity.app.id, identity.schemaVersion, identity.appVersion);
+      : DescribeCache.open(cacheDirFor(target), identity.app.id, identity.schemaVersion, identity.appVersion);
 
   // Walk down as far as the path goes, one level per segment. Each level is
   // fetched (or read from cache) before the next, because only the level knows
@@ -93,7 +93,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
 /* ------------------------------------------------------------------ fetch */
 
-type Client = Awaited<ReturnType<typeof clientFor>>;
+type Client = Awaited<ReturnType<typeof clientForTarget>>;
 
 /**
  * Levels that may be cached against the app's version markers.

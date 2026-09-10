@@ -14,6 +14,14 @@
     },
     "schemaVersion": { "type": "string" },
     "serverNow": { "type": "string" },
-    "serverTzOffsetMinutes": { "type": "integer" }
+    "serverTzOffsetMinutes": { "type": "integer" },
+    "appVersion": {
+      "type": "string",
+      "description": "Optional, non-normative. An opaque marker of the app's own CODE version — the View it serves and the source it is built from. schemaVersion covers the MODEL only, so a UI-only change leaves it identical; appVersion is what a loaded page compares against to learn that the code it is running has been superseded. No client may require it."
+    },
+    "env": {
+      "type": "string",
+      "description": "Optional, non-normative safe-evolve marker: \"dev\" or \"live\"."
+    }
   }
 }

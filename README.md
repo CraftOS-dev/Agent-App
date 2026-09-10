@@ -4,12 +4,6 @@
 
 An **Agent App** is a complete, stateful application — its own frontend, backend, and database — that humans use **visually** and agents use **programmatically**, primarily via CLI. The framework solves one problem: **how can AI agents build and run their own software?** It removes the human developer from the loop and replaces human review with machine gates, so the agent is the developer, the operator, and the maintainer — and the user owns the code, the data, and the features.
 
-## Problem
-
-There is no unified interface through which an agent can build and control an agentic app. MCP does not scale to full applications. There is no unified development pipeline or standard for agentic apps: every agent harness builds its software its own way, with nothing shareable across harnesses, and no protocol exists for communication between an agent and an agentic app. This repository solves that.
-
-## Solution
-
 That unified interface is the Agent App: visual for humans, programmatic for agents — and CLI-first, which costs fewer tokens and is faster than any other way of controlling an application. An Agent App is **tech-stack-agnostic** (any stack works, as long as a matching A2App adapter exists) and **harness-agnostic** (every agent harness can use it through the right plugin or skill).
 
 Agent App is the future of software: built, evolved, and operated by humans and agents together. This repository makes it a standard:
@@ -18,13 +12,43 @@ Agent App is the future of software: built, evolved, and operated by humans and 
 - the **A2App protocol** — bi-directional communication between agent and agentic app;
 - the **A2App adapter** — connecting Agent Apps to any tech stack.
 
-## The artifact equation
-
 ```
 app + A2App adapter + framework files = Agent App
 ```
 
 Every Agent App follows **MVC-A**: Model, View, Controller, plus the **A**gent surface — the A2App adapter, which is the ONLY agent surface. Agents never scrape the View or drive its DOM to operate an app (UI driving is reserved for verification). The framework files are the contract: `manifest.json` (identity + the `pipeline` launch block), `operations.json`, `reference/requirements.md` (the app's binding spec), `AGENT_APP.md` (the agent-facing index), and the ownership canon (hash-locked system files).
+
+## Getting Started (For agent)
+
+## Install (locally, from this repo)
+
+Do this to install the agent app framework and a2app CLI
+
+```
+pnpm install
+
+pnpm -r build
+```
+
+### Building an Agent App with an agent harness
+
+Read skills/creator/SKILL.md to build an agent app from fresh
+
+### Importing an existing Agent App
+
+Read skills/importer/SKILL.md to import and validate an existing Agent App
+
+### Turning third-party code into an Agent App
+
+Read skills/importer/SKILL.md to import and transform 3rd part code into an Agent App
+
+### Evolving an Agent App
+
+Read skills/creator/SKILL.md to evolve an agent app
+
+### An agent harness using an Agent App
+
+Read skills/creator/SKILL.md to use an agent app using a2app CLI.
 
 ## Two defining properties
 
@@ -54,7 +78,7 @@ a2app <dir> data cards create --title "Buy milk" --due tomorrow
 agent-app <dir> scaffold [--blueprint <id>] # scaffold: framework files + ownership canon
 agent-app <dir> validate # the validation + security gate
 agent-app <dir> dev / promote / backup / restore # safe-evolve: dev copy, gate, backup, promote
-agent-app <dir> walk-verify # independent verification vs requirements.md
+# walk-verify is a skill, not a command: a verifier agent (never the builder) drives the UI vs requirements.md
 ```
 
 ## Scenarios

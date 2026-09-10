@@ -11,6 +11,6 @@
   "scripts": {
     "build": "echo \"blueprint \u00e2\u20ac\u201d nothing to build yet\" && exit 0",
     "typecheck": "echo \"blueprint \u00e2\u20ac\u201d nothing to typecheck yet\" && exit 0",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node --check template/server.mjs && node --check template/a2app-update.js && node test/update-watch.test.mjs"
   }
 }

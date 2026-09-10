@@ -1,5 +1,5 @@
 /**
- * Describe cache, keyed by the app's own `schemaVersion`.
+ * Describe cache, keyed by the app's own version markers.
  *
  * The protocol tells clients to cache describe against `schemaVersion` and
  * re-fetch when it changes (A2APP-SPEC 2). For a navigational surface that
@@ -12,10 +12,20 @@
  *
  * Correctness rules, in order of importance:
  *
- * - **Keyed by `schemaVersion`, never by time.** The app tells us when its model
- *   changed; guessing with a TTL would either serve a stale model (writes fail
+ * - **Keyed by the app's version markers, never by time.** The app tells us when
+ *   it changed; guessing with a TTL would either serve a stale model (writes fail
  *   inexplicably) or discard a valid one (the budget is lost). There is no
  *   expiry here at all, by design.
+ * - **`schemaVersion` alone is not a complete key.** It fingerprints the model —
+ *   entity fields, operation names, params, flags — and deliberately not every
+ *   attribute describe PUBLISHES. An operation's `description` is published (it
+ *   is the one-line summary an agent reads to choose an operation) but is not in
+ *   the fingerprint, so rewording one leaves `schemaVersion` byte-identical and a
+ *   `schemaVersion`-only cache keeps serving the old wording indefinitely — the
+ *   agent reads a description the app has stopped giving. `appVersion` covers the
+ *   app's code, moves for exactly that edit, and is folded into the key here.
+ *   It is an optional extension: an app that does not publish one caches on
+ *   `schemaVersion` alone, exactly as before.
  * - **A cache miss is never an error.** Every entry is re-derivable from the
  *   app, so a corrupt, unreadable, or unwritable cache degrades to fetching.
  *   An operate command must not fail because a cache file is bad.
@@ -29,6 +39,8 @@ import type { DescribeLevel } from "@a2app/sdk";
 interface CacheFile {
   appId: string;
   schemaVersion: string;
+  /** identity's `appVersion`, or "" from an app that publishes none */
+  appVersion: string;
   /** describe path ("" for root) → the level served for it */
   levels: Record<string, DescribeLevel>;
 }
@@ -45,19 +57,29 @@ export class DescribeCache {
   }
 
   /**
-   * Open the cache for one app at one schema version.
+   * Open the cache for one app at one version of that app.
    *
-   * A file belonging to a different app or a superseded schema is discarded
-   * wholesale rather than merged: a per-entry version would let one stale level
-   * survive a model change and be read alongside fresh ones, which is exactly
-   * the "never write against a stale schema" failure the protocol names.
+   * A file belonging to a different app, a superseded schema, or a superseded
+   * build is discarded wholesale rather than merged: a per-entry version would
+   * let one stale level survive a change and be read alongside fresh ones, which
+   * is exactly the "never write against a stale schema" failure the protocol
+   * names.
+   *
+   * A cache written before `appVersion` existed carries none, so it fails the
+   * comparison and is discarded once — a single re-fetch, not an error.
    */
-  static open(appDir: string, appId: string, schemaVersion: string): DescribeCache {
+  static open(appDir: string, appId: string, schemaVersion: string, appVersion?: string | null): DescribeCache {
     const file = join(appDir, ".a2app", "describe-cache.json");
-    const empty: CacheFile = { appId, schemaVersion, levels: {} };
+    const version = appVersion ?? "";
+    const empty: CacheFile = { appId, schemaVersion, appVersion: version, levels: {} };
     try {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as CacheFile;
-      if (parsed.appId === appId && parsed.schemaVersion === schemaVersion && parsed.levels) {
+      if (
+        parsed.appId === appId &&
+        parsed.schemaVersion === schemaVersion &&
+        parsed.appVersion === version &&
+        parsed.levels
+      ) {
         return new DescribeCache(file, parsed);
       }
     } catch {

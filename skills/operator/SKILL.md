@@ -26,6 +26,19 @@ needs code changes, that's the modify skill.
 - `agent-app <dir> validate`, then `agent-app <dir> serve` to launch (it runs the manifest
   `pipeline` and polls `health`) and `agent-app <dir> stop` to shut it down. Never
   start a server by hand.
+- `agent-app <dir> open` shows a RUNNING app to the user; `serve --open` does both.
+  If YOU have a browser tool, use `open --print-only` and open the returned `url`
+  yourself so the user gets one window instead of two. `"opened": false` is not a
+  failure — it means no browser could be spawned here (SSH, CI, headless), and the
+  printed URL is still how the user reaches the app. `open` refuses (exit 3) when
+  nothing is actually answering, so it never hands out a dead tab.
+- **After you change data on the user's behalf, make sure they can see it.** A tab
+  they already have open re-reads by itself — the adapter moves identity's
+  `dataVersion` on every write and the View's watcher turns that into a refresh,
+  with no reload and nothing typed lost. What that cannot do is reach a user with
+  no tab open. So finish data work with `agent-app <dir> open --if-needed`: it
+  opens a browser only when nobody is already looking, and otherwise leaves the
+  open tabs to refresh themselves rather than stacking duplicates on top of them.
 - A running app serves everything on ONE port: the UI, the records API
   (`/api/collections/...`), declared operations (`/api/ops/...`), and discovery
   (`GET /api/_a2app/describe[/{path}]`, one level per request). Never start

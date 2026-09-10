@@ -160,12 +160,13 @@ events. (Manifest format and fire API: per your stack.)
 1. **`agent-app <dir> validate`** runs the gate (app-part consistency → build →
    migrations-on-a-fresh-db → operations resolve → ownership canon → describe
    budget). On errors: read ALL of them, fix ALL of them, run it again. Then
-   `agent-app <dir> dev` boots your code in a DEV copy on a hidden port with a
-   fresh post-migration DB. Test and read logs THERE; keep editing in the real
-   project dir. Never start servers by hand.
+   `agent-app <dir> dev` proves your code loads and builds a fresh post-migration
+   DB in an isolated dev directory — it starts NO server and there is no dev URL,
+   so run the app with `agent-app <dir> serve` and read logs from
+   `.a2app/serve.log`. Never start servers by hand.
    A step the gate reports **UNCHECKED** did not pass — it could not run. The
-   budget step needs the app running, so re-run `validate` after `serve`/`dev`
-   rather than treating the warning as a pass.
+   budget step needs the app running, so re-run `validate` after `serve` rather
+   than treating the warning as a pass.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
    - `a2app <dir>` → does the root show the modules you declared, with the entity
@@ -189,6 +190,27 @@ events. (Manifest format and fire API: per your stack.)
    the running app in a real browser against `reference/requirements.md`. A pass
    is what promotes and announces the app. Failing features come back as a report:
    fix them, then repeat step 1 and step 3.
+4. **Launch it and put it in front of the user.** `agent-app <dir> serve` runs the
+   manifest pipeline as a managed background process and polls health until the
+   app answers; it prints the URL. Then open it — see **Showing the app to the
+   user** below. Never start a server by hand.
+
+**Showing the app to the user.** A running app is not a delivered app until the
+person can see it. The framework cannot know what your harness can do, so YOU
+decide which of these you are:
+
+- **You have a browser tool** (a built-in browser pane, a Chrome extension):
+  run `agent-app <dir> open --print-only` and open the returned `url` with your
+  own tool, so the app appears in context. `--print-only` is what stops the CLI
+  also spawning a separate window — without it the user gets two.
+- **You do not**: run `agent-app <dir> open`. It uses the opener the harness
+  declared (`AGENT_APP_OPEN_CMD`), else the OS browser.
+
+Either way, give the user the URL in your reply. `"opened": false` in the result
+is NOT a failure — it means the environment has no browser to spawn (SSH, CI,
+headless) and the printed URL is how the user gets there. `agent-app <dir> serve
+--open` does the serve and the open in one step where you do not need the URL
+first.
 
 Test data is fine during the build — the dev DB is disposable; at delivery the
 LIVE app boots with a fresh database built purely from your migrations, so records

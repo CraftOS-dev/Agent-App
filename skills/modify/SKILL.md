@@ -73,32 +73,74 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 ## Finish
 
 ```
-agent-app <dir> dev        # boot a disposable dev copy (fresh, migration-replayed DB)
-agent-app <dir> validate   # the gate, against the dev copy
-# then the walk-verify skill against the dev URL
+agent-app <dir> dev        # prepare a fresh, migration-replayed dev DB (starts NO server)
+agent-app <dir> validate   # the gate
+# then the walk-verify skill
+agent-app <dir> stop       # promote refuses to run while the app is serving
 agent-app <dir> promote    # pre-promote backup, then apply new migrations to live
+agent-app <dir> serve      # bring the changed app back up
+agent-app <dir> open       # and show it to the user (see below)
 ```
 
-`agent-app dev` boots a disposable copy of your new CODE on a hidden port with a
-**FRESH, EMPTY database** — migrations replay at boot, so only data your migrations
-seed exists. The user's live app keeps running the previous version, untouched, and
-its data is NEVER cloned into dev. Test freely against the dev URL (create whatever
-test records you need — they are thrown away). walk-verify drives the dev instance
-in a real browser; a clean verdict is what lets `agent-app promote` apply your change to
-the live app (new migrations apply to the real data at its boot). `agent-app promote`
-takes a mandatory pre-promote backup and aborts if the backup fails; `agent-app restore`
-rolls back.
+`promote` applies migrations and launches NOTHING, so a change is not in front of
+the user until you serve again. Do not end a modify at `promote`.
+
+**`dev` does not start a server, and there is no dev URL.** It runs the toolkit's
+`lifecycle.dev`, which builds a fresh database and exits — no shipped toolkit boots
+a second instance. Do not go looking for a hidden port; verify against the app you
+serve after promoting, which is why the pre-promote backup is mandatory and
+`agent-app <dir> restore` is the way back.
+
+**Showing the app to the user.** A running app is not a delivered app until the
+person can see it. The framework cannot know what your harness can do, so YOU
+decide which of these you are:
+
+- **You have a browser tool** (a built-in browser pane, a Chrome extension):
+  run `agent-app <dir> open --print-only` and open the returned `url` with your
+  own tool, so the app appears in context. `--print-only` is what stops the CLI
+  also spawning a separate window — without it the user gets two.
+- **You do not**: run `agent-app <dir> open`. It uses the opener the harness
+  declared (`AGENT_APP_OPEN_CMD`), else the OS browser.
+
+`open` hands a URL to the browser; it CANNOT reload a tab the user already had
+open. A loaded page can only be replaced from inside itself, which is what the
+View's update watcher (`/_a2app/update.js` — see the blueprint's README) is for.
+After a code change it reloads the tab itself when the page holds no unsaved
+input, and falls back to offering a reload when it does — a half-filled form is
+never discarded without asking. **Use `agent-app <dir> open --if-needed`** after a
+promote: it opens a browser only when nobody already has the app on screen, so a
+tab that is about to reload itself does not also get a duplicate opened over it.
+Keep that script tag when you rewrite a View.
+
+A DATA change is different and must not reload: the watcher announces it as a
+`a2app:datachange` event on `window` (identity's `dataVersion` moved) and the
+View re-reads. If you rewrite a View, keep a listener for it, and guard the
+re-render the same way — re-rendering over a form someone is filling in loses
+their work exactly as a reload would.
+
+Either way, give the user the URL in your reply. `"opened": false` in the result
+is NOT a failure — it means the environment has no browser to spawn (SSH, CI,
+headless) and the printed URL is how the user gets there. `agent-app <dir> serve
+--open` does the serve and the open in one step where you do not need the URL
+first.
+
+`agent-app dev` builds a **FRESH, EMPTY database** in an isolated dev directory by
+replaying migrations, and proves your edited code loads. The user's live app is
+untouched and its data is NEVER cloned into dev — the framework fingerprints the
+live data directory before and after and aborts if the toolkit's dev command went
+near it. What `dev` does NOT do is start a server: there is no dev instance and no
+dev URL to point walk-verify at. Verification therefore happens against the app you
+`serve` after promoting, which is why `agent-app promote` takes a mandatory
+pre-promote backup, aborts if that backup fails, and `agent-app restore` rolls back.
 
 - **The dev DB starts empty every time.** If a feature needs data to be visible,
-  either seed it in a migration (survives promote) or create test records after
-  `agent-app dev` (dev-only, disposable).
+  seed it in a migration (which survives promote).
 - **Never run `agent-app validate` or `agent-app dev` in a way that rebuilds the live
   project dir in place** — it overwrites the served frontend and blanks the user's
-  live UI. `agent-app dev` gates the dev copy for you.
+  live UI.
 - **Never write test data to the live app** (its DB is the user's real data; agent
-  test writes outside the dev env are refused). Do all testing against the dev URL.
-  Identity (`a2app <dir> identity`) answers `env: "dev"` or `"live"` if you need to
-  confirm which instance a port is.
+  test writes outside the dev env are refused). Identity (`a2app <dir> identity`)
+  answers `env: "dev"` or `"live"` if you need to confirm which instance a port is.
 
 HONESTY RULE: the change is live only when walk-verify returns a pass — never tell
 the user a change is live when the relaunch, verification, or promotion failed. On

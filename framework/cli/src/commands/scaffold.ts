@@ -15,12 +15,12 @@ import { writeSystemHashes } from "../lib/canon.js";
 import { flag, hasFlag } from "../lib/args.js";
 import { mintAgentToken, stripCredentials } from "../lib/credential.js";
 import { writeFileAtomic } from "../lib/home.js";
+import { linkLocalPackages } from "../lib/localPackages.js";
+import { AGENT_APP_VERSION } from "../lib/manifest.js";
 import { UsageError } from "../lib/project.js";
 import { adapterVersionOf, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
 import { reserveApp, unregister } from "../lib/registry.js";
 import { log } from "../lib/log.js";
-
-const AGENT_APP_VERSION = "0.1.0";
 
 /** Files whose presence does NOT make a directory "populated" for scaffolding. */
 const IGNORABLE_ENTRIES = new Set([".git", ".gitignore", ".DS_Store", "Thumbs.db", ".hg", ".svn"]);
@@ -132,6 +132,18 @@ export async function run(args: string[], app: string): Promise<number> {
     // so a crash mid-write must never leave a truncated, unparseable one.
     writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 
+    // Point any dependency on an unpublished package from the toolkit's own
+    // repository at that source tree. Without this, an app scaffolded outside
+    // the repo fails `npm install` — and so fails its build gate — before its
+    // author has touched it. A no-op when the blueprint ships without a source
+    // tree beside it, which is the published-CLI case.
+    if (tk !== null) {
+      const linked = linkLocalPackages(dir, tk.source);
+      for (const dep of linked) {
+        log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
+      }
+    }
+
     // Strip any credential that slipped in from a template, then mint a fresh one.
     stripCredentials(dir);
     mintAgentToken(dir);
@@ -223,7 +235,8 @@ function writeHarnessGuides(dir: string, name: string): void {
         "```bash",
         "agent-app . dev          # dev copy, fresh migration-replayed database",
         "agent-app . validate     # the gate — must pass",
-        "agent-app . walk-verify  # verified by an agent that is NOT the builder",
+        "# walk-verify: a verifier agent that is NOT the builder loads the walk-verify",
+        "# skill and drives every reference/requirements.md Feature in a browser.",
         "agent-app . promote      # mandatory pre-promote backup, then apply to live",
         "```",
         "",

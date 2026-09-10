@@ -19,7 +19,7 @@ CLI = os.environ.get("A2APP_CLI", "a2app")
 FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
 FRAMEWORK_VERBS = {
     "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
-    "list", "global", "skills", "dev", "promote", "backup", "restore", "walk-verify",
+    "list", "global", "skills", "dev", "promote", "backup", "restore",
 }
 # The closed set of verbs that address every app rather than one, and so take no
 # app argument. Closed is what makes _verb exact: it never has to inspect a

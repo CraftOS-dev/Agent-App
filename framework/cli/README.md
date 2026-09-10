@@ -11,8 +11,7 @@ The pinned command set of the two framework binaries — `agent-app` (build/evol
 | `serve <dir>` / `stop <dir>` | launch the app via its manifest pipeline as a managed, health-polled background process, and stop it |
 | `list` | every known Agent App with its port and live-probed status (`running`/`stopped`/`missing`); `--json`, `--prune` |
 | `global` | the user's cross-app conventions (`GLOBAL_AGENT_APP.md`), seeded on first use |
-| `walk-verify <dir>` | run the walk-verify skill against the running app |
-| `dev` / `promote` / `backup` / `restore` | safe-evolve environments: dev copy with fresh migration-replayed DB → gate + verify in dev → pre-promote backup → promote |
+| `dev` / `promote` / `backup` / `restore` | safe-evolve environments: dev copy with fresh migration-replayed DB → gate + verify in dev → pre-promote backup → promote (walk-verify itself is a skill run by a verifier agent, not a command) |
 
 Contract: exit codes `0` success, `1` rejected, `2` usage error, `3` unreachable; machine-readable stdout (hosts and agents branch on exit code and parse stdout, never scrape prose); error envelopes printed verbatim; relative dates and labels resolved client-side (multi-match fails with candidates, never picks); a flag without a value is exit 2, never `true`.
 

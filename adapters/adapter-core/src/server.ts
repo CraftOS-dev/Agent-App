@@ -48,6 +48,17 @@ import {
 
 export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
+
+/**
+ * The default answer to "how do I get a credential?", attached to every 401.
+ *
+ * Both challenges send the same text because they are the same question, and a
+ * caller that met one and then the other should not have to learn the answer
+ * twice. An app serving anyone but its owner sets `credentialHint` instead: this
+ * default describes a file on the host, which is an answer only its owner can act
+ * on.
+ */
+const DEFAULT_CREDENTIAL_HINT = "Read the app's .agent-token file (mode 0600) in the project directory.";
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";
@@ -444,7 +455,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       if (credentialRequired) {
         return {
           reply: err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "This write requires an agent credential.", {
-            how: config.credentialHint ?? "Read the app's .agent-token file (mode 0600) in the project directory.",
+            how: config.credentialHint ?? DEFAULT_CREDENTIAL_HINT,
           }),
         };
       }
@@ -915,7 +926,15 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     }
     if (path === "/api/_a2app/whoami") {
       const grant = credentialOf(req);
-      if (!grant) return err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "whoami requires a credential.");
+      // The same `how` the write path sends. whoami is where a caller checks its
+      // grant BEFORE planning work, so it is the first 401 many agents meet — and
+      // a bare challenge here sends them back to a step whose whole input is this
+      // field.
+      if (!grant) {
+        return err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "whoami requires a credential.", {
+          how: config.credentialHint ?? DEFAULT_CREDENTIAL_HINT,
+        });
+      }
       return ok({
         a2app: true,
         credentialId: grant.credentialId,

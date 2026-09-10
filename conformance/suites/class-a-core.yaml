@@ -252,6 +252,16 @@ checks:
       status: 403
       match: { code: insufficient_scope, required: "data:cards:write" }
 
+  - name: an uncredentialled whoami gets the 401 challenge, hint included
+    # whoami is where a caller reads its grant before planning work, so it is the
+    # first 401 many agents meet. The challenge has to carry the same `how` the
+    # write path sends, or the agent is told to go get a credential and not where.
+    request: { method: GET, path: /api/_a2app/whoami }
+    expect:
+      status: 401
+      match: { code: agent_token_required }
+      has: [how]
+
   - name: whoami returns the calling credential's grant
     request: { method: GET, path: /api/_a2app/whoami, token: readonly }
     expect:

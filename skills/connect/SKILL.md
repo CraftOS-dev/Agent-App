@@ -206,12 +206,20 @@ Two rules bound what you can do:
   grant is checked on its own scopes alone. Plan as though the ceiling holds, and
   do not rely on it to stop a call that should not be made.
 
-`whoami` needs a credential of its own, so a `401` here means yours is absent or
-wrong. That is step 39 unfinished — return there rather than retrying. It does not
-by itself mean nothing is reachable: on a single-user app an uncredentialled read
-may still be permitted. What each level of `describe` reports as **`access`**
-(`full`, `read-only` or `none`) is the authority on what you may actually read,
-write and run; `whoami` tells you which credential you are.
+`whoami` answers whoever the app will actually serve, so its answer is the
+caller's real reach rather than a formality. An uncredentialled caller on a
+single-user app is answered as `anonymous`, holding the reads and the read-only
+operations it genuinely has — which is why reading this before planning is worth
+the round trip even when you were given no credential.
+
+A `401` here means the app requires one you do not have: always on a multi-user
+app, and for anything that changes something. That is step 39 unfinished —
+return there rather than retrying.
+
+Each level of `describe` reports the same reach as **`access`** (`full`,
+`read-only` or `none`). The two are rendered from one source and cannot
+disagree, so read whichever is in front of you: `scopes` for the whole surface,
+`access` for the level you are standing on.
 
 ### 41. Enter Operate
 

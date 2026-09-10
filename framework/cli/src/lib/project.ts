@@ -45,7 +45,40 @@ export interface Project {
  * `a2app "Kanban Board" data schema` without tracking paths. The manifest stays
  * authoritative; the registry only supplies the location.
  */
+/**
+ * Is this string addressing an app over the network rather than on disk?
+ *
+ * Only `http:` and `https:` qualify. Any other scheme is rejected outright
+ * rather than falling through to be read as a directory name: `file:///etc` is
+ * not a path this CLI should quietly try to open, and a mistyped scheme should
+ * say so rather than report "not an Agent App".
+ */
+export function isRemoteAddress(app: string): boolean {
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(app)) return false;
+  let url: URL;
+  try {
+    url = new URL(app);
+  } catch {
+    throw new UsageError(`Not a usable app address: ${app}`);
+  }
+  if (url.protocol === "http:" || url.protocol === "https:") return true;
+  throw new UsageError(
+    `An app is addressed by directory, by registered id/name, or by http(s) URL — not by "${url.protocol}//".`,
+  );
+}
+
 export function loadProject(projectDir: string): Project {
+  // A URL reaches an app whose files are somewhere else, and every caller of
+  // this function needs those files. Refusing here is what keeps "operated but
+  // never modified" from being a rule an agent has to remember: there is no
+  // directory for a build or lifecycle command to act on, so it cannot act.
+  if (isRemoteAddress(projectDir)) {
+    throw new UsageError(
+      `${projectDir} is a remote app — it can be operated, not modified.\n` +
+        `Building, evolving and lifecycle commands act on an app's files, which are on its own host. ` +
+        `Use \`a2app ${projectDir} …\` to operate it.`,
+    );
+  }
   let dir = resolve(projectDir);
   if (!existsSync(join(dir, "manifest.json"))) {
     // An ambiguous name must not be guessed at: surface the candidates.

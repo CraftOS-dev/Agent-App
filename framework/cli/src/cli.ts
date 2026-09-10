@@ -119,6 +119,12 @@ function usage(surface: Surface): void {
     log.raw(`  ${target} … <operation> [--…]    invoke, at the path that identifies it`);
     log.raw(`  ${target} --find <term>          search names, get locations\n`);
     log.raw(`  Every screen ends by naming the legal next moves.\n`);
+    // A URL is the whole of connect from the caller's side: the same walk,
+    // against an app that is not on this machine. Saying so here is what makes
+    // it discoverable without a separate verb to learn.
+    log.raw(`  ${target} is a directory, a registered id/name, or an http(s) URL.`);
+    log.raw(`  A URL operates a REMOTE app: its identity is verified and pinned, and the`);
+    log.raw(`  credential comes from A2APP_TOKEN or the credential store — never from the app.\n`);
     log.raw(`  Reserved (never module names):`);
   } else {
     log.raw(`  Usage: ${surface} ${target} <verb> [args] [--flags]   (the app comes first)\n`);

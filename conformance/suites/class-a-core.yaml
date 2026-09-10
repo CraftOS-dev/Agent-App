@@ -169,6 +169,24 @@ checks:
       match: { a2app: true, ok: false }
       len: { violations: 3 }
 
+  # A field named after an Object.prototype member must not read as declared.
+  # On a plain-object field map `map["constructor"]` is truthy, which passed the
+  # unknown-field check and every rule after it, so the key reached the backend.
+  - name: a field named after a prototype member is still unknown
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      body: { title: "x", constructor: "evil" }
+    expect:
+      status: 400
+      match:
+        a2app: true
+        ok: false
+        violations.0.code: unknown_field
+        violations.0.field: constructor
+      len: { violations: 1 }
+
   - name: guard writes to a read-only field are refused
     request:
       method: POST

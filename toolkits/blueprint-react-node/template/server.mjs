@@ -247,6 +247,12 @@ const app = createA2App(binding, {
 
 // Any path the adapter does not own falls through to the View.
 const server = createA2AppServer(app, view.handler);
-server.listen(PORT, () => {
-  process.stdout.write(`Agent App "${manifest.name ?? manifest.id}" on http://localhost:${PORT}  (A2App id ${manifest.id})\n`);
+// Bind loopback explicitly. `listen(PORT)` alone binds every interface, so the
+// app was reachable from the network while its own log line said localhost --
+// and a same-origin request is trusted as the owner without a credential, which
+// made a scaffolded Agent App remotely writable by anyone who could reach the
+// port. Exposing it must be a deliberate act, hence the env var.
+const HOST = process.env.A2APP_HOST ?? "127.0.0.1";
+server.listen(PORT, HOST, () => {
+  process.stdout.write(`Agent App "${manifest.name ?? manifest.id}" on http://${HOST}:${PORT}  (A2App id ${manifest.id})\n`);
 });

@@ -7,8 +7,18 @@ description: Modify an existing Agent App — add features, change design, fix b
 # Modify
 
 You are changing an EXISTING app. Everything in the **creator** skill applies
-(ownership rule, modules-before-entities, schema/operations/UI order, honesty rule) — this skill covers
-only what differs.
+(ownership rule, modules-before-entities, schema/operations/UI order, the Agent
+App Quality Standard, honesty rule) — this skill covers only what differs.
+
+The Quality Standard (`../QUALITY.md`) applies to every change: a modification
+that leaves a screen below the standard — or drags one below it — comes back
+from the verifier as a defect. Changed screens use the app's existing design
+tokens and components; a change that introduces a second visual system is a
+defect, not a refresh. If the change must break a specific item, record the
+item number and reason in `### Conventions and overrides` (Part B,
+`## Quality Conformance`) in `reference/requirements.md`, exactly as at
+creation. A change that alters a Quality Conformance decision updates that
+Q-entry in the same edit — the entries describe the app as it IS.
 
 ## First, route the request
 
@@ -25,7 +35,10 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
    app with its path, port, and status, and commands accept a registered app id
    or name wherever they accept a directory.
    Also read `agent-app global` — the user's cross-app conventions apply to changes
-   too, with this app's `reference/requirements.md` winning any conflict.
+   too, with this app's `reference/requirements.md` winning any conflict. A global
+   rule (ticked or user-written) that touches what you are changing gets mirrored
+   into `### Conventions and overrides` (Part B, `## Quality Conformance`) if it is not
+   there yet — the verifier reads only the app's spec and the Quality Standard.
 2. If something broke, **read the logs FIRST** before changing anything — the real
    cause is in them, not in your guess.
 3. If the request is ambiguous, ask one batch of clarifying questions, then wait.
@@ -46,6 +59,11 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
      old entries demanded a handler the gate forbids while the new entry forbade it —
      no code could satisfy both). Strike ONLY entries the new request genuinely
      contradicts, never entries you merely failed to build.
+5. **Append the work to `reference/tasks.md`** before coding it: one task per
+   `## Changes` entry (or coherent group), citing the entry —
+   `- [ ] T-n (Changes 2026-01-15): …`. Tick on completion; completed tasks are
+   never deleted. The gate requires the ledger; the recorded-then-built order is
+   what keeps the spec, the tasks, and the code telling one story.
 
 ## Rules for changing a live app
 
@@ -67,8 +85,9 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 - **When a module outgrows its screen, split it.** Every describe level is capped
   at 2,000 characters and the gate walks the running app to check it. Growth means
   adding and splitting modules; lengthening a flat list is not an option the gate
-  will accept. Record the split in `## Modules` in both `AGENT_APP.md` and
-  `reference/requirements.md`.
+  will accept. Record the split in `## Modules` in `AGENT_APP.md`, in the spec's
+  `## System Overview` map, and regroup the affected Features under the new
+  `### Module:` headings.
 
 ## Finish
 

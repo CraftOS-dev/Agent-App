@@ -30,7 +30,7 @@
     {
       "name": "walk-verify",
       "activity": "walk-verify",
-      "description": "Independently verify a running Agent App against reference/requirements.md by driving the real UI, feature by feature. Run by an agent that is NOT the builder. Verdicts: pass | defects | incomplete | blocked.",
+      "description": "Independently verify a running Agent App against reference/requirements.md AND the Agent App Quality Standard (QUALITY.md, beside this index) by driving the real UI, feature by feature. Run by an agent that is NOT the builder. Verdicts: pass | defects | incomplete | blocked.",
       "path": "walk-verify/SKILL.md"
     },
     {

@@ -9,7 +9,7 @@
  * derived from the live schema, an agent always sees the true model.
  */
 import { createA2App, createA2AppServer, UnsupportedFilterError } from "@a2app/adapter-core";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize } from "node:path";
@@ -213,6 +213,17 @@ const app = createA2App(binding, {
   storePath: join(DATA_DIR, "a2app-state.json"),
 });
 
+/* ------------------------------------------------------- structured log */
+
+/** One JSON line per event on stdout (the log `agent-app serve` captures):
+ *  a single schema — ts, level, evt, then event fields — so diagnosis filters
+ *  by field instead of parsing prose. Never log record contents or secrets. */
+function logLine(level, evt, fields = {}) {
+  process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), level, evt, ...fields }) + "\n");
+}
+
+let nextRequestId = 0;
+
 /* ------------------------------------------------------------ static View */
 
 const MIME = {
@@ -225,22 +236,74 @@ const MIME = {
   ".png": "image/png",
 };
 
-/** Fallthrough for any path the adapter does not own: serve `public/`. */
+/** Cache policy (deliberate, not defaulted): every static response is
+ *  `no-cache` WITH a validator, so the browser revalidates each time and the
+ *  server answers 304 for the unchanged — always-fresh while the agent evolves
+ *  the app, never a full re-download of what didn't change. */
+function etagFor(filePath) {
+  const st = statSync(filePath);
+  return `"${st.size.toString(36)}-${st.mtimeMs.toString(36)}"`;
+}
+
+/** Fallthrough for any path the adapter does not own: serve `public/`.
+ *  Extension-less GET paths fall back to index.html (deep links load the SPA);
+ *  missing files answer 404. */
 function serveStatic(req, res) {
   const url = new URL(req.url ?? "/", "http://localhost");
   let rel = decodeURIComponent(url.pathname);
   if (rel === "/") rel = "/index.html";
-  const filePath = normalize(join(PUBLIC_DIR, rel));
+  let filePath = normalize(join(PUBLIC_DIR, rel));
+  if (filePath.startsWith(PUBLIC_DIR) && !existsSync(filePath) && req.method === "GET" && extname(rel) === "") {
+    filePath = join(PUBLIC_DIR, "index.html"); // SPA fallback
+  }
   if (!filePath.startsWith(PUBLIC_DIR) || !existsSync(filePath)) {
-    res.writeHead(404, { "content-type": "application/json" });
+    res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify({ a2app: true, ok: false, code: "not_found", message: "No such route." }));
     return;
   }
-  res.writeHead(200, { "content-type": MIME[extname(filePath)] ?? "application/octet-stream" });
+  const etag = etagFor(filePath);
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, { etag, "cache-control": "no-cache" });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
+    "cache-control": "no-cache",
+    etag,
+  });
   res.end(readFileSync(filePath));
 }
 
 const server = createA2AppServer(app, serveStatic);
+
+// Observe (never handle) every request for the log: id, method, path, status,
+// duration. Paths only — query strings can carry filters over user data.
+server.on("request", (req, res) => {
+  const id = ++nextRequestId;
+  const started = Date.now();
+  res.on("finish", () => {
+    logLine(res.statusCode >= 500 ? "error" : "info", "http", {
+      id,
+      method: req.method,
+      path: (req.url ?? "/").split("?")[0],
+      status: res.statusCode,
+      ms: Date.now() - started,
+    });
+  });
+});
+
+// Fail fast and loudly: a structured last line beats a silent wedge, and the
+// launch contract's supervisor is what restarts the process, not the process.
+process.on("uncaughtException", (err) => {
+  logLine("error", "crash", { message: err?.message, stack: err?.stack });
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logLine("error", "crash", { message: String(reason?.message ?? reason), stack: reason?.stack });
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
-  process.stdout.write(`Agent App "${manifest.name ?? manifest.id}" on http://localhost:${PORT}  (A2App id ${manifest.id})\n`);
+  logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://localhost:${PORT}` });
 });

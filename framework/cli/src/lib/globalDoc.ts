@@ -36,17 +36,18 @@ whatever displays them.
 
 ## Always enforced
 
-Quality rules every app must satisfy, whatever the stack:
+Every app you own is judged against the **Agent App Quality Standard**
+(\`QUALITY.md\`, shipped with the framework skills — builders build to it,
+verifiers verify against it). Its rules are deliberately NOT restated here:
+one standard, one home, nothing to drift. Overriding a specific item is done
+per app, by naming the item and the reason in that app's
+\`reference/requirements.md\`.
 
-- Empty states say what the thing is and offer the action that fills it.
-- Every async action shows a loading state; nothing looks frozen.
-- Destructive actions confirm first, and say what will be lost.
-- Every write reports its outcome from what was stored, never from what was sent.
-- Errors surface to the user in plain language, with the next step.
-- Forms validate inline and explain how to fix the value.
-- Text meets accessible contrast against its background, in both theme modes.
-- The layout works at small widths; nothing is unreachable on a narrow screen.
-- Interactive elements show hover/focus states and are keyboard reachable.
+Use this section for YOUR OWN additional always-rules — one checkable line
+each; an agent treats them as requirements in every build.
+
+<!-- - Every table defaults to newest-first -->
+<!-- - Every app shows amounts in EUR -->
 
 ## Optional rules
 

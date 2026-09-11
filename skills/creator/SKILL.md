@@ -38,20 +38,71 @@ files, build config. The validation gate hashes them (the ownership canon) and
 **fails the build** if they changed, naming the file. Need a variant of a kit
 component? Wrap it in your own app code; never edit the locked original.
 
-## Before coding
+## The spec comes first
 
-1. Read `AGENT_APP.md` and `reference/requirements.md`. The requirement was
-   interviewed and synthesized before the build — it is the **binding spec**:
-   implement it exactly and mirror its checklist into `AGENT_APP.md`. If it is
-   absent, build from the description; ask the user only when something is
-   genuinely blocking and you cannot reasonably decide it yourself.
-2. **Read the user's cross-app conventions: `agent-app global`.** These are the rules
-   they want in EVERY app they own (design preferences, always-enforced quality
-   rules, ticked optional rules). Apply them as defaults — but this app's own
-   `reference/requirements.md` WINS on any conflict: the global file is the
-   default, not the law. Ticked optional rules are requirements; unticked ones
-   are not.
-3. **Any feature need data from outside the app? Check, then research.** FIRST
+`reference/requirements.md` is the app's binding spec, in two parts: **Part A
+(SRS)** — what must exist; the verifier drives every statement in it — and
+**Part B (Technical Specification)** — how it is built. The gate checks its
+structure; walk-verify checks the running app against it.
+
+1. **Read `AGENT_APP.md` and `reference/requirements.md`.** If the spec is
+   already filled (the requirement was interviewed and synthesized upstream),
+   it is binding: implement it exactly, skip to step 5. If it holds only the
+   scaffold skeleton, YOU author it — steps 2–4.
+2. **Gather before writing.** Ask the user ONE batch of clarifying questions —
+   only what you genuinely cannot decide (audience, must-have features, data
+   that must survive, what is explicitly out). Read the user's cross-app
+   conventions (`agent-app global`): design preferences, their own
+   always-rules, and ticked optional rules (ticked = requirement, unticked =
+   not). Read the Agent App Quality Standard (`../QUALITY.md`, in the
+   directory this skill was installed from) — reading it before writing
+   Part B is MANDATORY: it is the bar the verifier judges every app against,
+   and building to it the first time is the only path that does not loop.
+3. **Author the spec — replace every `<REPLACE: …>` marker.** Each marker's
+   text is its fill instruction; the gate refuses a spec that still carries
+   one, so template text can never reach verification.
+   - **Part A** from the user's answers. Features are the contract: grouped
+     under `### Module: <name>`, stable IDs (`F-<MOD>-n`, never renumbered,
+     never reused), every statement binary and observable by a stranger
+     driving the app — "The user can <verb> …" / "The agent can <verb> …",
+     `WHEN … SHALL` where behavior is conditional; states the user must see
+     (empty, loading, error) are features too; one check per item — no
+     compound sentences, no aspirations ("fast", "intuitive"), no
+     implementation ("uses a modal"). Constraints enumerate their fixed
+     vocabularies COMPLETELY; A-1 is always the judged data volume, as a
+     number. **Out of Scope is exhaustive**: write what a reasonable builder
+     would otherwise add, because scope nobody bounded is scope you will
+     invent. Non-Functional Requirements carry only this app's measurable
+     bars — quality decisions belong in Quality Conformance.
+   - **Part B** from the Quality Standard and the global conventions. UI
+     Design: adopt the blueprint's design system and extend its tokens
+     (never fork a second one); one Screen entry PER SCREEN — primary
+     object, primary action, all five states, and narrow-width behavior
+     (decided here, not improvised in code; every device named in User
+     Characteristics must have matching decisions). **Quality Conformance
+     is where your QUALITY.md reading becomes visible: all 18 entries,
+     Q1–Q18, each answered with THIS app's concrete decisions** — "standard
+     defaults" is not an answer for Q1–Q11; N/A only with the reason; the
+     gate fails a missing entry, and the verifier fails an entry that is not
+     true in the running app. Mirrored global rules and any item overrides
+     (number + factual reason + revisit condition) go in `### Conventions
+     and overrides` — the ONE location the verifier reads. Process Flows
+     only where a lifecycle exists; Operations Design must match
+     `operations.json` exactly.
+4. **Get the user's approval on Part A before building.** Present a short
+   summary — the goals, the Features list, and Out of Scope — and ask once.
+   Corrections go into the spec first. On approval, record the date in
+   `### Approval`; Part A is frozen from that moment (changes go through
+   `## Changes`), while Part B keeps evolving with the build — additions
+   yes, silent contradictions of Part A never.
+5. **Derive `reference/tasks.md` from the approved spec.** One task per
+   feature (or coherent feature group), and quality work as tasks of its own
+   — motion, focus flow, narrow-width behavior, resilience — each citing the
+   Feature ID or Q-entry it implements (`- [ ] T-1 (F-COR-1): …`), ending
+   with the Verification tasks. Tick tasks as you complete them, never in a
+   batch at the end; never delete a completed task — the ledger is the build
+   record, and evolution appends to it.
+6. **Any feature need data from outside the app? Check, then research.** FIRST
    check whether a connected integration already covers the feature — if so, use
    it; nothing to research. Only for THIRD-PARTY public APIs: research like an
    engineer — endpoint, auth, response shape, limits — before writing a line;
@@ -69,12 +120,12 @@ operation belongs to exactly one, they are declared in `manifest.json`, and they
 are what an agent sees when it opens the app — the root screen of `describe`
 lists them and nothing else.
 
-Read the `## Operations` and `## Features` sections of
+Read the `## Features` and `## Operations Design` sections of
 `reference/requirements.md` and group them into 3–8 areas a person would
 recognise as tabs: `sales`, `inventory`, `support`. Write them into
-`manifest.json` and into `## Modules` in both `AGENT_APP.md` and
-`reference/requirements.md` BEFORE declaring an entity or an operation, because
-each of those has to name one.
+`manifest.json` and into `## Modules` in `AGENT_APP.md` (the spec's Features
+are already grouped by module) BEFORE declaring an entity or an operation,
+because each of those has to name one.
 
 Two rules that keep this honest as the app grows:
 
@@ -140,12 +191,18 @@ only** (never the frontend: browser CORS breaks and keys would be visible).
 (HTTP-from-backend API: per your stack.)
 
 **UI** — build the View from your blueprint's kit; the adapter is the only agent
-surface, so never make the agent drive the DOM to operate the app. Required UX:
-empty states with an action, loading states, confirmation dialogs for destructive
-actions, feedback on writes, responsive layout. Never hardcode colors — theming
-is host-owned. (Kit components and data hooks: per your stack.)
+surface, so never make the agent drive the DOM to operate the app. Build every
+screen to the Quality Standard (`../QUALITY.md`) — in particular, design every
+reachable state, not only the happy path: loading (skeletons, no layout jump),
+empty (says what belongs here, offers the action that fills it), error (what
+happened + what to do next), in-flight (control disabled, no double submit),
+success (visible where the user is looking, read back from what was STORED).
+Destructive actions confirm in the app's own dialog, naming the target. All
+colours, spacing, and type come from your tokens — never hardcode a value where
+a token exists. (Kit components and data hooks: per your stack.)
 
-Update `AGENT_APP.md` after each feature (entities, operations, checklist).
+After each feature: update `AGENT_APP.md` (entities, operations) and tick the
+completed tasks in `reference/tasks.md`.
 
 **App→agent triggers** — when a feature needs the AGENT to react to something in
 the app, declare it in the trigger manifest and fire it by **name + validated
@@ -185,10 +242,20 @@ events. (Manifest format and fire API: per your stack.)
      executing. A path never run NOR dry-run is not done.
    Reason about ANY mismatch between what you intended and what is stored; fix it
    before verifying. This catches the failure classes no error message reports.
-3. **walk-verify** — run the walk-verify skill: an independent run (NOT you) walks
-   the running app in a real browser against `reference/requirements.md`. A pass
-   is what promotes and announces the app. Failing features come back as a report:
-   fix them, then repeat step 1 and step 3.
+3. **Quality self-review — before handing off, not instead of it.** Every
+   Build task in `reference/tasks.md` is ticked first — an unticked task is
+   unfinished work, not a verification candidate. Then walk your own app once
+   against `../QUALITY.md`, section by section: resize to a phone width,
+   drive one flow keyboard-only, look at the empty state on a fresh database,
+   trigger one error, read every visible string. Fix what you find NOW — the
+   verifier will find it otherwise, and every defect it reports costs a full
+   fix-and-re-verify loop. This review does not replace verification: you are
+   the builder, and the builder does not grade itself.
+4. **walk-verify** — run the walk-verify skill: an independent run (NOT you) walks
+   the running app in a real browser against `reference/requirements.md` AND the
+   Quality Standard. A pass is what promotes and announces the app. Failures come
+   back as a report (features and Q-numbered quality items): fix them, then
+   repeat step 1 and step 4.
 
 Test data is fine during the build — the dev DB is disposable; at delivery the
 LIVE app boots with a fresh database built purely from your migrations, so records

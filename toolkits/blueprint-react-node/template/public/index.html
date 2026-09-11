@@ -3,39 +3,66 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent App — Tasks</title>
-    <style>
-      :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; --accent: #2563eb; }
-      @media (prefers-color-scheme: dark) { :root { --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2a2a; --accent: #60a5fa; } }
-      * { box-sizing: border-box; }
-      body { font: 15px/1.5 system-ui, sans-serif; color: var(--fg); max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-      h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-      p.sub { color: var(--muted); margin: 0 0 1.5rem; }
-      form { display: flex; gap: .5rem; margin-bottom: 1rem; }
-      input, select, button { font: inherit; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
-      input[type=text] { flex: 1; }
-      button { cursor: pointer; border-color: var(--accent); color: var(--accent); }
-      ul { list-style: none; padding: 0; margin: 0; }
-      li { display: flex; align-items: center; gap: .6rem; padding: .6rem 0; border-bottom: 1px solid var(--line); }
-      li .title { flex: 1; }
-      li.done .title { text-decoration: line-through; color: var(--muted); }
-      .pill { font-size: .75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; }
-      .x { color: var(--muted); cursor: pointer; border: none; background: none; font-size: 1rem; }
-      footer { color: var(--muted); font-size: .8rem; margin-top: 2rem; }
-    </style>
+    <title>Tasks</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <link rel="stylesheet" href="./ui.css" />
   </head>
   <body>
-    <h1 id="appname">Tasks</h1>
-    <p class="sub">A human uses this View; an agent operates the same data through A2App. Both see each other's changes.</p>
+    <div class="app">
+      <header class="app-header">
+        <h1 id="app-name">Tasks</h1>
+        <p class="subtitle">Your list, shared with your agent — changes on either side show up on both.</p>
+      </header>
 
-    <form id="add">
-      <input type="text" id="title" placeholder="Add a task…" required />
-      <select id="status"><option value="todo">To do</option><option value="doing">Doing</option><option value="done">Done</option></select>
-      <button type="submit">Add</button>
-    </form>
+      <main>
+        <section class="card" aria-label="Add a task">
+          <form id="add-form" class="add-form" novalidate>
+            <div class="field">
+              <label class="sr-only" for="new-title">Task title</label>
+              <input id="new-title" class="input" type="text" maxlength="200" autocomplete="off"
+                     placeholder="What needs doing?" aria-describedby="title-error" />
+              <p id="title-error" class="field-error" hidden></p>
+            </div>
+            <div class="field">
+              <label class="sr-only" for="new-status">Initial status</label>
+              <select id="new-status" class="select">
+                <option value="todo">To do</option>
+                <option value="doing">Doing</option>
+                <option value="done">Done</option>
+              </select>
+            </div>
+            <button id="add-btn" class="btn btn-primary" type="submit">Add task</button>
+          </form>
+        </section>
 
-    <ul id="list"></ul>
-    <footer id="foot"></footer>
+        <div class="toolbar">
+          <div id="filter" class="seg" role="group" aria-label="Filter tasks by status">
+            <button type="button" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-filter="todo" aria-pressed="false">To do</button>
+            <button type="button" data-filter="doing" aria-pressed="false">Doing</button>
+            <button type="button" data-filter="done" aria-pressed="false">Done</button>
+          </div>
+        </div>
+
+        <div id="banner-slot"></div>
+
+        <section id="list-card" class="card" aria-label="Tasks">
+          <!-- First paint shows the loading skeleton; app.js replaces it with the
+               list, the empty state, or the error state. Row heights match the
+               real rows so arriving content does not shift the layout. -->
+          <div id="list-slot">
+            <div class="skel-row"><span class="skel" style="width:24px;height:24px;border-radius:9999px"></span><span class="skel" style="flex:1;height:14px"></span><span class="skel" style="width:56px;height:24px;border-radius:9999px"></span></div>
+            <div class="skel-row"><span class="skel" style="width:24px;height:24px;border-radius:9999px"></span><span class="skel" style="flex:0.7;height:14px"></span><span class="skel" style="width:56px;height:24px;border-radius:9999px"></span></div>
+            <div class="skel-row"><span class="skel" style="width:24px;height:24px;border-radius:9999px"></span><span class="skel" style="flex:0.85;height:14px"></span><span class="skel" style="width:56px;height:24px;border-radius:9999px"></span></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span id="count" aria-live="polite"></span>
+        <span class="hint">Press / to add a task</span>
+      </footer>
+    </div>
 
     <script type="module" src="./app.js"></script>
   </body>

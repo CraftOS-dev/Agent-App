@@ -31,7 +31,5 @@ derives entities from the live collection schema, so it cannot drift. A starter
 - Migrations are additive; never drop a collection that holds data.
 
 ## Checklist
-- [x] A2App hooks adapter (identity, describe, guard)
-- [x] rules parity self-test in the gate
-- [ ] tasks collection + React UI
-- [ ] archive-done operation
+Build and evolve tasks live in `reference/tasks.md` - one home. This section
+points there.

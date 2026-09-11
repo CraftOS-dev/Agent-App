@@ -179,7 +179,33 @@ export function validateOperations(projectDir: string): FrameworkFileProblem[] {
  *  modules are decided first — an entity cannot be declared until there is a
  *  module to put it in. */
 const AGENT_APP_SECTIONS = ["Plan", "Modules", "Entities", "Operations", "Conventions", "Checklist"];
-const REQUIREMENTS_SECTIONS = ["Overview", "Features", "Modules", "Data", "Design", "Operations"];
+
+/** The two-part spec: Part A (SRS — what must exist, walk-verify drives it) then
+ *  Part B (Technical Specification — how it is built, with the Quality
+ *  Conformance decision record). `## Changes` is the only section absent here:
+ *  the first modification creates it. */
+const REQUIREMENTS_SECTIONS = [
+  "Introduction",
+  "Approval",
+  "Product Description",
+  "Features",
+  "Non-Functional Requirements",
+  "Data Requirements",
+  "External Interfaces",
+  "Out of Scope",
+  "Quality of Life",
+  "System Overview",
+  "UI Design",
+  "Quality Conformance",
+  "Conventions and overrides",
+  "Process Flows",
+  "Operations Design",
+];
+
+/** The template's fill markers. A spec still carrying one is not authored:
+ *  the gate refuses it by name so a half-filled template can never reach
+ *  verification, let alone the user. */
+const TEMPLATE_MARKER = /<REPLACE:/;
 
 function checkMarkdownSections(
   projectDir: string,
@@ -204,6 +230,29 @@ function checkMarkdownSections(
   return problems;
 }
 
+/** The body lines of the first heading (any level, `#`–`###`) whose title
+ *  starts with `section`, up to the next heading of the same or a higher
+ *  level. Deeper subheadings and their bodies belong to the section —
+ *  Features keeps its "### Module: <name>" groups, and a `###` section like
+ *  Approval is addressable on its own. */
+function sectionBody(src: string, section: string): string[] {
+  const lower = section.toLowerCase();
+  const out: string[] = [];
+  let level = 0;
+  for (const line of src.split("\n")) {
+    const h = line.match(/^(#{1,3})\s+(.*)/);
+    if (h) {
+      if (level > 0 && h[1]!.length <= level) break;
+      if (level === 0 && h[2]!.trim().toLowerCase().startsWith(lower)) level = h[1]!.length;
+      continue;
+    }
+    if (level > 0) out.push(line);
+  }
+  return out;
+}
+
+const LIST_ITEM = /^\s*[-*]\s+(.*\S)/;
+
 export function validateAgentAppDoc(projectDir: string): FrameworkFileProblem[] {
   return checkMarkdownSections(projectDir, "AGENT_APP.md", AGENT_APP_SECTIONS);
 }
@@ -211,36 +260,121 @@ export function validateAgentAppDoc(projectDir: string): FrameworkFileProblem[] 
 export function validateRequirementsDoc(projectDir: string): FrameworkFileProblem[] {
   const file = join("reference", "requirements.md");
   const problems = checkMarkdownSections(projectDir, file, REQUIREMENTS_SECTIONS);
+  // Content checks are skipped when sections are already missing — a second
+  // problem derived from the first buries the real cause.
+  if (problems.length > 0) return problems;
+  const src = readFileSync(join(projectDir, file), "utf8");
+
+  // An unauthored spec is refused before any content check: markers mean the
+  // creator has not written this app's spec yet, and every downstream check
+  // would only re-report that one fact in fragments.
+  const markers = src.split("\n").filter((l) => TEMPLATE_MARKER.test(l)).length;
+  if (markers > 0) {
+    return [{
+      file,
+      message: `${markers} template placeholder(s) <REPLACE: …> remain — the spec is not authored; write Part A, get the user's approval, then Part B (creator skill)`,
+    }];
+  }
+
   // Features must carry at least one checkable statement, not just the heading:
   // walk-verify is an agent driving the app against these items one by one, and
   // an empty list would let a build claim "verified" with nothing verified.
-  // Skipped when the file or the section is already reported — a second problem
-  // derived from the first buries the real cause.
-  if (problems.length === 0 && requirementsFeatures(projectDir).length === 0) {
+  const features = requirementsFeatures(projectDir);
+  if (features.length === 0) {
     problems.push({
       file,
       message: 'section "## Features" has no list items — each feature must be a checkable capability statement for walk-verify to drive',
+    });
+  }
+
+  // Feature IDs (F-<MOD>-n) are how tasks and defect reports cite the spec; a
+  // duplicated ID makes every citation ambiguous. IDs are a convention, not a
+  // mandate — only duplicates fail, never absence.
+  const ids = features.flatMap((f) => f.match(/\bF-[A-Z0-9]+-\d+\b/g) ?? []);
+  const dupes = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  if (dupes.length > 0) {
+    problems.push({ file, message: `duplicate Feature ID(s): ${dupes.join(", ")} — every citation of these is ambiguous` });
+  }
+
+  // Part A is frozen by an approval that actually happened; the record of it
+  // is one dated line. A spec that cannot say when it was approved was not.
+  if (!sectionBody(src, "Approval").some((l) => l.trim() !== "")) {
+    problems.push({
+      file,
+      message: 'section "### Approval" is empty — record the user\'s approval of Part A (date) before building',
+    });
+  }
+
+  // Scope nobody bounded is scope the builder invents — the documented failure
+  // mode of every requirement-expanding agent. "- None declared." is honest and
+  // passes; an absent decision does not.
+  if (!sectionBody(src, "Out of Scope").some((l) => LIST_ITEM.test(l))) {
+    problems.push({
+      file,
+      message: 'section "## Out of Scope" has no items — list the exclusions (exhaustive), or state "- None declared."',
+    });
+  }
+
+  // A UI Design section that says nothing is a screen nobody designed.
+  if (!sectionBody(src, "UI Design").some((l) => l.trim() !== "")) {
+    problems.push({
+      file,
+      message: 'section "## UI Design" is empty — record the design system, layout, and each screen\'s primary object, primary action, states, and narrow-width behavior',
+    });
+  }
+
+  // Quality Conformance is where the Quality Standard becomes this app's
+  // decisions: one entry per standard section, Q1–Q18. A missing entry is a
+  // quality area nobody decided — the exact hole the verifier keeps finding
+  // in code instead of in the spec.
+  const qNumbers = new Set(
+    sectionBody(src, "Quality Conformance")
+      .flatMap((l) => [...l.matchAll(/\*\*Q(\d+)\b/g)].map((m) => Number(m[1]))),
+  );
+  const missingQ = Array.from({ length: 18 }, (_, i) => i + 1).filter((n) => !qNumbers.has(n));
+  if (missingQ.length > 0) {
+    problems.push({
+      file,
+      message: `section "## Quality Conformance" is missing entr${missingQ.length === 1 ? "y" : "ies"} ${missingQ.map((n) => `Q${n}`).join(", ")} — every standard section gets this app's decision (or N/A with the reason)`,
     });
   }
   return problems;
 }
 
 /** The "## Features" list items: the checkable capability statements a
- *  walk-verify agent drives one by one. */
+ *  walk-verify agent drives one by one, including those grouped under
+ *  "### Module: <name>" subheadings. */
 export function requirementsFeatures(projectDir: string): string[] {
   const path = join(projectDir, "reference", "requirements.md");
   if (!existsSync(path)) return [];
-  const src = readFileSync(path, "utf8").split("\n");
+  const src = readFileSync(path, "utf8");
   const out: string[] = [];
-  let inFeatures = false;
-  for (const line of src) {
-    if (/^#{1,3}\s+/.test(line)) inFeatures = /^#{1,3}\s+features\b/i.test(line);
-    else if (inFeatures) {
-      const m = line.match(/^\s*[-*]\s+(.*\S)/);
-      if (m) out.push(m[1]!);
-    }
+  for (const line of sectionBody(src, "Features")) {
+    const m = line.match(LIST_ITEM);
+    if (m) out.push(m[1]!);
   }
   return out;
+}
+
+/** `reference/tasks.md` — the build ledger. A build with no ledger cannot show
+ *  what it did: every task cites the Feature ID or Part B section it
+ *  implements, and completed tasks are the record walk-verify's builder
+ *  hand-off rests on. */
+export function validateTasksDoc(projectDir: string): FrameworkFileProblem[] {
+  const file = join("reference", "tasks.md");
+  const path = join(projectDir, file);
+  if (!existsSync(path)) {
+    return [{ file, message: "missing — derive the task ledger from the approved spec before building (one task per Feature ID or Q-entry)" }];
+  }
+  const src = readFileSync(path, "utf8");
+  const markers = src.split("\n").filter((l) => TEMPLATE_MARKER.test(l)).length;
+  if (markers > 0) {
+    return [{ file, message: `${markers} template placeholder(s) <REPLACE: …> remain — derive real tasks from the approved spec` }];
+  }
+  if (!src.split("\n").some((l) => /^\s*[-*]\s+\[[ xX]\]\s+\S/.test(l))) {
+    return [{ file, message: 'has no tasks — at least one "- [ ] T-n (F-…): …" item is required; the ledger is how the build shows what it did' }];
+  }
+  return [];
 }
 
 /** Run every framework-file check. */
@@ -250,5 +384,6 @@ export function validateFrameworkFiles(projectDir: string): FrameworkFileProblem
     ...validateOperations(projectDir),
     ...validateAgentAppDoc(projectDir),
     ...validateRequirementsDoc(projectDir),
+    ...validateTasksDoc(projectDir),
   ];
 }

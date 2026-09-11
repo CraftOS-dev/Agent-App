@@ -40,6 +40,10 @@ venv/
 backups/
 .a2app/backups/
 .a2app/dev/
+apps/erp/
+apps/atlas-erp/
+apps/expense-tracker/
+
 # the operate client's per-app describe cache: written on any walk, keyed on the
 # app's own schemaVersion, and rebuilt on demand. Never a source file.
 # `**/` because a pattern with an inner slash is anchored to this file's

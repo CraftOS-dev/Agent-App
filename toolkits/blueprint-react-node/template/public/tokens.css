@@ -1,67 +1,12 @@
-/**
- * @a2app/kit — the versioned kit a toolkit vendors into an Agent App: shared
- * View glue and a small browser A2App client. Vendored files are system-owned
- * (hash-locked in the ownership canon); an agent uses them but does not edit
- * them. Kept dependency-free so it drops into any stack.
- */
-export const KIT_VERSION = "0.1.0";
-
-/** A minimal browser client for the app's own data surface. Same-origin, so the
- *  origin rule treats it as the trusted UI path — no token needed. Mirrors the
- *  CLI/SDK record surface for the human View. */
-export class BrowserDataClient {
-  constructor(private readonly base = "") {}
-
-  private path(entity: string): string {
-    return `${this.base}/api/collections/${entity}/records`;
-  }
-
-  async list<T = Record<string, unknown>>(entity: string, query: { filter?: string; sort?: string } = {}): Promise<T[]> {
-    const qs = new URLSearchParams();
-    if (query.filter) qs.set("filter", query.filter);
-    if (query.sort) qs.set("sort", query.sort);
-    const res = await fetch(`${this.path(entity)}${qs.size ? `?${qs}` : ""}`);
-    const json = (await res.json()) as { items?: T[] };
-    return json.items ?? [];
-  }
-  async create<T = Record<string, unknown>>(entity: string, body: Record<string, unknown>): Promise<T> {
-    return this.send<T>("POST", this.path(entity), body);
-  }
-  async update<T = Record<string, unknown>>(entity: string, id: string, body: Record<string, unknown>): Promise<T> {
-    return this.send<T>("PATCH", `${this.path(entity)}/${id}`, body);
-  }
-  async remove(entity: string, id: string): Promise<void> {
-    await fetch(`${this.path(entity)}/${id}`, { method: "DELETE" });
-  }
-  async identity(): Promise<{ app: { id: string; name?: string | null } } | null> {
-    try {
-      const res = await fetch(`${this.base}/api/_a2app`);
-      return (await res.json()) as { app: { id: string; name?: string | null } };
-    } catch {
-      return null;
-    }
-  }
-  private async send<T>(method: string, url: string, body: Record<string, unknown>): Promise<T> {
-    const res = await fetch(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    return (await res.json()) as T;
-  }
-}
-
-/**
- * The kit design tokens as a CSS string an app can inline or serve.
- *
- * A two-tier system: Tier-1 primitives (raw palette) → Tier-2 semantic aliases.
- * Components consume ONLY Tier-2, so a theme is a re-point of Tier-2 and never
- * a component edit. Both schemes (light, and dark via `prefers-color-scheme` or
- * an explicit `data-theme="dark"` on the root) resolve every semantic token on
- * their own — contrast pairs hold WCAG AA in each.
- *
- * The blueprints vendor this same sheet as `public/tokens.css`; the two are kept
- * in lockstep (this constant is the source of truth for the token *names* —
- * an app themes by re-pointing values, never by renaming).
- */
-export const DESIGN_TOKENS_CSS = `/* Agent App kit design tokens — two tiers: primitives, then semantic aliases.
-   Components consume ONLY the semantic tier. Theme = re-point the semantic tier. */
+/* ============================================================================
+   Design tokens (AGENT-OWNED — theme the app by editing the SEMANTIC tier).
+   Two tiers: Tier-1 primitives (raw palette) → Tier-2 semantic aliases.
+   Components consume ONLY Tier-2, so a theme change is a re-point of Tier-2,
+   never a component edit. Light and dark each resolve every semantic token on
+   their own; contrast pairs hold WCAG AA in both.
+   (This sheet ships in lockstep with @a2app/kit's DESIGN_TOKENS_CSS — keep the
+   token NAMES stable; re-point values freely.)
+   ============================================================================ */
 :root {
   /* Tier 1: primitives */
   --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
@@ -69,10 +14,10 @@ export const DESIGN_TOKENS_CSS = `/* Agent App kit design tokens — two tiers: 
   --slate-800:#1e293b; --slate-900:#0f172a;
   --indigo-50:#eef2ff; --indigo-200:#c7d2fe; --indigo-300:#a5b4fc; --indigo-400:#818cf8;
   --indigo-500:#6366f1; --indigo-600:#4f46e5; --indigo-700:#4338ca;
-  --green-50:#f0fdf4; --green-400:#4ade80; --green-500:#22c55e; --green-600:#16a34a; --green-700:#15803d; --green-100:#dcfce7;
-  --amber-50:#fffbeb; --amber-400:#fbbf24; --amber-500:#f59e0b; --amber-700:#b45309; --amber-100:#fef3c7;
-  --red-50:#fef2f2; --red-400:#f87171; --red-500:#ef4444; --red-600:#dc2626; --red-700:#b91c1c; --red-100:#fee2e2;
-  --blue-50:#eff6ff; --blue-400:#60a5fa; --blue-500:#3b82f6; --blue-600:#2563eb; --blue-700:#1d4ed8; --blue-100:#dbeafe;
+  --green-50:#f0fdf4; --green-100:#dcfce7; --green-400:#4ade80; --green-500:#22c55e; --green-600:#16a34a; --green-700:#15803d;
+  --amber-50:#fffbeb; --amber-100:#fef3c7; --amber-400:#fbbf24; --amber-500:#f59e0b; --amber-700:#b45309;
+  --red-50:#fef2f2; --red-100:#fee2e2; --red-400:#f87171; --red-500:#ef4444; --red-600:#dc2626; --red-700:#b91c1c;
+  --blue-50:#eff6ff; --blue-100:#dbeafe; --blue-400:#60a5fa; --blue-500:#3b82f6; --blue-600:#2563eb; --blue-700:#1d4ed8;
 
   /* Tier 2: semantic (light) */
   --bg-canvas:var(--slate-100); --bg-surface:#ffffff; --bg-raised:#ffffff;
@@ -116,6 +61,8 @@ export const DESIGN_TOKENS_CSS = `/* Agent App kit design tokens — two tiers: 
 
   /* controls */
   --control-h:36px; --row-h:44px;
+
+  color-scheme: light dark;
 }
 
 [data-theme="dark"] {
@@ -147,14 +94,14 @@ export const DESIGN_TOKENS_CSS = `/* Agent App kit design tokens — two tiers: 
     --success-solid:var(--green-500); --success-text:var(--green-400); --success-bg:rgba(34,197,94,.12); --success-border:rgba(34,197,94,.22);
     --warning-solid:var(--amber-500); --warning-text:var(--amber-400); --warning-bg:rgba(245,158,11,.12); --warning-border:rgba(245,158,11,.22);
     --danger-solid:var(--red-500);    --danger-text:var(--red-400);    --danger-bg:rgba(239,68,68,.12);   --danger-border:rgba(239,68,68,.22);
-    --info-solid:var(--blue-500);     --info-text:var(--blue-400);     --info-bg:rgba(59,130,246,.12);    --info-border:rgba(59,130,246,.22);
+    --info-solid:var(--blue-500);     --info-text:var(--blue-400);    --info-bg:rgba(59,130,246,.12);    --info-border:rgba(59,130,246,.22);
     --neutral-text:var(--slate-300);  --neutral-bg:rgba(148,163,184,.12); --neutral-border:rgba(148,163,184,.2);
     --sh-1:0 1px 2px rgb(0 0 0 / .4); --sh-2:0 2px 8px rgb(0 0 0 / .45);
     --sh-3:0 8px 20px rgb(0 0 0 / .5); --sh-4:0 16px 32px rgb(0 0 0 / .55);
   }
 }
 
+/* Reduced motion: motion is never the only channel, so removing it loses nothing. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; }
 }
-`;

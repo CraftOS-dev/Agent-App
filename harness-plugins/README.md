@@ -1,4 +1,4 @@
-# Harness Integrations
+# Harness Plugins
 
 Per-harness **plugins**: each registers agent tools that build and operate Agent Apps by shelling the framework CLIs (`agent-app` for build/evolve, `a2app` for operate), in the harness's own plugin API. The shared logic lives once in [integration-starter/](integration-starter/) (the engine); each plugin is a thin binding to a real harness API. Harnesses with no plugin use the universal [../skills/](../skills/) route: the skills tell the agent to run `agent-app <dir> open`, and the CLI opens the app itself (harness-declared opener, else the OS browser, always printing the URL) — so a launched app reaches the user with no plugin code at all.
 

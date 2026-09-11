@@ -123,7 +123,7 @@ Agents use the app programmatically via the A2App protocol, while continuing to 
 | [framework/](framework/) | TypeScript reference implementation: the `agent-app` + `a2app` CLIs + optional reference host |
 | [adapters/](adapters/) | A2App adapter layers: shared pure rules, starter, sidecar form |
 | [toolkits/](toolkits/) | Blueprints & kits — **NOT part of the framework** (optional accelerators) |
-| [integrations/](integrations/) | Per-harness plugins (plugins are Hosts in spec terms) — CraftBot, OpenClaw, Hermes, dsh |
+| [harness-plugins/](harness-plugins/) | Per-harness plugins (plugins are Hosts in spec terms) — CraftBot, OpenClaw, Hermes, dsh |
 | [skills/](skills/) | Framework skills per the pinned skill contract (creator, modify, importer, operator, walk-verify, connect) |
 | [sdks/](sdks/) | Protocol client SDKs (TypeScript first, Python next) |
 | [apps/](apps/) | The runnable playground Agent App |

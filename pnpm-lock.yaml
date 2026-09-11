@@ -47,6 +47,22 @@ importers:
 
   adapters/rules: {}
 
+  apps/atlas-erp:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+    devDependencies:
+      gpt-tokenizer:
+        specifier: ^4.0.0
+        version: 4.0.0
+
+  apps/expense-tracker:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+
   apps/playground:
     dependencies:
       '@a2app/adapter-core':
@@ -105,7 +121,7 @@ importers:
         specifier: ^20.19.0
         version: 20.19.43
 
-  integrations/claude-code:
+  harness-plugins/claude-code:
     dependencies:
       '@a2app/integration-starter':
         specifier: workspace:*
@@ -115,19 +131,19 @@ importers:
         specifier: ^20.19.0
         version: 20.19.43
 
-  integrations/dsh:
+  harness-plugins/dsh:
     dependencies:
       '@a2app/integration-starter':
         specifier: workspace:*
         version: link:../integration-starter
 
-  integrations/integration-starter:
+  harness-plugins/integration-starter:
     devDependencies:
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43
 
-  integrations/openclaw:
+  harness-plugins/openclaw:
     dependencies:
       '@a2app/integration-starter':
         specifier: workspace:*
@@ -154,6 +170,9 @@ packages:
   '@types/node@20.19.43':
     resolution: {integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==}
 
+  gpt-tokenizer@4.0.0:
+    resolution: {integrity: sha512-YAWIyzvuVUHEfW7tFfFAxH8qQb+Q3RU9nYOTy7skMNX5qzU6Q8jxTHZLyO56ug1vYvCR7wndzpd3jwD86/mhjQ==}
+
   typescript@5.7.2:
     resolution: {integrity: sha512-i5t66RHxDvVN40HfDd1PsEThGNnlMCMT3jMUuoh9/0TaqWevNontacunWyN02LA9/fIbEWlcHZcgTKb9QoaLfg==}
     engines: {node: '>=14.17'}
@@ -172,6 +191,8 @@ snapshots:
   '@types/node@20.19.43':
     dependencies:
       undici-types: 6.21.0
+
+  gpt-tokenizer@4.0.0: {}
 
   typescript@5.7.2: {}
 

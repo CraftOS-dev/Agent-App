@@ -46,8 +46,18 @@ export async function run(_args: string[], app: string): Promise<number> {
       if (backup !== null) log.info(`live database unchanged; restore point: ${backup}`);
       return 1;
     }
+    // Promotion runs with the app STOPPED (assertNotServing above), so nothing
+    // is live yet — say the one thing that has to happen next. Left implicit,
+    // this is where the loop breaks: the code is promoted, the user believes
+    // they are done, and the tab they still have open keeps running the old
+    // build with nothing to tell them otherwise.
     log.ok("promoted to live");
-    log.raw(JSON.stringify({ ok: true, backup }, null, 2));
+    log.info(`launch it: agent-app ${app} serve`);
+    log.info(
+      "a tab left open on the old build will offer a reload once the app is back " +
+        "(it never reloads by itself — unsaved input is safe)",
+    );
+    log.raw(JSON.stringify({ ok: true, backup, next: `agent-app ${app} serve` }, null, 2));
     return 0;
   });
 }

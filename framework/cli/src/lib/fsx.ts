@@ -22,13 +22,48 @@ import {
   statSync,
   symlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** A monotonic-per-process suffix so staged temp names never collide, without
  *  relying on wall-clock time. */
 let tmpCounter = 0;
 function tmpSuffix(): string {
   return `${process.pid}-${tmpCounter++}`;
+}
+
+/**
+ * Physical containment: lexically inside `base` AND not reached through a
+ * symlink.
+ *
+ * {@link assertInside} compares strings, so a path with no `..` and no drive
+ * letter passes even when a component of it is a link pointing elsewhere. An
+ * app directory is untrusted input — `import` exists to take one from a
+ * stranger, and tar, zip and git all carry links (a Windows junction needs no
+ * privilege at all) — so a template file named `hooks/authorized_keys`, with
+ * `hooks` a link to ~/.ssh, was written straight through the link and
+ * overwrote a file the project has no business touching.
+ *
+ * Every component below `base` is checked. `base` itself may legitimately be a
+ * link: the user chose where their project lives.
+ */
+export function assertRealInside(base: string, candidate: string, label = "path"): string {
+  const target = assertInside(base, candidate, label);
+  const root = resolve(base);
+  let cur = root;
+  for (const segment of relative(root, target).split(sep)) {
+    if (segment === "") continue;
+    cur = join(cur, segment);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      break; // nothing here yet, so nothing to traverse
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(`${label} "${candidate}" leaves ${root} through a link at ${cur}`);
+    }
+  }
+  return target;
 }
 
 /**
@@ -106,6 +141,13 @@ export function copyTree(src: string, dest: string): void {
   }
   if (!st.isDirectory()) {
     mkdirSync(dirname(dest), { recursive: true });
+    // Replace a link rather than write through it: copyFileSync follows the
+    // destination, so a link left in the tree redirects the write outside it.
+    try {
+      if (lstatSync(dest).isSymbolicLink()) rmSync(dest, { force: true });
+    } catch {
+      /* nothing there yet */
+    }
     copyFileSync(src, dest);
     return;
   }

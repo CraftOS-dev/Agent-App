@@ -24,7 +24,7 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
 /** Verbs owned by the `agent-app` binary; everything else is `a2app` operate
  *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
 export const FRAMEWORK_VERBS = new Set([
-  "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
+  "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
   "list", "global", "skills", "dev", "promote", "backup", "restore",
 ]);
 
@@ -279,6 +279,41 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
       parameters: obj({ dir: DIR, noBuild: { type: "boolean" } }, ["dir"]),
       handler: (a) => build(a.noBuild ? [String(a.dir), "validate", "--no-build"] : [String(a.dir), "validate"]),
     },
+    {
+      // Without this an agent on the plugin route could scaffold and gate an app
+      // but never launch one — the last step of every build would have to fall
+      // out of the tool surface and into a raw shell.
+      name: "agent_app_serve",
+      description:
+        "Launch an Agent App as a managed background process and wait until it answers its health " +
+        "endpoint. Returns the app's URL. Idempotent: serving an already-running app reports the " +
+        "existing instance rather than starting a second one. Set `open` to also show it to the user.",
+      parameters: obj({ dir: DIR, install: { type: "boolean" }, open: { type: "boolean" } }, ["dir"]),
+      handler: (a) => {
+        const argv = [String(a.dir), "serve"];
+        if (a.install === true) argv.push("--install");
+        if (a.open === true) argv.push("--open");
+        return build(argv);
+      },
+    },
+    {
+      name: "agent_app_stop",
+      description: "Stop an app launched with agent_app_serve.",
+      parameters: obj({ dir: DIR }, ["dir"]),
+      handler: (a) => build([String(a.dir), "stop"]),
+    },
+    {
+      // The URL is the deliverable here, not the side effect: a harness whose
+      // agent owns a browser passes printOnly and opens it with its own tool.
+      name: "agent_app_open",
+      description:
+        "Show a RUNNING Agent App to the user: opens it with the harness's configured opener, else " +
+        "the OS browser, and always returns the URL. Set `printOnly` when YOU have a browser tool " +
+        "and will open the URL yourself — that suppresses the OS browser so the user gets one window, " +
+        "not two. `opened:false` is not a failure; the URL is still valid.",
+      parameters: obj({ dir: DIR, printOnly: { type: "boolean" } }, ["dir"]),
+      handler: (a) => build(a.printOnly === true ? [String(a.dir), "open", "--print-only"] : [String(a.dir), "open"]),
+    },
   ];
 }
 
@@ -291,6 +326,31 @@ export function registerA2AppPlugin(ctx: HarnessContext, opts: PluginOptions = {
   const cliBin = opts.cliBin ?? "a2app";
   const frameworkBin = opts.frameworkBin ?? "agent-app";
   const tools = a2appTools(cliBin, frameworkBin);
+
+  // A harness with a display should EMBED a launched app rather than throw the
+  // user out to a separate browser window. So when `registerDisplay` exists we
+  // suppress the CLI's own opener (`open: false`) and register the display from
+  // the serve result instead — which is what makes the display hook live rather
+  // than merely declared.
+  if (typeof ctx.registerDisplay === "function") {
+    for (const tool of tools) {
+      if (tool.name !== "agent_app_serve") continue;
+      const launch = tool.handler;
+      tool.handler = async (args) => {
+        const result = await launch({ ...args, open: false });
+        const app = result.json as { id?: string; name?: string; url?: string } | null;
+        if (result.ok && typeof app?.url === "string") {
+          showAgentApp(ctx, {
+            id: app.id ?? String(args.dir ?? "app"),
+            name: app.name ?? "Agent App",
+            url: app.url,
+          });
+        }
+        return result;
+      };
+    }
+  }
+
   for (const tool of tools) ctx.registerTool(tool);
 
   if (opts.skillsDir && ctx.registerSkillsDir) {

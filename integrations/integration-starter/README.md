@@ -8,10 +8,10 @@ A plugin's real job is small and identical everywhere: expose the `agent-app` an
 
 | Export | What it does |
 |---|---|
-| `a2appTools(cliBin?, frameworkBin?)` | The 12 build+operate tools (`agent_app_describe`, `_list`, `_get`, `_create`, `_update`, `_delete`, `_operations`, `_run_operation`, `_poll_tasks`, `_build`, `_validate`, `_walk_verify`). Each shells a real verb on the owning binary (`agent-app` for build/evolve, `a2app` for operate). |
+| `a2appTools(cliBin?, frameworkBin?)` | The 14 build+operate tools (`agent_app_describe`, `_find`, `_list`, `_get`, `_create`, `_update`, `_delete`, `_run_operation`, `_poll_tasks`, `_build`, `_validate`, `_serve`, `_stop`, `_open`). Each shells a real verb on the owning binary (`agent-app` for build/evolve, `a2app` for operate). There is deliberately no `agent_app_operations`: an operation is found on the screen it belongs to, never in a global list. |
 | `registerA2AppPlugin(ctx, opts?)` | Register every tool + the skills bundle + an `agent-app` passthrough command into a `HarnessContext`. |
 | `runA2App(cliBin, argv)` | Run the CLI and return `{ code, ok, stdout, stderr, json }`. **Never uses a shell** — field values reach the CLI as literal argv, so injection is impossible. Point `cliBin` at a `…/cli.js` entry to run it via Node. |
-| `showAgentApp(ctx, app)` | Register an embedded display for a launched app. |
+| `showAgentApp(ctx, app)` | Register an embedded display for a launched app. `registerA2AppPlugin` calls this automatically when the host implements `registerDisplay`, and suppresses the CLI's own browser opener so the user gets an embedded view instead of a stray window. |
 
 ## Verified
 

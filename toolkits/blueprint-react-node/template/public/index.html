@@ -65,5 +65,12 @@
     </div>
 
     <script type="module" src="./app.js"></script>
+    <!-- The server's update watcher (system-owned, served from /_a2app/update.js).
+         The View is served from disk, so a promote is live at once — but a tab
+         opened beforehand keeps running the old JavaScript. This notices and
+         offers a reload. It NEVER reloads on its own: this is a data-entry app,
+         and discarding half-typed input is worse than the stale tab. Keep this
+         line when you rewrite the View. -->
+    <script type="module" src="/_a2app/update.js"></script>
   </body>
 </html>

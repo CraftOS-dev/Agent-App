@@ -8,11 +8,11 @@
  * `public/` (View) — never this file. Because describe and `schemaVersion` are
  * derived from the live schema, an agent always sees the true model.
  */
-import { createA2App, createA2AppServer, UnsupportedFilterError } from "@a2app/adapter-core";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createA2App, createA2AppServer, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, extname, join, normalize } from "node:path";
+import { dirname, join } from "node:path";
 import { schema } from "./a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -197,8 +197,38 @@ if (existsSync(TOKEN_FILE)) {
   writeFileSync(TOKEN_FILE, token + "\n", { mode: 0o600 });
 }
 
+/* ------------------------------------------------------------ static View */
+
+/**
+ * The View, served from disk with real cache validators.
+ *
+ * `createStaticView` is the framework's static handler, not a per-app one: it
+ * answers every asset with `ETag`, `Last-Modified` and `Cache-Control: no-cache`
+ * and honours conditional requests, so a plain reload always re-checks and an
+ * unchanged file costs a bodyless 304. This file is system-owned and hash-locked
+ * precisely so an app author never has to fix cache correctness themselves.
+ *
+ * `view.version()` fingerprints the bytes it serves. That is published below as
+ * identity's `appVersion`, and it is the ONLY signal that moves for a View-only
+ * change — `schemaVersion` covers entities and operations, so a new control, a
+ * CSS tweak or reworded copy leaves it byte-identical. `a2app.schema.mjs` is
+ * folded in as well: an operation's description is not in `schemaVersion` either,
+ * yet it changes what the app tells an agent.
+ */
+const view = createStaticView(PUBLIC_DIR, {
+  // The update watcher lives at the project root, not inside `public/`: it is
+  // system-owned, and `public/` is the agent's to rewrite entirely.
+  aliases: { "/_a2app/update.js": join(HERE, "a2app-update.js") },
+  fingerprintPaths: [join(HERE, "a2app.schema.mjs")],
+  // An author who wants to move the marker by hand can bump manifest.appVersion.
+  versionSalt: manifest.appVersion ?? "",
+});
+
 const app = createA2App(binding, {
   credentials: [{ token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
+  // Re-derived per request, so it stays true for a server whose files changed
+  // under it — the same "derive, do not declare" rule schemaVersion follows.
+  appVersion: () => view.version(),
   operations: schema.operations ?? [],
   // Modules are declared in the manifest and are what describe's root level
   // lists; every entity and operation names one.
@@ -224,58 +254,13 @@ function logLine(level, evt, fields = {}) {
 
 let nextRequestId = 0;
 
-/* ------------------------------------------------------------ static View */
+/* ---------------------------------------------------------------- listen */
 
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".png": "image/png",
-};
-
-/** Cache policy (deliberate, not defaulted): every static response is
- *  `no-cache` WITH a validator, so the browser revalidates each time and the
- *  server answers 304 for the unchanged — always-fresh while the agent evolves
- *  the app, never a full re-download of what didn't change. */
-function etagFor(filePath) {
-  const st = statSync(filePath);
-  return `"${st.size.toString(36)}-${st.mtimeMs.toString(36)}"`;
-}
-
-/** Fallthrough for any path the adapter does not own: serve `public/`.
- *  Extension-less GET paths fall back to index.html (deep links load the SPA);
- *  missing files answer 404. */
-function serveStatic(req, res) {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  let rel = decodeURIComponent(url.pathname);
-  if (rel === "/") rel = "/index.html";
-  let filePath = normalize(join(PUBLIC_DIR, rel));
-  if (filePath.startsWith(PUBLIC_DIR) && !existsSync(filePath) && req.method === "GET" && extname(rel) === "") {
-    filePath = join(PUBLIC_DIR, "index.html"); // SPA fallback
-  }
-  if (!filePath.startsWith(PUBLIC_DIR) || !existsSync(filePath)) {
-    res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-    res.end(JSON.stringify({ a2app: true, ok: false, code: "not_found", message: "No such route." }));
-    return;
-  }
-  const etag = etagFor(filePath);
-  if (req.headers["if-none-match"] === etag) {
-    res.writeHead(304, { etag, "cache-control": "no-cache" });
-    res.end();
-    return;
-  }
-  res.writeHead(200, {
-    "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
-    "cache-control": "no-cache",
-    etag,
-  });
-  res.end(readFileSync(filePath));
-}
-
-const server = createA2AppServer(app, serveStatic);
+// Any path the adapter does not own falls through to the View. `view.handler`
+// (the framework's system-owned static handler) answers each asset with ETag,
+// Last-Modified and Cache-Control: no-cache and honours conditional requests,
+// so cache correctness is not this file's to re-solve.
+const server = createA2AppServer(app, view.handler);
 
 // Observe (never handle) every request for the log: id, method, path, status,
 // duration. Paths only — query strings can carry filters over user data.
@@ -304,6 +289,12 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
-  logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://localhost:${PORT}` });
+// Bind loopback explicitly. `listen(PORT)` alone binds every interface, so the
+// app was reachable from the network while its own log line said localhost --
+// and a same-origin request is trusted as the owner without a credential, which
+// made a scaffolded Agent App remotely writable by anyone who could reach the
+// port. Exposing it must be a deliberate act, hence the env var.
+const HOST = process.env.A2APP_HOST ?? "127.0.0.1";
+server.listen(PORT, HOST, () => {
+  logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://${HOST}:${PORT}` });
 });

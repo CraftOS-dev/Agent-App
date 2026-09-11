@@ -40,6 +40,15 @@ exactly one, and describe's root screen lists them. They are declared in
   action that fills it, an error state with a retry path, disabled/pending
   controls while a write is in flight, and success read back from what the
   server stored.
+- KEEP the update watcher when you rewrite the View. `index.html` loads
+  `<script type="module" src="/_a2app/update.js"></script>`; it is served by
+  `server.mjs` from a system-owned file. Without it, a tab someone left open goes
+  on running the JavaScript it already downloaded after you promote a change, and
+  nothing tells them. It offers a reload and never takes one — reloading a page
+  with half-typed input in it destroys work, which is worse than the stale tab.
+- `schemaVersion` is NOT a signal that the UI changed. It fingerprints entities
+  and operations only, so a new control, a CSS change, or reworded copy leaves it
+  identical. Identity's `appVersion` is the marker that moves for those.
 - To add an entity: add it to `schema.entities` in `a2app.schema.mjs`; describe and
   `schemaVersion` update automatically. Keep `operations.json` in sync with the
   schema's `operations`.

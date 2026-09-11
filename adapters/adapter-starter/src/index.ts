@@ -78,7 +78,9 @@ export function startNotesApp(port = 8091, token = "a2app_starter_token"): Retur
     allowedOrigins: [`http://localhost:${port}`, `http://127.0.0.1:${port}`],
   });
   const server = createA2AppServer(app);
-  server.listen(port, () => process.stdout.write(`notes adapter on http://127.0.0.1:${port}\n`));
+  // Loopback explicitly: `listen(port)` alone binds every interface, which this
+  // line already claimed it did not.
+  server.listen(port, "127.0.0.1", () => process.stdout.write(`notes adapter on http://127.0.0.1:${port}\n`));
   return server;
 }
 

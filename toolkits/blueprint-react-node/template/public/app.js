@@ -12,6 +12,12 @@
  * server STORED — never assumed from what was sent.
  */
 import { el, icon, toast, confirmDialog, fmtDay, isPastDay } from "./ui.js";
+// The update watcher (system-owned, loaded by index.html) reports two different
+// kinds of staleness. A CODE change it handles itself, by reloading when the
+// page holds nothing unsaved. A DATA change it only announces — because only
+// this file knows how to re-read without discarding a form someone is filling
+// in. Borrow its check so both paths apply the same rule.
+import { hasUnsavedInput } from "/_a2app/update.js";
 
 const API = "/api/collections/tasks/records";
 const PER_PAGE = 100; // the client never renders an unbounded collection
@@ -329,6 +335,16 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     dom.title.focus();
   }
+});
+
+/* ------------------------------------------------------- external changes */
+
+// Someone else changed the data — an agent through A2App, or another tab. Re-read
+// and re-render: the code we are running is current, so a reload would cost
+// whatever is half-typed to fix a problem that was never about this page.
+window.addEventListener("a2app:datachange", () => {
+  if (hasUnsavedInput()) return; // the next write re-reads anyway
+  loadTasks();
 });
 
 /* ------------------------------------------------------------------ boot */

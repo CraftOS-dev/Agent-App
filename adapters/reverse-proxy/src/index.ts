@@ -182,6 +182,9 @@ export function createReverseProxy(cfg: ReverseProxyConfig, credentials: Grant[]
 export function startReverseProxy(cfg: ReverseProxyConfig, port: number, token: string): ReturnType<typeof createA2AppServer> {
   const grant: Grant = { token, credentialId: "cred_proxy", agentName: "local", principal: "owner", scopes: ["*"] };
   const server = createA2AppServer(createReverseProxy(cfg, [grant]));
-  server.listen(port, () => process.stdout.write(`reverse-proxy adapter for ${cfg.appId} on http://127.0.0.1:${port}\n`));
+  // Loopback explicitly: `listen(port)` alone binds every interface, which this
+  // line already claimed it did not. A sidecar carrying an owner-scoped grant
+  // must not be the thing that puts the app on the network.
+  server.listen(port, "127.0.0.1", () => process.stdout.write(`reverse-proxy adapter for ${cfg.appId} on http://127.0.0.1:${port}\n`));
   return server;
 }

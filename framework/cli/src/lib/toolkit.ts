@@ -24,7 +24,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertInside, copyTree } from "./fsx.js";
+import { assertInside, assertRealInside, copyTree } from "./fsx.js";
 
 export interface GateStep {
   name: string;
@@ -59,11 +59,22 @@ function toolkitSearchRoots(): string[] {
   const roots = [process.cwd(), join(process.cwd(), "toolkits")];
   const envRoot = process.env["A2APP_TOOLKITS_DIR"];
   if (envRoot) roots.unshift(envRoot);
+  // In-repo dev BEFORE the bundle: dist/lib -> package -> framework -> repo root.
+  //
+  // Order matters, and having it the other way round was a trap. The bundled
+  // copy is a build artifact refreshed only at pack time, so in a checkout it is
+  // whatever the last `npm pack` left behind. Searched first, it silently won
+  // over the source: you edit `toolkits/<id>/template`, scaffold, and get an app
+  // built from the STALE blueprint — with no error, and nothing in the output
+  // naming which copy was used. Every symptom then looks like your edit having
+  // no effect.
+  //
+  // A published CLI has no repo above it, so this path simply does not exist
+  // there and the bundle still wins.
+  roots.push(resolve(CLI_DIR, "..", "..", "..", "..", "toolkits"));
   // Bundled with a published CLI: dist/lib -> package root -> toolkits/
   // (blueprints are copied here by scripts/bundle-blueprints.mjs at pack time).
   roots.push(resolve(CLI_DIR, "..", "..", "toolkits"));
-  // In-repo dev: dist/lib -> package -> framework -> repo root -> toolkits
-  roots.push(resolve(CLI_DIR, "..", "..", "..", "..", "toolkits"));
   return roots;
 }
 
@@ -121,7 +132,7 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
     // the project. assertInside throws on a `../` or absolute escape.
     const src = assertInside(templateRoot, rel, "template path");
     if (!existsSync(src)) continue;
-    const dest = assertInside(projectDir, rel, "vendored path");
+    const dest = assertRealInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
     copyTree(src, dest);
     written.push(rel);

@@ -8,6 +8,12 @@
  * records `.a2app/serve.json` so `agent-app stop` can shut it down. Server stdout is
  * captured to `.a2app/serve.log` for diagnosis.
  *
+ * With `--open`, a healthy launch is also shown to the human via the opener
+ * ladder in `open.ts` (harness-declared command, else the OS browser, else the
+ * printed URL). Opening is OFF by default: `serve` is also called by paths that
+ * are not a hand-off to a person — the idempotency check, and re-running the
+ * gate for the describe budget — and those must never pop a window.
+ *
  * Guarantees: idempotent (a second serve of THIS app reports the existing
  * instance; a port held by a DIFFERENT app or a stranger fails loudly, never a
  * silent second start); no orphans (a launch that never becomes healthy is
@@ -18,6 +24,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { verifySystemHashes } from "../lib/canon.js";
+import { hasFlag } from "../lib/args.js";
+import { openUrl } from "./open.js";
 import { loadProject } from "../lib/project.js";
 import { portInUse, register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
@@ -53,6 +61,17 @@ export async function run(args: string[], app: string): Promise<number> {
   const pipeline = project.manifest.pipeline;
   const port = project.manifest.port ?? 8090;
   const healthUrl = `${project.baseUrl}${pipeline?.health ?? "/api/_a2app"}`;
+  // `--open` is a hand-off to a person, so it runs only once the app is healthy —
+  // never before, or the browser races the server and lands on a refused port.
+  const wantOpen = hasFlag(args, "open");
+  const show = async (): Promise<Record<string, unknown>> => {
+    if (!wantOpen) return {};
+    const outcome = await openUrl(project.baseUrl, false);
+    if (outcome.opened) log.ok(`opened ${project.baseUrl} (${outcome.via})`);
+    else log.warn(`could not open a browser (${outcome.reason ?? "unknown"}) — open this yourself: ${project.baseUrl}`);
+    return { opened: outcome.opened, via: outcome.via, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}) };
+  };
+
   if (!pipeline?.start) {
     log.error("manifest.pipeline.start is empty — nothing to launch");
     return 1;
@@ -80,8 +99,21 @@ export async function run(args: string[], app: string): Promise<number> {
       if (servingId === project.manifest.id) {
         const prev = readServe(servePath);
         log.ok(`already serving on ${project.baseUrl}${prev ? ` (pid ${prev.pid})` : ""}`);
+        const shown = await show();
         log.raw(
-          JSON.stringify({ ok: true, url: project.baseUrl, pid: prev?.pid ?? null, alreadyRunning: true }, null, 2),
+          JSON.stringify(
+            {
+              ok: true,
+              id: project.manifest.id,
+              name: project.manifest.name,
+              url: project.baseUrl,
+              pid: prev?.pid ?? null,
+              alreadyRunning: true,
+              ...shown,
+            },
+            null,
+            2,
+          ),
         );
         return 0;
       }
@@ -174,7 +206,20 @@ export async function run(args: string[], app: string): Promise<number> {
         "\n",
     );
     log.ok(`serving "${project.manifest.name}" on ${project.baseUrl} (pid ${pid})`);
-    log.raw(JSON.stringify({ ok: true, url: project.baseUrl, pid, port }, null, 2));
+    // A relaunch after a code change is the moment a tab opened earlier goes
+    // stale, and the person looking at it has no way to know. The View's update
+    // watcher tells them; say so here so the loop is visible from the terminal
+    // too, and so `--open` is not mistaken for "everyone now has the new build".
+    if (!wantOpen) log.info(`show it to someone: agent-app ${app} open`);
+    log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");
+    const shown = await show();
+    log.raw(
+      JSON.stringify(
+        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, ...shown },
+        null,
+        2,
+      ),
+    );
     return 0;
   });
 }

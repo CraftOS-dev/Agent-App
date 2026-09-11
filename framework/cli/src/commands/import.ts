@@ -17,7 +17,7 @@
  * agent runs the walk-verify skill: an import is fully re-verified, never
  * trusted on origin.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
 import { flag, hasFlag } from "../lib/args.js";
@@ -30,6 +30,7 @@ import { canonPaths } from "../lib/canon.js";
 import { reserveApp, unregister } from "../lib/registry.js";
 import { randomBytes } from "node:crypto";
 import { log } from "../lib/log.js";
+import { readJsonFile } from "../lib/json.js";
 
 export async function run(args: string[], dir: string): Promise<number> {
   const requested = flag(args, "port");
@@ -55,7 +56,7 @@ export async function run(args: string[], dir: string): Promise<number> {
   try {
     // 2. Fresh identity + port. The imported id/port belong to the exporter.
     const manifestPath = join(appDir, "manifest.json");
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+    const manifest = readJsonFile(manifestPath) as Record<string, unknown>;
     const oldId = manifest.id;
     manifest.id = randomBytes(6).toString("hex");
     const name = flag(args, "name") ?? (typeof manifest.name === "string" ? manifest.name : "Imported App");
@@ -104,7 +105,7 @@ export async function run(args: string[], dir: string): Promise<number> {
       // comes from the trusted toolkit. Keeping the imported pipeline here would
       // have left the one part of an untrusted app that runs shell commands in
       // place, which is precisely what re-vendoring is meant to replace.
-      const template = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+      const template = readJsonFile(manifestPath) as Record<string, unknown>;
       const merged = mergeManifest(template, manifest, adapterVersionOf(tk));
       writeFileAtomic(manifestPath, JSON.stringify(merged, null, 2) + "\n");
       writeSystemHashes(appDir, tk.manifest.systemPaths);

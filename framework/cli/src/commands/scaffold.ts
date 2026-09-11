@@ -21,6 +21,7 @@ import { UsageError } from "../lib/project.js";
 import { adapterVersionOf, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
 import { reserveApp, unregister } from "../lib/registry.js";
 import { log } from "../lib/log.js";
+import { readJsonFile } from "../lib/json.js";
 
 /** Files whose presence does NOT make a directory "populated" for scaffolding. */
 const IGNORABLE_ENTRIES = new Set([".git", ".gitignore", ".DS_Store", "Thumbs.db", ".hg", ".svn"]);
@@ -93,7 +94,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // Fresh identity + stamped versions, merged over the blueprint's manifest.
     const manifestPath = join(dir, "manifest.json");
     const manifest = existsSync(manifestPath)
-      ? (JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>)
+      ? (readJsonFile(manifestPath) as Record<string, unknown>)
       : {};
     manifest.id = randomBytes(6).toString("hex");
     manifest.name = name;

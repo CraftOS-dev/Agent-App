@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { moduleNameProblem, validatePredicate, PROTOCOL_TYPES } from "@a2app/rules";
+import { readJsonFile } from "./json.js";
 
 export interface FrameworkFileProblem {
   file: string;
@@ -27,7 +28,7 @@ const PROTOCOL_TYPE_NAMES = new Set<string>(PROTOCOL_TYPES);
  *  Shape problems are reported by {@link validateManifest}; this only reads. */
 export function declaredModules(projectDir: string): string[] {
   try {
-    const m = JSON.parse(readFileSync(join(projectDir, "manifest.json"), "utf8")) as {
+    const m = readJsonFile(join(projectDir, "manifest.json")) as {
       modules?: { name?: unknown }[];
     };
     return (m.modules ?? []).map((mod) => String(mod?.name ?? "")).filter((n) => n !== "");
@@ -42,9 +43,9 @@ export function validateManifest(projectDir: string): FrameworkFileProblem[] {
   if (!existsSync(path)) return [{ file, message: "missing (required framework file)" }];
   let m: Record<string, unknown>;
   try {
-    m = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    m = readJsonFile(path) as Record<string, unknown>;
   } catch (e) {
-    return [{ file, message: `not valid JSON: ${(e as Error).message}` }];
+    return [{ file, message: (e as Error).message }];
   }
   const problems: FrameworkFileProblem[] = [];
   const req = (k: string): void => {
@@ -98,9 +99,9 @@ export function validateOperations(projectDir: string): FrameworkFileProblem[] {
   if (!existsSync(path)) return []; // operations.json is optional for a data-only app
   let parsed: { operations?: unknown };
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8")) as { operations?: unknown };
+    parsed = readJsonFile(path) as { operations?: unknown };
   } catch (e) {
-    return [{ file, message: `not valid JSON: ${(e as Error).message}` }];
+    return [{ file, message: (e as Error).message }];
   }
   if (!Array.isArray(parsed.operations)) {
     return [{ file, message: '"operations" must be an array' }];

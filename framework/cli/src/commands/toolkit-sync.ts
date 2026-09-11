@@ -3,7 +3,6 @@
  * the ownership canon. The single writer of the canon; it records exactly the
  * files it just wrote.
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
 import { writeFileAtomic } from "../lib/home.js";
@@ -11,6 +10,7 @@ import { mergeManifest, type Manifestish } from "../lib/manifest.js";
 import { loadProject } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
+import { readJsonFile } from "../lib/json.js";
 
 /** The system-owned minimum for an app that vendors nothing (section 4.2): the
  *  canon is never empty, and `manifest.json` is always system-owned. */
@@ -39,7 +39,7 @@ export async function run(_args: string[], app: string): Promise<number> {
   // — which carries the blueprint's placeholder id, no port, and the blueprint's
   // modules. Losing those would destroy the app, so the app's own keys are
   // merged back over the freshly vendored template afterwards.
-  const existing = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifestish;
+  const existing = readJsonFile(manifestPath) as Manifestish;
 
   const written = vendorPaths(tk, project.dir, tk.manifest.systemPaths);
   const version = adapterVersionOf(tk);
@@ -48,7 +48,7 @@ export async function run(_args: string[], app: string): Promise<number> {
   // (`pipeline`); the app is the trusted side for identity and modules. Merging
   // here is also what lets an author edit their modules and reseal: the canon is
   // recorded AFTER this write, so the manifest it hashes is the merged one.
-  const template = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifestish;
+  const template = readJsonFile(manifestPath) as Manifestish;
   const merged = mergeManifest(template, existing, version);
   writeFileAtomic(manifestPath, JSON.stringify(merged, null, 2) + "\n");
 

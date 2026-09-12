@@ -10,7 +10,7 @@ Per-harness **plugins**: each registers agent tools that build and operate Agent
 | [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 11 tools via `ctx.tools.register(defineTool(...))`; a browser iframe renderer |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 11 actions in the `agent_app` action set |
 | [claude-code/](claude-code/) | Claude Code | **MCP** (stdio JSON-RPC 2.0) | 14 tools via a real MCP server; register with `claude mcp add` |
-| [../.claude-plugin/](../.claude-plugin/) | Claude Code | Plugin marketplace manifest (no code) | The six [../skills/](../skills/), installable with `/plugin`. Skills only — no build step, so it works from a clean checkout; add the MCP server above for the tool surface |
+| [../.claude-plugin/](../.claude-plugin/) | Claude Code | Plugin marketplace manifest (no code) | The `/agent-app` launcher command ([../commands/](../commands/)) + the six [../skills/](../skills/), installable with `/plugin`. No build step, so it works from a clean checkout; add the MCP server above for the tool surface |
 
 Each plugin builds against its harness's SDK in that harness's toolchain (the TypeScript ones declare it as a peer dependency; the Python ones load inside the harness). None uses a shell — record field values reach the CLI as literal arguments. Two binaries (framework spec 5.1): set `A2APP_CLI` for the `a2app` operate client and `AGENT_APP_CLI` for the `agent-app` build/evolve binary. Each plugin routes a verb to its owner, so a build verb never reaches the operate client.
 

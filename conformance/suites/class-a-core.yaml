@@ -270,6 +270,46 @@ checks:
       status: 403
       match: { code: insufficient_scope, required: "data:cards:write" }
 
+  - name: whoami answers the uncredentialled caller this app actually serves
+    # whoami reports what a caller may do. On a single-user app an
+    # uncredentialled caller reads records perfectly well, so refusing it here
+    # made whoami stricter than the surface it describes -- an agent that reads
+    # its grant before planning (the documented order) stopped at a gate it did
+    # not have to.
+    request: { method: GET, path: /api/_a2app/whoami }
+    expect:
+      status: 200
+      match: { a2app: true, credentialId: anonymous, principal: owner }
+
+  - name: that caller's scopes are reads and readOnly operations, nothing more
+    # `scopes` is sorted, so these ordinals are stable. The point is the SET:
+    # both entities readable, the readOnly operation runnable, and no write and
+    # no state-changing operation -- which is exactly what authorize enforces.
+    request: { method: GET, path: /api/_a2app/whoami }
+    expect:
+      status: 200
+      match:
+        scopes.0: "data:cards:read"
+        scopes.1: "data:lists:read"
+        scopes.2: "op:count-cards"
+      len: { scopes: 3 }
+
+  - name: describe tells that caller read-only, not full
+    # It used to say "full", then answer the write it had just promised with a
+    # 401. An agent reads access to know what it may plan; an over-report there
+    # is a plan built on permission that was never held.
+    request: { method: GET, path: /api/_a2app/describe }
+    expect:
+      status: 200
+      match: { modules.0.access: read-only }
+
+  - name: a state-changing operation is still refused without a credential
+    request: { method: POST, path: /api/ops/archive-board, body: {} }
+    expect:
+      status: 401
+      match: { code: agent_token_required }
+      has: [how]
+
   - name: whoami returns the calling credential's grant
     request: { method: GET, path: /api/_a2app/whoami, token: readonly }
     expect:

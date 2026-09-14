@@ -29,8 +29,9 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 
 ## Step 0: Locate and understand
 
-1. Use the project directory you were given; read `AGENT_APP.md` (current
-   plan/entities/operations) and `reference/requirements.md`. Read `manifest.json`
+1. Use the project directory you were given; read `reference/blueprint.md` (your
+   stack's map — files, schema/migration API, operations, UI, gate), `AGENT_APP.md`
+   (current plan/entities/operations) and `reference/requirements.md`. Read `manifest.json`
    for `authMode` and port. Not given a directory? `agent-app list` shows every known
    app with its path, port, and status, and commands accept a registered app id
    or name wherever they accept a directory.
@@ -76,7 +77,7 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 - **Schema changes are additive migrations.** The user's data is live — never
   delete it, never drop-and-recreate collections that hold data. To alter a
   collection, write a new migration that loads and updates it. (Migration API and
-  relation-field rules: **per your stack**.)
+  relation-field rules: see `reference/blueprint.md`.)
 - Record the delta in `AGENT_APP.md` (what changed, new modules/entities/operations).
 - **Adding an entity or operation? Name its module first.** Every one belongs to
   exactly one declared module (`manifest.json`), and an operation also needs
@@ -123,7 +124,7 @@ decide which of these you are:
 
 `open` hands a URL to the browser; it CANNOT reload a tab the user already had
 open. A loaded page can only be replaced from inside itself, which is what the
-View's update watcher (`/_a2app/update.js` — see the blueprint's README) is for.
+View's update watcher (`/_a2app/update.js` — see `reference/blueprint.md`) is for.
 After a code change it reloads the tab itself when the page holds no unsaved
 input, and falls back to offering a reload when it does — a half-filled form is
 never discarded without asking. **Use `agent-app <dir> open --if-needed`** after a

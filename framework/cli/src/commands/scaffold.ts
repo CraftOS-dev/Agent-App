@@ -149,7 +149,7 @@ export async function run(args: string[], app: string): Promise<number> {
     stripCredentials(dir);
     mintAgentToken(dir);
 
-    writeHarnessGuides(dir, name);
+    writeHarnessGuides(dir, name, tk !== null);
 
     writeSystemHashes(dir, systemPaths);
 
@@ -190,7 +190,7 @@ export async function run(args: string[], app: string): Promise<number> {
  * A blueprint that ships its own guidance wins: an existing file is never
  * overwritten.
  */
-function writeHarnessGuides(dir: string, name: string): void {
+function writeHarnessGuides(dir: string, name: string, fromBlueprint: boolean): void {
   const agents = join(dir, "AGENTS.md");
   if (!existsSync(agents)) {
     writeFileSync(
@@ -206,6 +206,14 @@ function writeHarnessGuides(dir: string, name: string): void {
         "",
         "## Read first",
         "",
+        // The stack map comes first: before writing any code, an agent reads
+        // `reference/blueprint.md` to learn this stack's file ownership, schema
+        // API, operation wiring, UI kit, and gate — so the contract is never
+        // reverse-engineered from source. Only present when scaffolded from a
+        // blueprint (a blueprint-less app has no such file to point at).
+        ...(fromBlueprint
+          ? ["- `reference/blueprint.md` — YOUR STACK'S MAP: files you own vs. system-owned, schema/migration API, operations, UI kit, gate. Read this before writing code."]
+          : []),
         "- `AGENT_APP.md` — this app's index: plan, entities, operations, conventions, checklist.",
         "- `reference/requirements.md` — the binding spec of what this app must do.",
         "",

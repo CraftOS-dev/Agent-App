@@ -16,9 +16,10 @@ bound to a session or project.
   agentskills.io-compatible, so harnesses that load the common `SKILL.md` format
   (OpenClaw, Hermes, dsh, Claude Code, and others) consume these unmodified.
 - **Self-contained**: a skill states its rules directly and points only to files an
-  operating agent actually has — the app's own `AGENT_APP.md` and
-  `reference/requirements.md`, and (for stack specifics) the skill variant its
-  blueprint ships. A skill never cites an external framework spec it cannot open.
+  operating agent actually has — the app's own `AGENT_APP.md`,
+  `reference/requirements.md`, and (for stack specifics) `reference/blueprint.md`,
+  which the blueprint ships into the app at scaffold. A skill never cites an
+  external framework spec it cannot open.
 
 ## Getting them
 
@@ -44,9 +45,13 @@ at the repo root), which carries these six directly.
 | `walk-verify/` | independently verify a running app against its requirements (verdicts: pass / defects / incomplete / blocked; never the builder) |
 | `connect/` | connect to a published Agent App (reserved until deployed mode) |
 
-## Stack variants
+## Stack specifics
 
 These six are **stack-agnostic**: they carry the method and discipline. Stack-specific
-execution knowledge (migration API, hook rules, UI-kit specifics) lives in a
-**skill variant a blueprint ships** with its toolkit, tagged with its `stack`. The
-base skill directs the agent to load that variant where stack specifics apply.
+execution knowledge (the file map of what's yours vs. system-owned, the
+schema/migration API, how operations are implemented, the UI kit, external calls,
+and the gate) lives in each blueprint's **`reference/blueprint.md`**. The blueprint
+ships it in its template and `scaffold` copies it into the app, so an operating
+agent always has it on disk beside `reference/requirements.md`. These skills
+direct the agent to read it wherever stack specifics apply — so the contract never
+has to be reverse-engineered from source.

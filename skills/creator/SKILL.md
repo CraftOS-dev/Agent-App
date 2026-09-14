@@ -1,7 +1,7 @@
 ---
 name: creator
 activity: creator
-description: Create a new Agent App. Scaffolds, develops, validates, and launches a local web app with persistent state and an agent-operable surface. Load when the user wants custom software built. This is the stack-agnostic method; load your blueprint's stack creator skill for the migration/hook/UI-kit specifics.
+description: Create a new Agent App. Scaffolds, develops, validates, and launches a local web app with persistent state and an agent-operable surface. Load when the user wants custom software built. This is the stack-agnostic method; read your blueprint's reference/blueprint.md for the migration/hook/UI-kit specifics.
 ---
 
 # Creator
@@ -12,10 +12,13 @@ agent surface. You declare schema, compose UI, wire operations — the framework
 and the adapter own the rest. A human uses the View; an agent operates the same
 data through the adapter; both converge on one Model.
 
-This skill is the method. If you scaffolded from a blueprint, ALSO load that
-blueprint's **stack creator skill** — it carries the migration API, hook rules,
-and UI-kit specifics you cannot get right from general knowledge. Where this
-skill says "per your stack", that is where the stack skill applies.
+This skill is the method. If you scaffolded from a blueprint, read that
+blueprint's **`reference/blueprint.md`** FIRST — it is the authoritative map of
+that stack: which files are yours versus system-owned, the schema/migration API,
+how operations are implemented, the UI kit, external calls, and the gate. It
+carries the specifics you cannot get right from general knowledge, so you never
+have to reverse-engineer the adapter or the kit from source. Where this skill
+says "per your stack", `reference/blueprint.md` is the answer.
 
 ## Step 0: Have a project
 
@@ -45,7 +48,8 @@ component? Wrap it in your own app code; never edit the locked original.
 **Part B (Technical Specification)** — how it is built. The gate checks its
 structure; walk-verify checks the running app against it.
 
-1. **Read `AGENT_APP.md` and `reference/requirements.md`.** If the spec is
+1. **Read `reference/blueprint.md` (your stack's map), `AGENT_APP.md`, and
+   `reference/requirements.md`.** If the spec is
    already filled (the requirement was interviewed and synthesized upstream),
    it is binding: implement it exactly, skip to step 5. If it holds only the
    scaffold skeleton, YOU author it — steps 2–4.
@@ -145,7 +149,7 @@ its identity in the live database; renaming one makes every boot re-run its
 "new" replacement into the existing schema and the app cannot start. Fixing a
 migration's mistake = writing a NEW migration that alters the collection. Match
 the app's `authMode`: open data rules for `none`; owner-scoped for `multi-user`.
-(Migration API, seeding, relation fields: **per your stack**.)
+(Migration API, seeding, relation fields: see `reference/blueprint.md`.)
 
 **Schema** — every entity also names the `module` it lives in, and may carry a
 one-line `summary` shown beside it on that module's screen.
@@ -188,9 +192,10 @@ first-paint error.
 
 **External data (third-party APIs)** — call the internet from the **backend
 only** (never the frontend: browser CORS breaks and keys would be visible).
-(HTTP-from-backend API: per your stack.)
+(HTTP-from-backend API: see `reference/blueprint.md`.)
 
-**UI** — build the View from your blueprint's kit; the adapter is the only agent
+**UI** — build the View from your blueprint's kit (`reference/blueprint.md` names
+what ships — a full kit, a static seam, or nothing); the adapter is the only agent
 surface, so never make the agent drive the DOM to operate the app. Build every
 screen to the Quality Standard (`../QUALITY.md`) — in particular, design every
 reachable state, not only the happy path: loading (skeletons, no layout jump),
@@ -199,7 +204,7 @@ happened + what to do next), in-flight (control disabled, no double submit),
 success (visible where the user is looking, read back from what was STORED).
 Destructive actions confirm in the app's own dialog, naming the target. All
 colours, spacing, and type come from your tokens — never hardcode a value where
-a token exists. (Kit components and data hooks: per your stack.)
+a token exists. (Kit components and data hooks: see `reference/blueprint.md`.)
 
 After each feature: update `AGENT_APP.md` (entities, operations) and tick the
 completed tasks in `reference/tasks.md`.
@@ -210,7 +215,9 @@ params only**; the instruction the agent runs is read from the declared manifest
 never from the fire payload (so a compromised app cannot steer the agent beyond
 what its author declared). Make instructions idempotent; set generous cooldowns.
 Declare a trigger only where agent judgment adds value — plain code handles plain
-events. (Manifest format and fire API: per your stack.)
+events. **Trigger support is stack-specific and not every blueprint ships it** —
+`reference/blueprint.md` says whether yours does and how; if it does not, handle
+the event with plain code and record the limitation in the spec.
 
 ## Finish: gate, launch, then verify
 

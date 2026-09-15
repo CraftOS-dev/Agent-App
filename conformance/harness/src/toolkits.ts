@@ -38,7 +38,15 @@ const TOOLKITS: ToolkitSpec[] = [
   { id: "blueprint-base", incompleteBecause: "ships framework files only, no runtime code" },
   // The one finished starter: a to-do app with a View, a model and operations.
   { id: "blueprint-react-node", noBuild: true },
-  { id: "blueprint-python-fastapi", noBuild: true },
+  // Runtime and model are complete, but the spec is the author's to write — the
+  // blueprint ships the template unfilled on purpose, like the other two
+  // starting points. Writing one on its behalf would put words in the mouth of
+  // whoever owns the blueprint.
+  {
+    id: "blueprint-python-fastapi",
+    noBuild: true,
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
+  },
   // Ships adapter hooks only. Its `tasks` collection is created by hand in
   // PocketBase, and `install` prints "download the pocketbase binary" — so a
   // fresh scaffold has neither data model nor runtime.

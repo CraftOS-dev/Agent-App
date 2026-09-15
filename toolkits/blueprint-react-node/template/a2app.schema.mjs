@@ -6,6 +6,23 @@
  * `describe` and `schemaVersion` are DERIVED from this, so an agent always sees
  * the live model — you never hand-write describe.
  *
+ * REFERENCES GUARD DELETION. A `ref` (or `list<ref>`) names the entity it points
+ * at, and that declaration is enforced: deleting a record something still points
+ * at is refused with `record_referenced`, naming the records in the way. You do
+ * not write that check, and you cannot be routed around it — it runs inside the
+ * adapter, so it holds for your own UI and for `a2app <app> data <entity> delete`
+ * alike. Guarding deletion only inside an operation guards one of those two.
+ *
+ * If an app genuinely wants references to outlive the record, say so on the
+ * field and the delete is allowed:
+ *
+ *     { name: "client", type: "ref", entity: "clients", onDelete: "ignore" }
+ *
+ * There is no `cascade` or `detach` on purpose: both would let one delete write
+ * to records the caller never named, which an agent cannot approve up front and
+ * an audit log cannot explain later. Declare an operation for that instead,
+ * where it is named, described and approved like any other write.
+ *
  * MODULES COME FIRST. Every entity names the module it lives in, and every
  * operation names the module it appears under; the modules themselves are
  * declared in `manifest.json`. That is what gives describe a root screen to

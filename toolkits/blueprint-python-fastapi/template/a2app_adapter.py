@@ -45,7 +45,27 @@ ERROR_CODES = {
     "TASK_CANCELED": "task_canceled",
     "AGENT_TOKEN_REQUIRED": "agent_token_required",
     "RATE_LIMITED": "rate_limited",
+    # The record is still referenced, and a `ref` pointing at it says `restrict`.
+    "RECORD_REFERENCED": "record_referenced",
 }
+
+# What a `ref` does when nothing says otherwise: refuse the delete. Silently
+# orphaning is the worse default -- it is invisible at the moment it happens, and
+# the app that has to cope with it is the one reading the record weeks later. A
+# field opts out with `onDelete: "ignore"`.
+#
+# There is deliberately no `cascade` or `detach`: both would let one delete write
+# to records the caller never named, which an agent cannot approve in advance and
+# an audit log cannot explain afterwards. That belongs in a declared operation.
+DEFAULT_ON_DELETE = "restrict"
+
+# Page size for the referential scan a delete runs before it commits.
+REFERENCE_SCAN_PAGE = 500
+# How many blocking record ids are reported per field: the answer is "yes, and
+# here are examples", not a dump of every row in the way.
+REFERENCE_SCAN_LIMIT = 10
+# Hard stop on paging, so a store that ignores `page` cannot spin forever.
+REFERENCE_SCAN_MAX_PAGES = 200
 
 # --------------------------------------------------------------- pure rules
 
@@ -1130,6 +1150,55 @@ class Adapter:
         return self._err(404, "not_found", "No such route.")
 
     # -- records ------------------------------------------------------------
+    def _references_to(self, entity: str, rec_id: str) -> list[dict]:
+        """Who still points at this record.
+
+        Every `ref` and `list<ref>` names the entity it targets, so the app has
+        ALREADY declared where its references live -- this reads that rather than
+        asking for a second declaration.
+
+        Pages through referencing entities instead of filtering in the store: a
+        filter grammar differs per backend, and a policy that silently did
+        nothing against one of them would be worse than no policy. Only entities
+        that actually declare a `restrict` ref to this one are read, so an entity
+        nothing points at costs nothing.
+        """
+        blockers: list[dict] = []
+        for other, d in self.entity_defs.items():
+            pointing = [
+                f
+                for f in d["fields"]
+                if f.get("type") in ("ref", "list<ref>")
+                and f.get("entity") == entity
+                and f.get("onDelete", DEFAULT_ON_DELETE) == "restrict"
+            ]
+            if not pointing:
+                continue
+
+            found: dict[str, list[str]] = {}
+            page = 1
+            while True:
+                result = self.store.list_records(other, {"page": page, "perPage": REFERENCE_SCAN_PAGE})
+                items = result.get("items") or []
+                for row in items:
+                    for f in pointing:
+                        value = row.get(f["name"])
+                        hit = (rec_id in value) if isinstance(value, list) else (value == rec_id)
+                        if not hit:
+                            continue
+                        ids = found.setdefault(f["name"], [])
+                        if len(ids) < REFERENCE_SCAN_LIMIT:
+                            ids.append(str(row.get("id", "")))
+                if len(items) < REFERENCE_SCAN_PAGE:
+                    break
+                page += 1
+                if page > REFERENCE_SCAN_MAX_PAGES:
+                    break
+
+            for field, ids in found.items():
+                blockers.append({"entity": other, "field": field, "ids": ids})
+        return blockers
+
     def _handle_records(self, method, headers, entity, rec_id, body, query):
         limited = self._rate_gate(headers, "data")
         if limited:
@@ -1159,6 +1228,33 @@ class Adapter:
         if method == "DELETE":
             if not rec_id:
                 return self._err(400, "usage", "DELETE requires a record id.")
+
+            # The app's referential rules bind THIS door too.
+            #
+            # An app that guards deletion inside an operation has guarded one way
+            # in: its own UI. This generic record route is the other, and it used
+            # to go straight to the store -- so the rule held right up until an
+            # agent took the path the rule did not cover, and the orphan it left
+            # was reported as a successful delete. The check belongs here, in
+            # adapter code an app author cannot edit, because this is the only
+            # place both doors pass through.
+            blockers = self._references_to(entity, rec_id)
+            if blockers:
+                total = sum(len(b["ids"]) for b in blockers)
+                where = ", ".join(f"{b['entity']}.{b['field']}" for b in blockers)
+                noun = "a record" if total == 1 else f"{total} records"
+                return self._err(
+                    409,
+                    ERROR_CODES["RECORD_REFERENCED"],
+                    f'Cannot delete {entity} "{rec_id}": {noun} still reference it ({where}).',
+                    referencedBy=blockers,
+                    resolution=(
+                        "Remove or repoint the referencing records first, or run an operation the app "
+                        'provides for this. An app that intends references to outlive the record '
+                        'declares `onDelete: "ignore"` on the ref.'
+                    ),
+                )
+
             ok = self.store.delete_record(entity, rec_id)
             if not ok:
                 return self._err(404, "record_not_found", f'No {entity} record "{rec_id}".')
@@ -1426,10 +1522,75 @@ def _selftest() -> int:
     ):
         failures.append("fingerprint ignores operation params")
 
+    # 4. Referential deletes: the rule an app declares with a `ref` binds the
+    #    generic record route, not just whatever operation the app wrote. This
+    #    checks the scan itself -- the thing a delete consults before it commits.
+    class _FakeStore:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def list_records(self, entity, query):
+            items = list(self.rows.get(entity, {}).values())
+            per_page = int(query.get("perPage") or len(items) or 1)
+            page = int(query.get("page") or 1)
+            start = (page - 1) * per_page
+            return {"items": items[start:start + per_page], "totalItems": len(items)}
+
+    class _FakeAdapter:
+        _references_to = Adapter._references_to
+
+        def __init__(self, entity_defs, store):
+            self.entity_defs = entity_defs
+            self.store = store
+
+    invoice_fields = [
+        {"name": "client", "type": "ref", "entity": "clients"},
+        {"name": "projects", "type": "list<ref>", "entity": "projects"},
+    ]
+    defs = {
+        "clients": {"fields": [{"name": "name", "type": "string"}], "module": "sales"},
+        "projects": {"fields": [{"name": "title", "type": "string"}], "module": "sales"},
+        "invoices": {"fields": invoice_fields, "module": "sales"},
+    }
+    store = _FakeStore({
+        "clients": {"c_acme": {"id": "c_acme"}, "c_unused": {"id": "c_unused"}},
+        "projects": {"p_one": {"id": "p_one"}},
+        "invoices": {"inv_1": {"id": "inv_1", "client": "c_acme", "projects": ["p_one"]}},
+    })
+    ad = _FakeAdapter(defs, store)
+
+    check(
+        "a referenced record reports who blocks it",
+        ad._references_to("clients", "c_acme"),
+        [{"entity": "invoices", "field": "client", "ids": ["inv_1"]}],
+    )
+    check("an unreferenced record blocks nothing", ad._references_to("clients", "c_unused"), [])
+    check(
+        "a reference held in a list counts too",
+        ad._references_to("projects", "p_one"),
+        [{"entity": "invoices", "field": "projects", "ids": ["inv_1"]}],
+    )
+
+    # The opt-out is per field, and it is the only way to allow orphaning.
+    ignoring = {**defs, "invoices": {"fields": [
+        {"name": "client", "type": "ref", "entity": "clients", "onDelete": "ignore"},
+        invoice_fields[1],
+    ], "module": "sales"}}
+    check(
+        'onDelete "ignore" removes the block',
+        _FakeAdapter(ignoring, store)._references_to("clients", "c_acme"),
+        [],
+    )
+    check(
+        "and leaves the other ref guarded",
+        _FakeAdapter(ignoring, store)._references_to("projects", "p_one"),
+        [{"entity": "invoices", "field": "projects", "ids": ["inv_1"]}],
+    )
+
     if failures:
         print("a2app_adapter selftest FAILED:\n  - " + "\n  - ".join(failures))
         return 1
-    print("a2app_adapter selftest ok (guard, predicates, fingerprint)")
+    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes)")
     return 0
 
 

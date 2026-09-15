@@ -1,12 +1,13 @@
 {
   "name": "agent-app",
   "displayName": "Agent App Framework",
-  "description": "Build, evolve, and operate Agent Apps: full-stack apps an agent can drive through the A2App protocol. Ships the six framework skills (creator, modify, importer, operator, walk-verify, connect) and directs the agent to the `agent-app` and `a2app` CLIs.",
+  "description": "Build, evolve, and operate Agent Apps: full-stack apps an agent can drive through the A2App protocol. Ships the six framework skills (creator, modify, importer, operator, walk-verify, connect) plus the `/agent-app` launcher command that routes a request to the right skill, and directs the agent to the `agent-app` and `a2app` CLIs.",
   "version": "0.1.0",
   "author": { "name": "CraftOS", "url": "https://github.com/CraftOS-dev" },
   "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
   "repository": "https://github.com/CraftOS-dev/Agent-App",
   "license": "MIT",
   "keywords": ["agent-app", "a2app", "skills", "full-stack", "agent-native"],
+  "commands": "./commands/",
   "skills": "./skills/"
 }

@@ -9,7 +9,7 @@ Claude Code consumes tools over the **Model Context Protocol**. This package is 
 
 ```sh
 pnpm --filter @a2app/integration-claude-code build
-claude mcp add a2app -- node <abs path>/integrations/claude-code/dist/index.js
+claude mcp add a2app -- node <abs path>/harness-plugins/claude-code/dist/index.js
 # or copy .mcp.json into your project and set A2APP_CLI / AGENT_APP_CLI to the binaries
 ```
 

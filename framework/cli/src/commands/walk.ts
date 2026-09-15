@@ -32,12 +32,25 @@ import { log } from "../lib/log.js";
 const WALK_FLAGS = new Set(["find", "all", "approve", "idempotency-key"]);
 
 export async function run(args: string[], app: string): Promise<number> {
+  // `--help`/`-h` are a question, never a path segment or an operation param.
+  // The walk deliberately has no help system (A2APP-SPEC §3, framework 5.1): the
+  // footer IS the navigation aid. So help does not open a parallel surface — it
+  // routes the reflexive gesture back into the walk, teaching the grammar and
+  // then showing the very screen the caller is standing on. The header prints
+  // first, before any network call, so `a2app <app> --help` still teaches the
+  // grammar when the app is down rather than failing silently.
+  let help = args.includes("--help") || args.includes("-h");
+  if (help) log.raw(helpHeader(app));
+
   const { client, target } = await connect(app);
 
   const term = flag(args, "find");
   if (term !== undefined) return renderLevel(await fetchFind(client, term), app);
 
-  const segments = positionals(args);
+  // `-h` leaks past positionals() (single dash), and a bare `help` word is a
+  // help gesture rather than a location — but only if no real module owns the
+  // name, decided once the root is in hand below.
+  const segments = positionals(args).filter((s) => s !== "-h");
   const wantAll = args.includes("--all");
 
   // Discovery is cached against the app's own version markers, so a repeated walk
@@ -60,14 +73,26 @@ export async function run(args: string[], app: string): Promise<number> {
   let level = await fetchLevel(client, cache, "", false);
   if (level === null) return unreachable(app);
 
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i]!;
+  // A bare `help` first segment is the reflexive gesture, not a location — but a
+  // real module named `help` still wins, so nothing an app declares is shadowed.
+  // That module-wins rule is why `help` needs no spec-level reservation.
+  let walkSegments = segments;
+  if (!help && segments[0] === "help" && level.level === "root" && !level.modules.some((m) => m.name === "help")) {
+    help = true;
+    log.raw(helpHeader(app));
+    walkSegments = segments.slice(1);
+  }
+
+  for (let i = 0; i < walkSegments.length; i++) {
+    const segment = walkSegments[i]!;
 
     // At a record, a remaining segment is either a sub-resource or an operation
     // to invoke. The record level itself tells us which — no guessing.
     if (level.level === "record") {
       const operation = level.operations.find((o) => o.name === segment);
-      if (operation) return invokeOperation(client, level, operation.name, args, app);
+      // Under help the operation is never invoked: help always means help, so
+      // the caller lands on the screen that names the operation and its state.
+      if (operation) return help ? renderLevel(level, app) : invokeOperation(client, level, operation.name, args, app);
       const relation = (level.relations ?? []).find((r) => r.name === segment);
       if (!relation) {
         return notHere(segment, level, app, path);
@@ -77,10 +102,10 @@ export async function run(args: string[], app: string): Promise<number> {
     // At a module, a remaining segment may be a module-level operation.
     if (level.level === "module") {
       const operation = level.operations.find((o) => o.name === segment);
-      if (operation) return invokeOperation(client, null, operation.name, args, app);
+      if (operation) return help ? renderLevel(level, app) : invokeOperation(client, null, operation.name, args, app);
     }
 
-    const isLast = i === segments.length - 1;
+    const isLast = i === walkSegments.length - 1;
     const next = await fetchLevel(client, cache, `${path}${path ? "/" : ""}${segment}`, isLast && wantAll);
     if (next === null) return notHere(segment, level, app, path);
     path = `${path}${path ? "/" : ""}${segment}`;
@@ -329,6 +354,36 @@ function nextLine(level: DescribeLevel, app: string): string {
     return `a2app ${app} ${rendered}`.trimEnd();
   });
   return ["", "  → " + moves.join("\n  → ")].join("\n");
+}
+
+/**
+ * The one thing help teaches that a screen cannot: the grammar of the walk
+ * itself — that the path names a place and the last word acts there. It is not a
+ * command list (the surface has none by design) and it is not a separate mode;
+ * the caller's own screen prints directly beneath it, so `--help` answers "how
+ * do I read this?" in place rather than sending them somewhere else. `app` is
+ * echoed into every line so each is a command that runs verbatim.
+ */
+function helpHeader(app: string): string {
+  // The app path varies in length, so the description column is aligned to the
+  // widest form rather than a fixed stop — otherwise a long path collides with
+  // its own gloss.
+  const rows: [string, string][] = [
+    [`a2app ${app}`, "the app's modules (root)"],
+    [`a2app ${app} <module>`, "a module's entities and operations"],
+    [`a2app ${app} <module> <entity>`, "an entity's fields and operations"],
+    [`a2app ${app} <module> <entity> <id>`, "one record, and what it allows now"],
+    [`a2app ${app} <path…> <operation> [--param …]`, "invoke, where the path identifies it"],
+    [`a2app ${app} --find <term>`, "search names, get locations"],
+  ];
+  const width = Math.max(...rows.map(([form]) => form.length));
+  return [
+    `a2app is a walk: each argument names a place in the app; the last word runs an operation there.`,
+    ...rows.map(([form, gloss]) => `  ${form.padEnd(width)}  ${gloss}`),
+    ``,
+    `Every screen ends with "→": the moves that are legal from where you stand. This screen:`,
+    ``,
+  ].join("\n");
 }
 
 function unreachable(app: string): number {

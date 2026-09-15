@@ -243,10 +243,52 @@ const app = createA2App(binding, {
   storePath: join(DATA_DIR, "a2app-state.json"),
 });
 
+/* ------------------------------------------------------- structured log */
+
+/** One JSON line per event on stdout (the log `agent-app serve` captures):
+ *  a single schema — ts, level, evt, then event fields — so diagnosis filters
+ *  by field instead of parsing prose. Never log record contents or secrets. */
+function logLine(level, evt, fields = {}) {
+  process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), level, evt, ...fields }) + "\n");
+}
+
+let nextRequestId = 0;
+
 /* ---------------------------------------------------------------- listen */
 
-// Any path the adapter does not own falls through to the View.
+// Any path the adapter does not own falls through to the View. `view.handler`
+// (the framework's system-owned static handler) answers each asset with ETag,
+// Last-Modified and Cache-Control: no-cache and honours conditional requests,
+// so cache correctness is not this file's to re-solve.
 const server = createA2AppServer(app, view.handler);
+
+// Observe (never handle) every request for the log: id, method, path, status,
+// duration. Paths only — query strings can carry filters over user data.
+server.on("request", (req, res) => {
+  const id = ++nextRequestId;
+  const started = Date.now();
+  res.on("finish", () => {
+    logLine(res.statusCode >= 500 ? "error" : "info", "http", {
+      id,
+      method: req.method,
+      path: (req.url ?? "/").split("?")[0],
+      status: res.statusCode,
+      ms: Date.now() - started,
+    });
+  });
+});
+
+// Fail fast and loudly: a structured last line beats a silent wedge, and the
+// launch contract's supervisor is what restarts the process, not the process.
+process.on("uncaughtException", (err) => {
+  logLine("error", "crash", { message: err?.message, stack: err?.stack });
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logLine("error", "crash", { message: String(reason?.message ?? reason), stack: reason?.stack });
+  process.exit(1);
+});
+
 // Bind loopback explicitly. `listen(PORT)` alone binds every interface, so the
 // app was reachable from the network while its own log line said localhost --
 // and a same-origin request is trusted as the owner without a credential, which
@@ -254,5 +296,5 @@ const server = createA2AppServer(app, view.handler);
 // port. Exposing it must be a deliberate act, hence the env var.
 const HOST = process.env.A2APP_HOST ?? "127.0.0.1";
 server.listen(PORT, HOST, () => {
-  process.stdout.write(`Agent App "${manifest.name ?? manifest.id}" on http://${HOST}:${PORT}  (A2App id ${manifest.id})\n`);
+  logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://${HOST}:${PORT}` });
 });

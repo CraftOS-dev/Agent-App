@@ -2,7 +2,9 @@
 
 Mounts the A2App adapter (`a2app_adapter.py`) on FastAPI. The adapter owns the
 protocol; this file only translates HTTP <-> the adapter's `dispatch()`. Run:
-`uvicorn main:app --port $PORT`.
+`python main.py` — the `__main__` block below binds uvicorn to the environment's
+`PORT` (what `agent-app <dir> serve` sets), so the start command needs no shell
+variable and is portable across POSIX shells and cmd.exe.
 """
 import json
 import os

@@ -26,6 +26,5 @@ exactly one, and describe's root screen lists them. They are declared in
  update automatically.
 
 ## Checklist
-- [x] tasks entity + guarded CRUD
-- [x] Python rules parity self-test (`python a2app_adapter.py --selftest`)
-- [ ] your next feature
+Build and evolve tasks live in `reference/tasks.md` - one home. This section
+points there.

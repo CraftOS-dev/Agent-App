@@ -61,6 +61,8 @@ const COMMANDS: Record<string, CommandMeta> = {
   promote: { summary: "Pre-promote backup, then apply the dev copy's migrations to live", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },
   restore: { summary: "Restore a backup (captures current state, rolls back on failure)", surface: "agent-app", scope: "app", args: "[<backup-id>]" },
+  forget: { summary: "Drop an app from the registry, releasing its port (never touches files)", surface: "agent-app", scope: "app", args: "[--force]" },
+  remove: { summary: "Delete an app's files and drop it from the registry (data backed up first; needs --yes)", surface: "agent-app", scope: "app", args: "[--yes] [--force]" },
   // agent-app registry commands: the machine's set of apps, not one app.
   list: { summary: "List every known Agent App with its port and derived status", surface: "agent-app", scope: "registry" },
   global: { summary: "Show the cross-app conventions (GLOBAL_AGENT_APP.md), seeding it on first use", surface: "agent-app", scope: "registry" },

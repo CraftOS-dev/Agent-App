@@ -1242,11 +1242,11 @@ class Adapter:
             if blockers:
                 total = sum(len(b["ids"]) for b in blockers)
                 where = ", ".join(f"{b['entity']}.{b['field']}" for b in blockers)
-                noun = "a record" if total == 1 else f"{total} records"
+                said = "a record still references" if total == 1 else f"{total} records still reference"
                 return self._err(
                     409,
                     ERROR_CODES["RECORD_REFERENCED"],
-                    f'Cannot delete {entity} "{rec_id}": {noun} still reference it ({where}).',
+                    f'Cannot delete {entity} "{rec_id}": {said} it ({where}).',
                     referencedBy=blockers,
                     resolution=(
                         "Remove or repoint the referencing records first, or run an operation the app "

@@ -666,7 +666,9 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         return err(
           409,
           ERROR_CODES.RECORD_REFERENCED,
-          `Cannot delete ${entity} "${recordId}": ${total === 1 ? "a record" : `${total} records`} still reference it (${where}).`,
+          `Cannot delete ${entity} "${recordId}": ${
+            total === 1 ? "a record still references" : `${total} records still reference`
+          } it (${where}).`,
           {
             referencedBy: blockers,
             // Say what would make the delete legal, so the caller has a next

@@ -262,7 +262,32 @@ function describeIncomplete(lost) {
   return "Rejected by a2app (not_stored): the database did not store " + names + ". Do NOT report this as done.";
 }
 
-module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate };
+/**
+ * Which declared fields point at `target`, and would therefore be left dangling
+ * if a record of it were deleted.
+ *
+ * Pure so it can be self-tested: the hook that calls it cannot be, because it
+ * only runs inside PocketBase. `entities` is { name: { fields: [...] } } as the
+ * adapter maps it; a field opts out with onDelete "ignore".
+ */
+function referencingFields(entities, target) {
+  var out = [];
+  var names = Object.keys(entities || {});
+  for (var i = 0; i < names.length; i++) {
+    var def = entities[names[i]];
+    var fields = (def && def.fields) || [];
+    for (var j = 0; j < fields.length; j++) {
+      var f = fields[j];
+      if (f.type !== "ref" && f.type !== "list<ref>") continue;
+      if (f.entity !== target) continue;
+      if ((f.onDelete || "restrict") !== "restrict") continue;
+      out.push({ entity: names[i], field: f.name, list: f.type === "list<ref>" });
+    }
+  }
+  return out;
+}
+
+module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields };
 
 /* -------- gate self-test: `node _a2app_rules.js --selftest` -------- */
 if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--selftest") !== -1) {
@@ -302,7 +327,31 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
     failures.push("fingerprint ignores operation params");
   }
 
+  // Referential deletes: which fields would be left dangling. The hook that
+  // uses this cannot run outside PocketBase; the decision it makes can.
+  var model = {
+    clients: { fields: [{ name: "name", type: "string" }] },
+    invoices: {
+      fields: [
+        { name: "client", type: "ref", entity: "clients" },
+        { name: "projects", type: "list<ref>", entity: "projects" },
+      ],
+    },
+  };
+  var blocking = referencingFields(model, "clients");
+  if (blocking.length !== 1 || blocking[0].entity !== "invoices" || blocking[0].field !== "client") {
+    failures.push("referencingFields misses a ref pointing at the target");
+  }
+  if (blocking.length && blocking[0].list !== false) failures.push("a scalar ref reported as a list");
+  var listed = referencingFields(model, "projects");
+  if (listed.length !== 1 || listed[0].list !== true) failures.push("referencingFields misses a list<ref>");
+  if (referencingFields(model, "nobody").length !== 0) failures.push("referencingFields invents a blocker");
+  var opted = {
+    invoices: { fields: [{ name: "client", type: "ref", entity: "clients", onDelete: "ignore" }] },
+  };
+  if (referencingFields(opted, "clients").length !== 0) failures.push('onDelete "ignore" must not block');
+
   if (failures.length) console.log("a2app_rules selftest FAILED:\n  - " + failures.join("\n  - "));
-  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint)");
+  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes)");
   process.exit(failures.length ? 1 : 0);
 }

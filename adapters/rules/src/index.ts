@@ -78,6 +78,24 @@ export const PROTOCOL_TYPES = [
 
 export type ProtocolType = (typeof PROTOCOL_TYPES)[number];
 
+/** Referential policies a `ref` may declare. See {@link NormalizedField.onDelete}. */
+export const ON_DELETE = ["restrict", "ignore"] as const;
+export type OnDelete = (typeof ON_DELETE)[number];
+
+/**
+ * What a `ref` does when nothing says otherwise: refuse the delete.
+ *
+ * Silently orphaning is the worse default of the two. It is invisible at the
+ * moment it happens, and the app that has to cope with it is the one reading the
+ * record weeks later.
+ */
+export const DEFAULT_ON_DELETE: OnDelete = "restrict";
+
+/** The policy in force for a field — the declared one, or the default. */
+export function onDeleteOf(field: Pick<NormalizedField, "onDelete">): OnDelete {
+  return field.onDelete ?? DEFAULT_ON_DELETE;
+}
+
 /** The A2App error code registry. Clients branch on `code`, never on message
  *  prose. Unknown codes are treated as rejection, never success. */
 export const ERROR_CODES = {
@@ -102,6 +120,8 @@ export const ERROR_CODES = {
   TASK_CANCELED: "task_canceled",
   AGENT_TOKEN_REQUIRED: "agent_token_required",
   RATE_LIMITED: "rate_limited",
+  /** The record is still referenced, and a `ref` pointing at it says `restrict`. */
+  RECORD_REFERENCED: "record_referenced",
 } as const;
 
 /**
@@ -120,6 +140,25 @@ export interface NormalizedField {
   values?: string[];
   /** target entity for `ref` / `list<ref>` */
   entity?: string;
+  /**
+   * What deleting the REFERENCED record does to this reference — `ref` and
+   * `list<ref>` only. Default {@link DEFAULT_ON_DELETE}.
+   *
+   *  - `restrict` — refuse the delete while any record still points here.
+   *  - `ignore`   — allow it, and leave this reference dangling.
+   *
+   * It defaults to refusing because the alternative fails silently: the delete
+   * reports success and the damage surfaces later, somewhere else, as a record
+   * pointing at nothing. An app that genuinely wants dangling references says so
+   * in one word, and then it is a decision on the record rather than an accident.
+   *
+   * There is deliberately no `cascade` or `detach`. Both would have one delete
+   * quietly write to records the caller never named, which an agent cannot
+   * approve in advance and an audit log cannot explain afterwards. An app that
+   * wants that declares an operation, where it is named, described and approved
+   * like any other write.
+   */
+  onDelete?: OnDelete;
   /** true for a `string` field carrying a `YYYY-MM-DD` day key */
   dayKey?: boolean;
 }

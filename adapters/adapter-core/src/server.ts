@@ -11,6 +11,7 @@ import {
   describeViolation,
   describeIncomplete,
   labelFieldOf,
+  onDeleteOf,
   schemaFingerprint,
   ERROR_CODES,
   type EntityPrint,
@@ -48,6 +49,14 @@ import {
 
 export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
+
+/** Page size for the referential scan a delete runs before it commits. */
+const REFERENCE_SCAN_PAGE = 500;
+/** How many blocking record ids are reported per field. The answer is "yes, and
+ *  here are examples" — a caller does not need ten thousand of them. */
+const REFERENCE_SCAN_LIMIT = 10;
+/** Hard stop on paging, so a binding that ignores `page` cannot spin forever. */
+const REFERENCE_SCAN_MAX_PAGES = 200;
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";
@@ -536,6 +545,59 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
   /* ------------------------------------------------------------- records */
 
+  /**
+   * Who still points at this record.
+   *
+   * Every `ref` and `list<ref>` in the model names the entity it targets, so the
+   * app has ALREADY told the framework where its references live — this reads
+   * that declaration rather than asking for a second one.
+   *
+   * Scans referencing entities page by page instead of filtering server-side:
+   * `filter` is interpreted by the binding, and a policy that silently did
+   * nothing against a binding whose filter grammar differed would be worse than
+   * no policy at all. Only entities that actually declare a `restrict` ref to
+   * this one are read, so an entity nothing points at costs nothing.
+   *
+   * Stops at {@link REFERENCE_SCAN_LIMIT} matches: the answer is "yes, and here
+   * are examples", and listing ten thousand blocking rows helps nobody.
+   */
+  async function referencesTo(entity: string, id: string): Promise<{ entity: string; field: string; ids: string[] }[]> {
+    const model = binding.entities();
+    const blockers: { entity: string; field: string; ids: string[] }[] = [];
+
+    for (const [other, def] of Object.entries(model)) {
+      const pointing = def.fields.filter(
+        (f) => (f.type === "ref" || f.type === "list<ref>") && f.entity === entity && onDeleteOf(f) === "restrict",
+      );
+      if (pointing.length === 0) continue;
+
+      const found = new Map<string, string[]>();
+      let page = 1;
+      // Bounded: stop once every pointing field has its examples, or the pages
+      // run out. A page that comes back short is the last one.
+      for (;;) {
+        const result = await binding.listRecords(other, { page, perPage: REFERENCE_SCAN_PAGE });
+        const items = result.items ?? [];
+        for (const row of items) {
+          for (const field of pointing) {
+            const value = (row as Record<string, unknown>)[field.name];
+            const hit = Array.isArray(value) ? value.includes(id) : value === id;
+            if (!hit) continue;
+            const ids = found.get(field.name) ?? [];
+            if (ids.length < REFERENCE_SCAN_LIMIT) ids.push(String(row["id"] ?? ""));
+            found.set(field.name, ids);
+          }
+        }
+        if (items.length < REFERENCE_SCAN_PAGE) break;
+        page++;
+        if (page > REFERENCE_SCAN_MAX_PAGES) break;
+      }
+
+      for (const [field, ids] of found) blockers.push({ entity: other, field, ids });
+    }
+    return blockers;
+  }
+
   async function handleRecords(
     req: A2AppRequest,
     entity: string,
@@ -587,6 +649,37 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
     if (req.method === "DELETE") {
       if (!recordId) return err(400, "usage", "DELETE requires a record id.");
+
+      // The app's referential rules bind THIS door too.
+      //
+      // An app that guards deletion inside an operation has guarded exactly one
+      // way in: its own UI. This generic record route is the other, and it used
+      // to go straight to the store — so the rule held until an agent took the
+      // path the rule did not cover, and the orphan it left looked like a
+      // successful delete. The check belongs here, in the code an app author
+      // cannot edit, because that is the only place BOTH doors pass through.
+      const blockers = await referencesTo(entity, recordId);
+      if (blockers.length > 0) {
+        const total = blockers.reduce((n, b) => n + b.ids.length, 0);
+        const where = blockers.map((b) => `${b.entity}.${b.field}`).join(", ");
+        writeAudit(ctx, `data:${entity}`, recordId, "rejected", ERROR_CODES.RECORD_REFERENCED);
+        return err(
+          409,
+          ERROR_CODES.RECORD_REFERENCED,
+          `Cannot delete ${entity} "${recordId}": ${
+            total === 1 ? "a record still references" : `${total} records still reference`
+          } it (${where}).`,
+          {
+            referencedBy: blockers,
+            // Say what would make the delete legal, so the caller has a next
+            // move instead of a wall.
+            resolution:
+              `Remove or repoint the referencing records first, or run an operation the app provides for this. ` +
+              `An app that intends references to outlive the record declares \`onDelete: "ignore"\` on the ref.`,
+          },
+        );
+      }
+
       const okDel = await binding.deleteRecord(entity, recordId);
       writeAudit(ctx, `data:${entity}`, recordId, okDel ? "ok" : "rejected");
       if (!okDel) return err(404, "record_not_found", `No ${entity} record "${recordId}".`);

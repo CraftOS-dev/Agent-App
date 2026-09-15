@@ -76,6 +76,18 @@ routerAdd("GET", "/api/_a2app", (c) => {
     const nf = { name: f.name, type: protocolType(f) };
     if (f.required) nf.required = true;
     if (f.type === "select" && f.options && f.options.values) nf.values = f.options.values;
+    // A relation's TARGET is part of what describe publishes, so it has to be
+    // part of what schemaVersion covers. This copy of the mapping had drifted
+    // from the describe handler's, which does carry it — leaving the fingerprint
+    // blind to a ref being retargeted at a different collection. A client
+    // caching against it kept a describe pointing the ref at the old one.
+    if (f.type === "relation" && f.options && f.options.collectionId) {
+      try {
+        nf.entity = $app.dao().findCollectionByNameOrId(f.options.collectionId).name;
+      } catch (_unresolved) {
+        /* a target that cannot be resolved is left absent, as before */
+      }
+    }
     if (isDayKeyField(f)) nf.dayKey = true;
     return nf;
   }
@@ -556,5 +568,96 @@ function guard(e) {
   e.next();
 }
 
+/**
+ * Refuse to delete a record that other records still point at.
+ *
+ * PocketBase serves records natively, so create and update are guarded above by
+ * hooking the request — and delete was simply not hooked at all. An app that
+ * refuses to delete a client with invoices inside its own operation had guarded
+ * one way in; `DELETE /api/collections/clients/records/{id}` was the other, and
+ * it went straight through, leaving invoices pointing at nothing and reporting
+ * success.
+ *
+ * FAILS OPEN, deliberately. If the scan itself errors — an API shape this
+ * adapter did not expect, a collection it cannot read — the delete proceeds
+ * rather than being blocked. A guard that cannot run must not be able to brick
+ * every delete in the app: the worst case here is the behaviour that existed
+ * before this hook, never an app that can no longer delete anything.
+ */
+function deleteGuard(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const target = e.record.collection().name;
+  const recordId = e.record.id;
+  // Examples, not an inventory: a caller does not need every blocking row.
+  const LIMIT = 10;
+
+  let blockers = [];
+  try {
+    // Relation targets, read from PocketBase itself. Built inline because a
+    // pooled Goja handler cannot close over file scope.
+    const entities = {};
+    const collections = $app.dao().findCollectionsByType("base");
+    for (let i = 0; i < collections.length; i++) {
+      const col = collections[i];
+      const schemaFields = col.schema.fields();
+      const mapped = [];
+      for (let j = 0; j < schemaFields.length; j++) {
+        const f = schemaFields[j];
+        if (f.type !== "relation" || !f.options || !f.options.collectionId) continue;
+        const many = !!(f.options.maxSelect && f.options.maxSelect > 1);
+        mapped.push({
+          name: f.name,
+          type: many ? "list<ref>" : "ref",
+          entity: $app.dao().findCollectionByNameOrId(f.options.collectionId).name,
+        });
+      }
+      entities[col.name] = { fields: mapped };
+    }
+
+    const pointing = rules.referencingFields(entities, target);
+    for (let k = 0; k < pointing.length; k++) {
+      const p = pointing[k];
+      // `~` matches inside a multi-relation; `=` is exact for a single one.
+      // The id travels as a bound parameter, never spliced into the filter.
+      const expr = p.list ? `${p.field} ~ {:id}` : `${p.field} = {:id}`;
+      const rows = $app.dao().findRecordsByFilter(p.entity, expr, "", LIMIT, 0, { id: recordId });
+      if (rows && rows.length) {
+        const ids = [];
+        for (let r = 0; r < rows.length; r++) ids.push(rows[r].id);
+        blockers.push({ entity: p.entity, field: p.field, ids: ids });
+      }
+    }
+  } catch (err) {
+    try {
+      console.log(`a2app: referential delete check could not run for ${target} — allowing the delete: ${err}`);
+    } catch (_ignored) {
+      /* a logger that is not there must not become the failure */
+    }
+    return e.next();
+  }
+
+  if (blockers.length) {
+    let total = 0;
+    const where = [];
+    for (let i = 0; i < blockers.length; i++) {
+      total += blockers[i].ids.length;
+      where.push(`${blockers[i].entity}.${blockers[i].field}`);
+    }
+    const said = total === 1 ? "a record still references" : `${total} records still reference`;
+    throw new ApiError(409, `Cannot delete ${target} "${recordId}": ${said} it (${where.join(", ")}).`, {
+      a2app: true,
+      ok: false,
+      code: "record_referenced",
+      referencedBy: blockers,
+      resolution:
+        "Remove or repoint the referencing records first, or run an operation the app provides for this. " +
+        'An app that intends references to outlive the record sets the relation\'s onDelete to "ignore".',
+    });
+  }
+
+  e.next();
+}
+
 onRecordCreateRequest((e) => guard(e));
 onRecordUpdateRequest((e) => guard(e));
+onRecordDeleteRequest((e) => deleteGuard(e));

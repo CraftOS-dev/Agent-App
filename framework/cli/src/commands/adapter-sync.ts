@@ -3,13 +3,14 @@
  * Runs on every launch: it is the only path that reaches apps a user already
  * has. Idempotent, non-fatal, never touches app-authored code.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { canonPaths, fileMatchesCanon, writeSystemHashes } from "../lib/canon.js";
 import { writeFileAtomic } from "../lib/home.js";
 import { loadProject } from "../lib/project.js";
 import { adapterVersionOf, projectToolkit, vendorPaths } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
+import { readJsonFile } from "../lib/json.js";
 
 export async function run(_args: string[], app: string): Promise<number> {
   const project = loadProject(app);
@@ -34,7 +35,7 @@ export async function run(_args: string[], app: string): Promise<number> {
   }
   const version = adapterVersionOf(tk);
   const manifestPath = join(project.dir, "manifest.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  const manifest = readJsonFile(manifestPath) as Record<string, unknown>;
   const previous = manifest.adapterVersion ?? "none";
   manifest.adapterVersion = version;
   writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");

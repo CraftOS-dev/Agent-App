@@ -1,0 +1,21 @@
+{
+  "name": "@a2app/integration-pi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent App Framework plugin for Pi (earendil-works/pi): the /agent-app launcher command plus the six framework skills, driving the agent-app and a2app CLIs. Command + skills, no tool code — the same declarative shape as the Claude Code plugin.",
+  "license": "MIT",
+  "keywords": ["pi-package", "agent-app", "a2app", "skills", "agent-native"],
+  "author": { "name": "CraftOS", "url": "https://github.com/CraftOS-dev" },
+  "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
+  "repository": "https://github.com/CraftOS-dev/Agent-App",
+  "//pi": "A Pi package manifest (packages.md). `prompts` ships the /agent-app launcher; `skills` points at the single source of truth at the repo root (../../skills) so a git/local-path install finds them with no copy step. If your Pi rejects an out-of-root skills path, use the CLI instead — `agent-app skills --install ~/.pi/agent/skills` — which is Pi's native global skills dir. See README.",
+  "pi": {
+    "prompts": ["./prompts"],
+    "skills": ["../../skills"]
+  },
+  "scripts": {
+    "build": "node -e \"process.stdout.write('pi plugin: declarative pi-package (command + skills); no build step\\n')\"",
+    "typecheck": "node -e \"process.stdout.write('pi plugin: no code to typecheck (prompt template + skills)\\n')\"",
+    "test": "echo \"no tests\" && exit 0"
+  }
+}

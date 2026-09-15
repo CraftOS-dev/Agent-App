@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { A2AppClient } from "@a2app/sdk";
 import { AmbiguousAppError, find } from "./registry.js";
+import { readJsonFile } from "./json.js";
 
 /** manifest.json (framework file). */
 export interface Manifest {
@@ -66,7 +67,7 @@ export function loadProject(projectDir: string): Project {
       `Not an Agent App (no manifest.json): ${dir}. Pass a project directory, or a registered app id/name — see \`agent-app list\`.`,
     );
   }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;
+  const manifest = readJsonFile(manifestPath) as Manifest;
   const port = manifest.port ?? 8090;
   return { dir, manifest, baseUrl: `http://127.0.0.1:${port}` };
 }
@@ -99,7 +100,7 @@ async function principalToken(project: Project): Promise<string | null> {
   const file = join(project.dir, ".principal");
   if (!existsSync(file)) return null;
   try {
-    const cred = JSON.parse(readFileSync(file, "utf8")) as {
+    const cred = readJsonFile(file) as {
       authUrl: string;
       identity: string;
       password: string;

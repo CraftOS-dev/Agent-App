@@ -14,7 +14,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { jsonResult, textResult } from "openclaw/plugin-sdk/tool-results";
 import { Type } from "typebox";
-import { runA2App, binFor } from "@a2app/integration-starter";
+import { runA2App, binFor, agentAppFormHtml, handleFormAction, listKnownApps } from "@a2app/integration-starter";
 
 /** The a2app binary (or JS entry) to shell. Override with A2APP_CLI. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
@@ -130,8 +130,107 @@ export default definePluginEntry({
           if (r.stderr) process.stderr.write(r.stderr);
         });
     });
+
+    // The entry-point FORM — the framework's front door in the Control UI. An HTTP
+    // route serves the form (GET) and turns a submission into a kickoff prompt
+    // (POST); a Control UI tab points at that route, rendered in a sandboxed frame
+    // (this is the standard "tab → plugin HTTP route" path, so it needs no Custom
+    // plugin UI lab flag). GET/POST share ONE path so the form can POST to its own
+    // URL — no base-path guessing inside the frame.
+    api.registerHttpRoute({
+      path: ENTRY_ROUTE,
+      auth: "gateway",
+      match: "prefix",
+      async handler(req: HttpReq, res: HttpRes) {
+        try {
+          if ((req.method ?? "GET").toUpperCase() === "GET") {
+            const apps = await listKnownApps(FRAMEWORK_CLI);
+            res.statusCode = 200;
+            res.setHeader("content-type", "text/html; charset=utf-8");
+            res.end(agentAppFormHtml({ apps }));
+            return;
+          }
+          const body = await readJsonBody(req);
+          const result = await handleFormAction(body, { frameworkBin: FRAMEWORK_CLI });
+          // A kickoff routes the agent to the owning skill with the user's context.
+          // The form also echoes the prompt, so this hand-off is an enhancement, not
+          // the only path: if it no-ops the operator still has the prompt to send.
+          if (result.kind === "kickoff") startAgentTurn(api, result.prompt);
+          res.statusCode = result.kind === "error" ? 400 : 200;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify(result));
+        } catch (e) {
+          res.statusCode = 500;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ kind: "error", message: String((e as Error)?.message ?? e) }));
+        }
+      },
+    });
+
+    // Advertise the entry tab so it appears whenever the plugin is enabled.
+    api.session?.controls?.registerControlUiDescriptor?.({
+      surface: "tab",
+      id: "agent-app-home",
+      label: "Agent Apps",
+      description: "Build, evolve, or operate an Agent App.",
+      icon: "layout",
+      path: ENTRY_ROUTE,
+    });
   },
 });
+
+/** The plugin HTTP route that serves the entry form; also the Control UI tab path. */
+const ENTRY_ROUTE = "/agent-app/home";
+
+/** Minimal shape of the request/response the OpenClaw HTTP route handler receives
+ *  (Node-style). Kept local and loose so the binding does not depend on SDK types
+ *  the framework monorepo cannot resolve. */
+interface HttpReq {
+  method?: string;
+  body?: unknown;
+  on?(event: string, cb: (chunk?: unknown) => void): void;
+}
+interface HttpRes {
+  statusCode: number;
+  setHeader(name: string, value: string): void;
+  end(body?: string): void;
+}
+
+/** Read a JSON body whether the host pre-parsed it (req.body) or handed us a raw
+ *  Node stream. Returns {} on anything unparseable — the action handler then
+ *  reports a clean validation error rather than throwing. */
+async function readJsonBody(req: HttpReq): Promise<Record<string, unknown>> {
+  if (req.body && typeof req.body === "object") return req.body as Record<string, unknown>;
+  if (typeof req.body === "string") { try { return JSON.parse(req.body); } catch { return {}; } }
+  if (typeof req.on !== "function") return {};
+  const raw = await new Promise<string>((resolve) => {
+    let data = "";
+    req.on!("data", (c) => (data += String(c)));
+    req.on!("end", () => resolve(data));
+    req.on!("error", () => resolve(""));
+  });
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+
+/**
+ * Hand the kickoff prompt to the agent session. OpenClaw's session-send API name
+ * has shifted across versions, so this probes the known shapes and no-ops if none
+ * is present — the form always echoes the prompt as the guaranteed fallback.
+ * VERIFY against the target OpenClaw SDK and collapse to the one real call.
+ */
+function startAgentTurn(api: unknown, prompt: string): void {
+  const s = (api as { session?: Record<string, unknown>; logger?: { warn?: (m: string) => void } }).session;
+  const send =
+    (s?.enqueueMessage as ((a: unknown) => unknown) | undefined) ??
+    (s?.sendMessage as ((a: unknown) => unknown) | undefined) ??
+    ((s?.turns as { start?: (a: unknown) => unknown } | undefined)?.start);
+  try {
+    if (send) send({ text: prompt, timeoutSeconds: 0 });
+    else (api as { logger?: { warn?: (m: string) => void } }).logger?.warn?.("Agent App: no session-send API found; the form's copyable prompt is the hand-off.");
+  } catch (e) {
+    (api as { logger?: { warn?: (m: string) => void } }).logger?.warn?.("Agent App: agent hand-off failed: " + String(e));
+  }
+}
 
 /**
  * Contribute a Control UI tab for a launched app. Call once the app is healthy.

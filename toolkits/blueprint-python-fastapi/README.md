@@ -12,4 +12,4 @@ Layout:
 | `manifest.json`, `operations.json`, `AGENT_APP.md`, `reference/requirements.md` | framework files | identity, declared ops, plan, requirements |
 | `.a2app/system-hashes.json` | ownership canon | which files are system-owned |
 
-Run: `pip install -r requirements.txt` then `uvicorn main:app --port $PORT`. The in-memory store is a starter — swap `Store` for a database without touching the served surface or the rules.
+Run: `pip install -r requirements.txt` then `python main.py` (its `__main__` block binds uvicorn to the environment's `PORT`). The in-memory store is a starter — swap `Store` for a database without touching the served surface or the rules.

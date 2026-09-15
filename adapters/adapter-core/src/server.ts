@@ -30,6 +30,7 @@ import {
   type Access,
   type DescribeDeps,
 } from "./describe.js";
+import { AGENT_TEXT, boundAppText } from "./agentText.js";
 import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
@@ -473,7 +474,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       if (credentialRequired) {
         return {
           reply: err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "This write requires an agent credential.", {
-            how: config.credentialHint ?? "Read the app's .agent-token file (mode 0600) in the project directory.",
+            // App text is bounded before it is forwarded; the framework's own
+            // sentence is the fallback. Both live in agentText.ts — see the note
+            // there on why this channel is kept narrow.
+            how: boundAppText(config.credentialHint) ?? AGENT_TEXT.credentialHint,
           }),
         };
       }

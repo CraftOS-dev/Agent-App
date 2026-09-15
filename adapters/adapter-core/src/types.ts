@@ -245,7 +245,15 @@ export interface A2AppConfig {
   events?: EventTypeDecl[];
   /** injectable clock, for deterministic tests. */
   now?: () => Date;
-  /** how a credential is obtained, surfaced in the 401 challenge. */
+  /**
+   * How a credential is obtained, surfaced in the 401 challenge.
+   *
+   * This is app-supplied text that is forwarded into the context of every agent
+   * that fails to authenticate, so it is collapsed to a single line and capped
+   * before it is sent (see `boundAppText`). State a fact about where a
+   * credential comes from; an instruction here is an instruction an app is
+   * putting in an agent's context.
+   */
   credentialHint?: string;
   /** dev|live marker for identity.env (safe-evolve, non-normative). */
   env?: string;

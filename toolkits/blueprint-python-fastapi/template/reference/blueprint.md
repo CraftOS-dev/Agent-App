@@ -163,8 +163,10 @@ genuinely needs to enqueue agent work. Do not invent a manifest format.
 
 ## Build, run, gate
 
-`manifest.json`'s `pipeline` drives everything; the app runs as
-`uvicorn main:app --port $PORT`. Never start a server by hand.
+`manifest.json`'s `pipeline` drives everything; the app runs as `python main.py`,
+whose `__main__` block binds uvicorn to the environment's `PORT`. Never start a
+server by hand. (The start command reads `PORT` from the environment rather than
+interpolating `${PORT}` in the shell, so it is portable to cmd.exe on Windows.)
 
 ```bash
 agent-app <dir> validate   # framework files → build → python syntax + adapter self-test → operations resolve → ownership canon → describe budget

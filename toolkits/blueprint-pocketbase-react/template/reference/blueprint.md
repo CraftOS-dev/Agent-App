@@ -36,6 +36,7 @@ nothing until you add your first migration file under `pb/pb_migrations/`.
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `pb/pb_data`, credentials, the binary. Extend as needed. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
+| `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Resolves the binary + data dirs and reads the port from the environment. Never edit. |
 | `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter: identity, describe, and the create/update guard. Never edit. |
 | `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint) + `--selftest`. Never edit. |
 
@@ -43,7 +44,7 @@ nothing until you add your first migration file under `pb/pb_migrations/`.
 
 | Path | Owner | What it is |
 |---|---|---|
-| `pb/pocketbase` | runtime | the PocketBase binary. You download it (see pipeline `install`); nothing runs without it. Git-ignored. |
+| `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary. You download it (see pipeline `install`); nothing runs without it. `pb-serve.mjs` picks the right name per platform. Git-ignored. |
 | `pb/pb_migrations/*.js` | **YOURS** | collection (entity) definitions as PocketBase JS migrations. You write these — none ship, so a fresh app has zero collections. |
 | `pb/pb_hooks/<your-op>.pb.js` | **YOURS** | custom operation implementations — a new hook file per op with a `routerAdd(...)` route. Never touch `_a2app*`. |
 | `pb/pb_public/**` | **YOURS** | the React View; PocketBase serves it statically. You build it and bring your own component set and design tokens. |
@@ -159,7 +160,10 @@ code. Do not invent an unsupported mechanism.
 - `install` prints a reminder to **download the PocketBase binary into `./pb`** —
   do this before serving, or `start` has nothing to run.
 - `build` = `node --check pb/pb_hooks/_a2app.pb.js` (syntax only).
-- `start` = `pb/pocketbase serve --http 127.0.0.1:${PORT} --dir pb/pb_data --hooksDir pb/pb_hooks`.
+- `start` = `node pb-serve.mjs` — the launcher runs `pocketbase serve` bound to the
+  environment's `PORT`. It is cross-platform on purpose: the raw `pb/pocketbase
+  serve --http 127.0.0.1:${PORT} ...` form is not, because cmd.exe neither expands
+  `${PORT}` nor runs an executable path written with `/`.
 - `health` = `/api/_a2app`.
 
 ```bash

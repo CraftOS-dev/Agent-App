@@ -86,7 +86,7 @@ the concrete shape.
 
 | Part | Typical file(s) | What it does |
 |---|---|---|
-| server / HTTP entry | e.g. `server.js`, `main.py` | boots on `$PORT`; routes `/api/**` to the adapter; serves the frontend. |
+| server / HTTP entry | e.g. `server.js`, `main.py` | reads the port from the `PORT` environment variable that `serve` sets (do NOT rely on the shell to expand `${PORT}` in `pipeline.start` — cmd.exe does not); routes `/api/**` to the adapter; serves the frontend. |
 | A2App adapter | e.g. `adapter.*` | the only agent surface: identity, describe, guarded records CRUD, operations. Mark system-owned. |
 | data model | e.g. `schema.*` | entities + fields the adapter derives `describe`/`schemaVersion` from. |
 | store | a DB or JSON file under `data/` | persists records; must live inside `lifecycle.dataDir`. |

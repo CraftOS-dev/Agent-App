@@ -15,13 +15,38 @@ interface ToolkitSpec {
   /** react-node's real build needs `npm install` of a published adapter, so its
    *  gate is checked with --no-build (Toolkit class validates the scaffold). */
   noBuild?: boolean;
+  /**
+   * This blueprint scaffolds a STARTING POINT, not a finished app, so `validate`
+   * is expected to REFUSE a fresh scaffold and name the spec as unauthored —
+   * that refusal is the blueprint working, not failing.
+   *
+   * Asserting `validate` passes here would demand a spec for an app that does
+   * not exist yet, and the only way to satisfy it would be to write a fictional
+   * one. The check is inverted instead, so the suite states the real contract
+   * rather than a wish: a starting point is not a finished app, and `validate`
+   * saying so on every app that is not done is the whole point of `validate`.
+   *
+   * The string says WHY for each, because "incomplete" is a claim that should
+   * age badly if someone finishes the blueprint and forgets this line.
+   */
+  incompleteBecause?: string;
 }
 
 const TOOLKITS: ToolkitSpec[] = [
-  { id: "blueprint-base" },
+  // Framework files and no runtime code at all: no entities, no operations, a
+  // pipeline of placeholder echoes. The author picks the stack.
+  { id: "blueprint-base", incompleteBecause: "ships framework files only, no runtime code" },
+  // The one finished starter: a to-do app with a View, a model and operations.
   { id: "blueprint-react-node", noBuild: true },
   { id: "blueprint-python-fastapi", noBuild: true },
-  { id: "blueprint-pocketbase-react", noBuild: true },
+  // Ships adapter hooks only. Its `tasks` collection is created by hand in
+  // PocketBase, and `install` prints "download the pocketbase binary" — so a
+  // fresh scaffold has neither data model nor runtime.
+  {
+    id: "blueprint-pocketbase-react",
+    noBuild: true,
+    incompleteBecause: "ships adapter hooks only; collections and the binary are added by hand",
+  },
 ];
 
 /**
@@ -71,10 +96,21 @@ export async function runToolkitClass(cliEntry: string | null): Promise<SuiteRes
 
       const validateArgs = [appDir, "validate", ...(tk.noBuild ? ["--no-build"] : [])];
       const validated = await run(cliEntry, validateArgs);
-      if (validated.exit !== 0) failures.push(`validate exit ${validated.exit}: ${validated.out.trim().slice(0, 400)}`);
+      if (tk.incompleteBecause) {
+        // The refusal IS the contract here: a starting point with no entities and
+        // no operations must not be able to pass as a finished app, or `validate`
+        // means nothing on the apps that are.
+        if (validated.exit === 0) {
+          failures.push(`validate passed a scaffold that ${tk.incompleteBecause} — an unauthored spec must not pass`);
+        } else if (!/not authored/.test(validated.out)) {
+          failures.push(`validate refused for the wrong reason: ${validated.out.trim().slice(0, 300)}`);
+        }
+      } else if (validated.exit !== 0) {
+        failures.push(`validate exit ${validated.exit}: ${validated.out.trim().slice(0, 400)}`);
+      }
     }
 
-    results.push({ name: `${tk.id}: scaffold → canon → validate`, ok: failures.length === 0, failures });
+    results.push({ name: `${tk.id}: scaffold → canon → ${tk.incompleteBecause ? "validate refuses (starting point, not a finished app)" : "validate"}`, ok: failures.length === 0, failures });
   }
 
   const passed = results.filter((r) => r.ok).length;

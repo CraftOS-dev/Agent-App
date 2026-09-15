@@ -1,11 +1,10 @@
 /** a2app <app> identity — probe the app's identity document. */
-import { clientFor, loadProject } from "../lib/project.js";
+import { connect } from "../lib/target.js";
 import { A2AppClient } from "@a2app/sdk";
 import { log } from "../lib/log.js";
 
 export async function run(_args: string[], app: string): Promise<number> {
-  const project = loadProject(app);
-  const client = await clientFor(project);
+  const { client } = await connect(app);
   const id = await client.identity();
   if (id === null) {
     log.error("Not an A2App app (no `a2app: true` marker at /.well-known/a2app.json or /api/_a2app)");

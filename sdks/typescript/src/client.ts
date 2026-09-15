@@ -235,11 +235,24 @@ export class A2AppClient {
 
   /* ------------------------------------------------------------- discovery */
 
-  /** Probe an app's identity. Tries the well-known path first, then the API
-   *  alias. Returns null when the marker `a2app: true` is absent. */
+  /**
+   * Probe an app's identity. Tries the well-known path first, then the API
+   * alias. Returns null when no identity document was served.
+   *
+   * The success check is `res.ok` AND the marker, not the marker alone. Every
+   * adapter error envelope also carries `a2app: true` — it is how a client knows
+   * a refusal came from the app rather than from something in front of it — so a
+   * marker-only test accepts a `403 forbidden_host` or a `401` as an identity
+   * document. What comes back then has no `protocol` and no `app.id`, and the
+   * caller reports whichever of those it happens to touch first instead of the
+   * refusal that actually occurred. A deployed app behind a proxy hits this on
+   * its first request, which is the worst possible time to be told the wrong
+   * thing.
+   */
   async identity(): Promise<Identity | null> {
     for (const path of ["/.well-known/a2app.json", "/api/_a2app"]) {
       const res = await this.request("GET", path);
+      if (!res.ok) continue;
       const id = res.json as Identity | null;
       if (id && id.a2app === true) return id;
     }

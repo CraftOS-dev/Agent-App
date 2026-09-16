@@ -219,18 +219,20 @@ events. **Trigger support is stack-specific and not every blueprint ships it** �
 `reference/blueprint.md` says whether yours does and how; if it does not, handle
 the event with plain code and record the limitation in the spec.
 
-## Finish: gate, launch, then verify
+## Finish: boot the candidate, gate, then verify
 
-1. **`agent-app <dir> validate`** runs the gate (app-part consistency → build →
-   migrations-on-a-fresh-db → operations resolve → ownership canon → describe
-   budget). On errors: read ALL of them, fix ALL of them, run it again. Then
-   `agent-app <dir> dev` proves your code loads and builds a fresh post-migration
-   DB in an isolated dev directory — it starts NO server and there is no dev URL,
-   so run the app with `agent-app <dir> serve` and read logs from
-   `.a2app/serve.log`. Never start servers by hand.
-   A step the gate reports **UNCHECKED** did not pass — it could not run. The
-   budget step needs the app running, so re-run `validate` after `serve` rather
-   than treating the warning as a pass.
+1. **`agent-app <dir> dev`** boots your build on a hidden port with a fresh
+   database created purely from your migrations — nothing is copied; the tree
+   you just wrote IS the running candidate, and its log is at the path `dev`
+   prints. While this instance is up, every `a2app` operate command and
+   `validate` target it automatically. Then **`agent-app <dir> validate`** runs
+   the gate (app-part consistency → build → migrations-on-a-fresh-db →
+   operations resolve → ownership canon → describe budget, measured on the dev
+   instance). On errors: read ALL of them, fix ALL of them, re-run `dev` (a
+   fresh boot picks up backend edits) and `validate` again. A step the gate
+   reports **UNCHECKED** did not pass — it could not run; with the dev instance
+   up, nothing should be unchecked. `validate` records the gate pass `promote`
+   will demand. Never start servers by hand.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
    - `a2app <dir>` → does the root show the modules you declared, with the entity
@@ -260,14 +262,18 @@ the event with plain code and record the limitation in the spec.
    fix-and-re-verify loop. This review does not replace verification: you are
    the builder, and the builder does not grade itself.
 4. **walk-verify** — run the walk-verify skill: an independent run (NOT you) walks
-   the running app in a real browser against `reference/requirements.md` AND the
-   Quality Standard. A pass is what promotes and announces the app. Failures come
+   the DEV instance in a real browser against `reference/requirements.md` AND the
+   Quality Standard. A clean pass is what earns the promote. Failures come
    back as a report (features and Q-numbered quality items): fix them, then
    repeat step 1 and step 4.
-5. **Launch it and put it in front of the user.** `agent-app <dir> serve` runs the
-   manifest pipeline as a managed background process and polls health until the
-   app answers; it prints the URL. Then open it — see **Showing the app to the
-   user** below. Never start a server by hand.
+5. **Promote and put it in front of the user.**
+   `agent-app <dir> promote` requires the gate pass from step 1 (edited since
+   validating? validate again first), takes the pre-promote backup when a live
+   database exists (a first delivery has none), applies your migrations to
+   live, and destroys the dev instance. Then `agent-app <dir> serve` runs the
+   manifest pipeline as a managed background process, polls health, and prints
+   the URL — open it, see **Showing the app to the user** below. Never start a
+   server by hand.
 
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU
@@ -286,12 +292,12 @@ headless) and the printed URL is how the user gets there. `agent-app <dir> serve
 --open` does the serve and the open in one step where you do not need the URL
 first.
 
-Test data is fine during the build — the dev DB is disposable; at delivery the
-LIVE app boots with a fresh database built purely from your migrations, so records
-you or the verifier created never reach the user. Data your migrations SEED
-survives. Externally-fetched data does not carry over: an app that syncs from an
-API must self-populate on an empty DB (fetch at boot or when the collection is
-empty).
+Test data is fine during the build — the dev instance's database is disposable
+and is destroyed at promote; at delivery the LIVE app boots with a fresh database
+built purely from your migrations, so records you or the verifier created never
+reach the user. Data your migrations SEED survives. Externally-fetched data does
+not carry over: an app that syncs from an API must self-populate on an empty DB
+(fetch at boot or when the collection is empty).
 
 ## HONESTY RULE
 

@@ -93,23 +93,47 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 ## Finish
 
 ```
-agent-app <dir> dev        # prepare a fresh, migration-replayed dev DB (starts NO server)
-agent-app <dir> validate   # the gate
-# then the walk-verify skill
-agent-app <dir> stop       # promote refuses to run while the app is serving
-agent-app <dir> promote    # pre-promote backup, then apply new migrations to live
+agent-app <dir> dev        # boot the CANDIDATE on a hidden port with a fresh DB
+agent-app <dir> validate   # the gate — measures the dev instance, records the gate pass
+# then the walk-verify skill — the verifier drives the dev URL
+agent-app <dir> stop       # stop the LIVE app (promote refuses while it serves; dev stays up)
+agent-app <dir> promote    # requires the gate pass; backup, apply migrations, destroy dev
 agent-app <dir> serve      # bring the changed app back up
 agent-app <dir> open       # and show it to the user (see below)
 ```
 
+**How the dev environment works — read this once, it removes all guesswork:**
+
+- **Nothing is copied. Your edits ARE the running candidate.** `dev` boots the
+  project's own tree a second time on a hidden port with a fresh database and
+  `A2APP_ENV=dev`. The live app (if serving) keeps running the code and View it
+  loaded at its own boot, untouched — edit freely while the user works.
+- **The dev database is disposable and rebuilt from your migrations on every
+  `dev`.** Only data your migrations seed exists; live data is NEVER cloned in.
+  Reference data the app needs must be seeded in a migration (it survives
+  promote); test records you create through the dev app are thrown away with
+  the instance. Each `dev` re-proves the whole migration chain from empty.
+- **While the dev instance is up, every operate command targets IT
+  automatically** — `a2app <dir> …`, `data`, and `validate`'s budget walk. You
+  never pass the hidden port yourself (it is in `dev` output and
+  `.a2app/dev.json` when a browser needs it). If the instance died, operate
+  commands refuse loudly with the remedy — they never silently fall back to
+  live, so test writes cannot leak into user data.
+- **View edits are hot on dev** (refresh the page); **backend/hook edits need
+  `agent-app <dir> dev` again** (a fresh boot is cheap and re-proves the
+  chain). The live app serves a boot-time snapshot of the View, so nothing you
+  edit reaches users until promote + serve.
+- **`promote` refuses without a fresh gate pass.** `validate` records a pass
+  bound to the exact tree it gated, and only counts as promotable when the
+  budget walk ran against the dev instance. Any edit after `validate`
+  invalidates the pass — the order is always: edit → `dev` (if backend
+  changed) → `validate` → promote. On success promote destroys the dev
+  instance; on failure it keeps it (and the pass) for the retry.
+- Abandoning a change? `agent-app <dir> stop --dev` tears the candidate down
+  and routes operate commands back to live.
+
 `promote` applies migrations and launches NOTHING, so a change is not in front of
 the user until you serve again. Do not end a modify at `promote`.
-
-**`dev` does not start a server, and there is no dev URL.** It runs the toolkit's
-`lifecycle.dev`, which builds a fresh database and exits — no shipped toolkit boots
-a second instance. Do not go looking for a hidden port; verify against the app you
-serve after promoting, which is why the pre-promote backup is mandatory and
-`agent-app <dir> restore` is the way back.
 
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU
@@ -144,23 +168,17 @@ headless) and the printed URL is how the user gets there. `agent-app <dir> serve
 --open` does the serve and the open in one step where you do not need the URL
 first.
 
-`agent-app dev` builds a **FRESH, EMPTY database** in an isolated dev directory by
-replaying migrations, and proves your edited code loads. The user's live app is
-untouched and its data is NEVER cloned into dev — the framework fingerprints the
-live data directory before and after and aborts if the toolkit's dev command went
-near it. What `dev` does NOT do is start a server: there is no dev instance and no
-dev URL to point walk-verify at. Verification therefore happens against the app you
-`serve` after promoting, which is why `agent-app promote` takes a mandatory
-pre-promote backup, aborts if that backup fails, and `agent-app restore` rolls back.
-
 - **The dev DB starts empty every time.** If a feature needs data to be visible,
   seed it in a migration (which survives promote).
-- **Never run `agent-app validate` or `agent-app dev` in a way that rebuilds the live
-  project dir in place** — it overwrites the served frontend and blanks the user's
-  live UI.
-- **Never write test data to the live app** (its DB is the user's real data; agent
-  test writes outside the dev env are refused). Identity (`a2app <dir> identity`)
-  answers `env: "dev"` or `"live"` if you need to confirm which instance a port is.
+- **Never write test data to the live app** (its DB is the user's real data). You
+  should never need to try: while the dev instance is up, every `a2app` command
+  targets it, and the live View is a boot-time snapshot your edits cannot reach.
+  Which instance you are talking to is a structural fact — the operate client
+  verifies the dev route before answering — not something you infer from a port
+  number.
+- **If promote or the promoted app goes wrong**, the mandatory pre-promote backup
+  is the way back: `agent-app <dir> restore` captures current state first and
+  rolls back automatically on failure.
 
 HONESTY RULE: the change is live only when walk-verify returns a pass — never tell
 the user a change is live when the relaunch, verification, or promotion failed. On

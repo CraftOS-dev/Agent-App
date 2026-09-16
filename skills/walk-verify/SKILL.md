@@ -1,7 +1,7 @@
 ---
 name: walk-verify
 activity: walk-verify
-description: Independently verify a running Agent App against its requirements and the Agent App Quality Standard by driving the real UI in a browser, feature by feature. Load to verify a build before it is announced. Run by an agent that is NOT the builder. Verdicts: pass | defects | incomplete | blocked.
+description: "Independently verify a running Agent App against its requirements and the Agent App Quality Standard by driving the real UI in a browser, feature by feature. Load to verify a build before it is announced. Run by an agent that is NOT the builder. Verdicts: pass | defects | incomplete | blocked."
 ---
 
 # Walk-verify
@@ -28,14 +28,20 @@ you re-verify.
   the one location overrides live. A quality item the app explicitly
   overrides there (naming the item and the reason) is honored — do not
   report it. An unstated deviation is a defect; silence is never an override.
-- **Data safety.** Verify against a dev instance's fresh database where the stack
-  provides one; no shipped toolkit does yet (`agent-app dev` prepares a database
-  and starts no server), so in practice you verify the served app after a promote
-  whose mandatory pre-promote backup is the way back. Never create test records in
-  an app holding real user data. Verification does not run after data-only changes.
-- Confirm the app is up first: poll the manifest health endpoint; confirm identity
-  (`a2app <dir> identity`) returns the intended `app.id` (and `env: "dev"` where the
-  stack marks one).
+- **Data safety.** You verify the DEV instance: `agent-app <dir> dev` boots the
+  candidate on a hidden port with a fresh, migration-replayed database — live
+  user data is never in it, so create test records freely; they are destroyed
+  at promote. The builder should have left it running; if nothing is up, run
+  `agent-app <dir> dev` yourself. Never create test records against the live
+  port. Verification does not run after data-only changes.
+- **Your browser target is the dev URL**: the `url` in `agent-app <dir> dev`
+  output, also recorded in `<dir>/.a2app/dev.json`. Every `a2app <dir> …`
+  command below targets the dev instance automatically while it is up — if one
+  refuses because the instance died, re-run `agent-app <dir> dev` and restart
+  the walk (the database is rebuilt fresh).
+- Confirm the app is up first: `a2app <dir> identity` must answer with the
+  intended `app.id` (the operate client verifies it is talking to the dev
+  instance before answering).
 
 ## Part 1 — Functional checks
 

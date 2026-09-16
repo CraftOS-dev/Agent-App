@@ -16,12 +16,18 @@
  * specified." Launching the binary from Node with an explicit, platform-correct
  * path and an environment-sourced port removes both assumptions.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// The adapter (pb/pb_hooks/_a2app.pb.js) targets the PocketBase 0.23+ JSVM API
+// and the blueprint is pinned to the 0.26 line. Older/newer majors moved these
+// hook and DAO APIs, so a mismatched binary fails deep inside a hook with an
+// opaque ReferenceError. This is the required series.
+const SUPPORTED_SERIES = "0.26.";
 
 // The port comes from the environment `serve` sets; the manifest's own `port` is
 // the declared source when the launcher is run directly. No baked-in default.
@@ -39,6 +45,18 @@ const pbDir = join(here, "pb");
 const binary = join(pbDir, process.platform === "win32" ? "pocketbase.exe" : "pocketbase");
 if (!existsSync(binary)) {
   console.error(`PocketBase binary not found at ${binary} — download it into pb/ (pipeline \`install\`) before serving`);
+  process.exit(1);
+}
+
+// Assert the binary is on the supported series before serving. `pocketbase
+// --version` prints "pocketbase[.exe] version 0.26.6"; the version is the last
+// whitespace-separated token.
+const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim().split(" ").pop();
+if (!version.startsWith(SUPPORTED_SERIES)) {
+  console.error(
+    `PocketBase ${version} is not supported: this app's adapter targets the ${SUPPORTED_SERIES}x JSVM API. ` +
+      `Replace ${binary} with a ${SUPPORTED_SERIES}x build (pinned: v0.26.6).`,
+  );
   process.exit(1);
 }
 

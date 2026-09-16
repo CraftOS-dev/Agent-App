@@ -37,14 +37,15 @@ nothing until you add your first migration file under `pb/pb_migrations/`.
 | `.gitignore` | **YOURS** | ignores `pb/pb_data`, credentials, the binary. Extend as needed. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
 | `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Resolves the binary + data dirs and reads the port from the environment. Never edit. |
-| `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter: identity, describe, and the create/update guard. Never edit. |
+| `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter hook REGISTRATIONS — thin one-liner handlers that `require()` the impl module (PocketBase runs each handler isolated from file scope). Never edit. |
+| `pb/pb_hooks/_a2app_impl.js` | SYSTEM (hash-locked) | the adapter IMPLEMENTATION: identity, describe, and the create/update guard, loaded via `require()` from the handlers. Never edit. |
 | `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint) + `--selftest`. Never edit. |
 
 **You create or obtain (nothing ships for these):**
 
 | Path | Owner | What it is |
 |---|---|---|
-| `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary. You download it (see pipeline `install`); nothing runs without it. `pb-serve.mjs` picks the right name per platform. Git-ignored. |
+| `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary, **pinned to v0.26.6** (the adapter targets the 0.26 JSVM API). You download it (see pipeline `install`); nothing runs without it. `pb-serve.mjs` picks the right name per platform and refuses to launch a non‑0.26.x build. Git-ignored. |
 | `pb/pb_migrations/*.js` | **YOURS** | collection (entity) definitions as PocketBase JS migrations. You write these — none ship, so a fresh app has zero collections. |
 | `pb/pb_hooks/<your-op>.pb.js` | **YOURS** | custom operation implementations — a new hook file per op with a `routerAdd(...)` route. Never touch `_a2app*`. |
 | `pb/pb_public/**` | **YOURS** | the React View; PocketBase serves it statically. You build it and bring your own component set and design tokens. |
@@ -157,8 +158,11 @@ code. Do not invent an unsupported mechanism.
 
 `manifest.json`'s `pipeline`:
 
-- `install` prints a reminder to **download the PocketBase binary into `./pb`** —
-  do this before serving, or `start` has nothing to run.
+- `install` prints a reminder to **download PocketBase v0.26.6 into `./pb`** — do
+  this before serving, or `start` has nothing to run. The adapter targets the 0.26
+  JSVM API (`onRecordCreateRequest`/`e.next()`, `$app.find*`, `collection.fields`,
+  `e.requestInfo().body`), so **only 0.26.x is supported** — the launcher asserts
+  the binary's version and refuses anything else.
 - `build` = `node --check pb/pb_hooks/_a2app.pb.js` (syntax only).
 - `start` = `node pb-serve.mjs` — the launcher runs `pocketbase serve` bound to the
   environment's `PORT`. It is cross-platform on purpose: the raw `pb/pocketbase
@@ -178,7 +182,9 @@ self-test"** (`node --check` both hook files, then
 
 ## Footguns for this stack
 
-- **Get the binary first.** Nothing runs until `pb/pocketbase` exists.
+- **Get the binary first, and it must be v0.26.6.** Nothing runs until
+  `pb/pocketbase` exists, and the launcher rejects any non‑0.26.x build (the
+  adapter is written against the 0.26 JSVM API).
 - **Zero collections on scaffold.** Write migrations to create your entities;
   until you do, `a2app <dir>` shows modules with `0 entities`.
 - **Register every new collection in `manifest.json`'s module `entities[]`** or it

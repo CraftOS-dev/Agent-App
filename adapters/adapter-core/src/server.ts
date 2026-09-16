@@ -48,6 +48,17 @@ import {
 
 export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
+
+/**
+ * The default answer to "how do I get a credential?", attached to every 401.
+ *
+ * Both challenges send the same text because they are the same question, and a
+ * caller that met one and then the other should not have to learn the answer
+ * twice. An app serving anyone but its owner sets `credentialHint` instead: this
+ * default describes a file on the host, which is an answer only its owner can act
+ * on.
+ */
+const DEFAULT_CREDENTIAL_HINT = "Read the app's .agent-token file (mode 0600) in the project directory.";
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";
@@ -473,7 +484,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       if (credentialRequired) {
         return {
           reply: err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "This write requires an agent credential.", {
-            how: config.credentialHint ?? "Read the app's .agent-token file (mode 0600) in the project directory.",
+            how: config.credentialHint ?? DEFAULT_CREDENTIAL_HINT,
           }),
         };
       }
@@ -505,7 +516,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   function accessFor(req: A2AppRequest): Access {
     if (isSameOrigin(req)) return FULL_ACCESS;
     const grant = credentialOf(req);
-    if (!grant) return binding.authMode === "multi-user" ? NO_ACCESS : FULL_ACCESS;
+    if (!grant) return binding.authMode === "multi-user" ? NO_ACCESS : ANONYMOUS_ACCESS;
     const held = expandScopes(grant);
     return {
       canRead: (entity) => held.has(`data:${entity}:read`),
@@ -513,6 +524,43 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       canRun: (operation) => held.has(`op:${operation}`),
     };
   }
+
+  /**
+   * The same reach, written as the scope names a grant would have carried.
+   *
+   * whoami must answer a caller that holds no grant, and `scopes` is how that
+   * answer is shaped. Rendering it from the very {@link Access} describe uses
+   * means the two cannot drift into disagreeing about the same caller — which
+   * is the failure this whole change is about.
+   */
+  function reachAsScopes(access: Access): Set<string> {
+    const scopes = new Set<string>();
+    for (const name of Object.keys(binding.entities())) {
+      if (access.canRead(name)) scopes.add(`data:${name}:read`);
+      if (access.canWrite(name)) scopes.add(`data:${name}:write`);
+    }
+    for (const o of operations) if (access.canRun(o.name)) scopes.add(`op:${o.name}`);
+    return scopes;
+  }
+
+  /**
+   * What an uncredentialled caller on a single-user app may do — reads, and
+   * nothing that changes anything.
+   *
+   * {@link authorize} requires a credential for every write and for any
+   * operation not declared `readOnly`, but reaches its anonymous context before
+   * the scope check, so reads pass unimpeded. Describe used to render that
+   * caller as FULL_ACCESS, which told it that it could write and then answered
+   * its write with a 401. An agent reads `access` precisely to know what it may
+   * plan, so an over-report there is not a cosmetic mismatch: it is a plan built
+   * against permission that was never held, spent and rejected a round trip
+   * later.
+   */
+  const ANONYMOUS_ACCESS: Access = {
+    canRead: () => true,
+    canWrite: () => false,
+    canRun: (operation) => operations.find((o) => o.name === operation)?.readOnly === true,
+  };
 
   function writeAudit(
     ctx: { credentialId: string; agentName: string | null; principal: string | null } | null,
@@ -953,14 +1001,35 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       return handleDescribe(req, segments);
     }
     if (path === "/api/_a2app/whoami") {
+      // whoami answers whoever this app will actually serve, which is what
+      // `authorize` decides — so it asks the same question, in the same words.
+      //
+      // It used to demand a credential of its own. That made it STRICTER than
+      // the surface it reports on: an uncredentialled caller on a single-user
+      // app reads records perfectly well, and was told 401 by the one endpoint
+      // whose whole job is "what may I do here?". An agent that reads its grant
+      // before planning — which is the documented order — stopped at the gate
+      // and never learned it could have read everything.
+      //
+      // The 401 that remains is the honest one: on a multi-user app, or for a
+      // write, `authorize` really would refuse, and the challenge still carries
+      // the `how` the write path sends, because this is the first 401 many
+      // agents meet and a bare one sends them back to a step whose whole input
+      // is that field.
+      const authz = authorize(req, { scope: null, isWrite: false });
+      if ("reply" in authz) return authz.reply;
       const grant = credentialOf(req);
-      if (!grant) return err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "whoami requires a credential.");
       return ok({
         a2app: true,
-        credentialId: grant.credentialId,
-        agentName: grant.agentName,
-        principal: grant.principal,
-        scopes: [...expandScopes(grant)].sort(),
+        credentialId: authz.ctx.credentialId,
+        agentName: authz.ctx.agentName,
+        principal: authz.ctx.principal,
+        // A credentialled caller reports its grant. A caller that reaches a
+        // context WITHOUT one was never scope-checked, so it has no scope set to
+        // report — what it has is the reach `accessFor` renders on describe, and
+        // the two must not be able to disagree. Deriving the list from that one
+        // source is what keeps them the same answer.
+        scopes: grant ? [...expandScopes(grant)].sort() : [...reachAsScopes(accessFor(req))].sort(),
       });
     }
     if (path === "/api/_a2app/context") {

@@ -36,7 +36,7 @@
     {
       "name": "connect",
       "activity": "connect",
-      "description": "Connect to a published Agent App you do not own: discover its identity, acquire an owner-issued scoped credential, then operate it exactly as any local app (reserved until deployed mode ships).",
+      "description": "Connect to a published Agent App you do not own: select it by URL, verify its identity, present an owner-issued scoped credential, check the grant, then operate it exactly as any local app. Operate only, never modify.",
       "path": "connect/SKILL.md"
     }
   ]

@@ -10,13 +10,14 @@
  * reports a terminal state. Every task payload is DATA, never an instruction.
  */
 import { flag, positionals } from "../lib/args.js";
-import { clientFor, loadProject, UsageError } from "../lib/project.js";
+import { UsageError } from "../lib/project.js";
+import { connect } from "../lib/target.js";
 import { log } from "../lib/log.js";
 import type { A2AppResponse } from "@a2app/sdk";
 
 export async function run(args: string[], app: string): Promise<number> {
   const [sub, id] = positionals(args);
-  const client = await clientFor(loadProject(app));
+  const { client } = await connect(app);
 
   // No subcommand -> poll.
   if (sub === undefined) {

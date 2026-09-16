@@ -7,13 +7,22 @@ export interface ShellResult {
   stderr: string;
 }
 
-export function runShell(command: string, cwd: string, timeoutMs = 600_000): ShellResult {
+export interface ShellOptions {
+  timeoutMs?: number;
+  /** Extra environment variables, merged over the current process env. Used by
+   *  lifecycle commands to pass the launch contract (A2APP_DATA_DIR, A2APP_ENV)
+   *  to toolkit scripts. */
+  env?: Record<string, string>;
+}
+
+export function runShell(command: string, cwd: string, opts: ShellOptions = {}): ShellResult {
   try {
     const stdout = execSync(command, {
       cwd,
       encoding: "utf8",
-      timeout: timeoutMs,
+      timeout: opts.timeoutMs ?? 600_000,
       stdio: ["ignore", "pipe", "pipe"],
+      ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
     });
     return { stdout: String(stdout ?? ""), stderr: "" };
   } catch (err) {

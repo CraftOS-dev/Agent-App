@@ -24,6 +24,7 @@ import { createConnection } from "node:net";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homePath, REGISTRY_FILE, writeFileAtomic } from "./home.js";
+import { readDevRecord } from "./instance.js";
 import { withHomeLock } from "./lock.js";
 import { log } from "./log.js";
 
@@ -59,6 +60,14 @@ export interface AppView extends RegistryEntry {
   url: string | null;
   /** pid recorded by `serve`, when the app is running */
   pid: number | null;
+  /**
+   * The app's dev instance, when a record exists — derived by probing, like
+   * `status`. `answering` distinguishes a live candidate (routed operate
+   * traffic goes to it) from a stale record (its instance died; `stop --dev`
+   * clears it). Surfaced so abandoned candidates are visible instead of
+   * lingering silently in `.a2app/dev.json`.
+   */
+  dev: { port: number; url: string; answering: boolean } | null;
 }
 
 export function registryPath(): string {
@@ -272,10 +281,18 @@ function manifestOf(appDir: string): { id?: string; name?: string; port?: number
  * Resolve one entry to a live view: identity refreshed from the app's own
  * manifest, status established by asking the port who it is.
  */
+/** The app's dev instance, derived the same way `status` is: a recorded
+ *  instance is `answering` iff its port identifies as this app right now. */
+async function devView(dir: string, appId: string): Promise<AppView["dev"]> {
+  const rec = readDevRecord(dir);
+  if (rec === null) return null;
+  return { port: rec.port, url: rec.url, answering: (await identify(rec.port)) === appId };
+}
+
 export async function view(entry: RegistryEntry): Promise<AppView> {
   const dir = resolve(entry.path);
   if (!existsSync(join(dir, "manifest.json"))) {
-    return { ...entry, status: "missing", url: null, pid: null };
+    return { ...entry, status: "missing", url: null, pid: null, dev: null };
   }
   const manifest = manifestOf(dir);
   const port = manifest?.port ?? entry.port;
@@ -285,19 +302,21 @@ export async function view(entry: RegistryEntry): Promise<AppView> {
     name: manifest?.name ?? entry.name,
     ...(port !== undefined ? { port } : {}),
   };
+  const dev = await devView(dir, fresh.id);
   if (port === undefined || !(await portInUse(port))) {
-    return { ...fresh, status: "stopped", url: null, pid: null };
+    return { ...fresh, status: "stopped", url: null, pid: null, dev };
   }
   // Something holds the port — is it this app, or a stranger?
   const servingId = await identify(port);
   if (servingId === null || servingId !== fresh.id) {
-    return { ...fresh, status: "unreachable", url: null, pid: null };
+    return { ...fresh, status: "unreachable", url: null, pid: null, dev };
   }
   return {
     ...fresh,
     status: "running",
     url: `http://127.0.0.1:${port}`,
     pid: serveRecord(dir)?.pid ?? null,
+    dev,
   };
 }
 

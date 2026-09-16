@@ -19,4 +19,4 @@ Runnable suites: language-agnostic YAML cases plus thin per-language harnesses. 
 | **Host** | launches via pipeline block only; adapter-sync every launch; host obligations; never edits agent- or system-owned files |
 | **Agent** | none — deliberately. Any agent that reads files, runs a CLI, and speaks HTTP participates |
 
-The suite is also how the TypeScript implementation proves parity, and how the safe-evolve lifecycle semantics (fresh-DB replay, pre-promote backup, restore rollback) are verified.
+The suite is also how the TypeScript implementation proves parity, and how the safe-evolve lifecycle semantics are verified: the harness's **Safe-evolve** class drives the real `agent-app`/`a2app` CLIs over a scaffolded runnable blueprint — dev instance on a hidden port with a fresh replayed DB, live data untouched, operate traffic routed to the candidate, the validate→promote gate pass (including refusal after a post-validate edit), mandatory pre-promote backup, dev destruction on promote, and restore's capture-first contract (framework spec 7.2).

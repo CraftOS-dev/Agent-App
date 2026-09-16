@@ -12,6 +12,7 @@
  }
  ],
  "lifecycle": {
- "dataDir": "pb/pb_data"
+ "dataDir": "pb/pb_data",
+ "promote": "node pb-serve.mjs --migrate"
  }
 }

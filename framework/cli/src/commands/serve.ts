@@ -28,25 +28,13 @@ import { hasFlag } from "../lib/args.js";
 import { openUrl } from "./open.js";
 import { loadProject } from "../lib/project.js";
 import { portInUse, register } from "../lib/registry.js";
+import { readDevRecord } from "../lib/instance.js";
+import { dataDir } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
-import { fetchWithTimeout, identifyApp } from "../lib/net.js";
+import { identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
-
-async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetchWithTimeout(url, 2000);
-      if (res.ok) return true;
-    } catch {
-      /* not up yet, or this probe timed out — keep polling until the deadline */
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  return false;
-}
 
 function readServe(file: string): { pid: number } | null {
   try {
@@ -159,9 +147,19 @@ export async function run(args: string[], app: string): Promise<number> {
     }
 
     const outFd = openSync(join(project.dir, ".a2app", "serve.log"), "a");
+    // The launch contract, uniform across environments: PORT, A2APP_DATA_DIR
+    // (the toolkit's declared live data directory) and A2APP_ENV. `dev` sets
+    // the same three with a hidden port and a fresh directory — one code path
+    // in every launcher, never a dev special case.
+    const liveDataDir = dataDir(project.dir);
     const child = spawn(pipeline.start, {
       cwd: project.dir,
-      env: { ...process.env, PORT: String(port) },
+      env: {
+        ...process.env,
+        PORT: String(port),
+        A2APP_ENV: "live",
+        ...(liveDataDir !== null ? { A2APP_DATA_DIR: liveDataDir } : {}),
+      },
       detached: true,
       stdio: ["ignore", outFd, outFd],
       shell: true,
@@ -211,6 +209,17 @@ export async function run(args: string[], app: string): Promise<number> {
     // watcher tells them; say so here so the loop is visible from the terminal
     // too, and so `--open` is not mistaken for "everyone now has the new build".
     if (!wantOpen) log.info(`show it to someone: agent-app ${app} open`);
+    // A dev instance alongside a fresh live serve means an evolve is open, and
+    // the caller is at a fork with exactly two exits. Name them — a warning
+    // that states the fact without the decision is how this state gets missed.
+    const dev = readDevRecord(project.dir);
+    if (dev !== null) {
+      log.warn(
+        `a dev instance is still up (port ${dev.port}) and operate commands target IT, not this live app.\n` +
+          `  Done with the change?   agent-app ${app} promote   (stop live first; destroys the dev instance)\n` +
+          `  Abandoning the change?  agent-app ${app} stop --dev`,
+      );
+    }
     log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");
     const shown = await show();
     log.raw(

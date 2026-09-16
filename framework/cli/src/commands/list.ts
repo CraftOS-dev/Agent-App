@@ -37,10 +37,23 @@ export async function run(args: string[]): Promise<number> {
   for (const app of apps) {
     const port = app.port !== undefined ? String(app.port) : "—";
     const where = app.status === "running" && app.url !== null ? app.url : app.path;
-    log.raw(`${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}`);
+    // A dev instance is part of the app's state, so it shows on the app's own
+    // row — an abandoned candidate that only lived in `.a2app/dev.json` was
+    // invisible here, which is exactly how it stayed abandoned.
+    const dev = app.dev === null ? "" : app.dev.answering ? `  dev:${app.dev.port}` : "  dev:stale";
+    log.raw(`${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}${dev}`);
   }
   if (apps.some((a) => a.status === "unreachable")) {
     log.warn("▲ unreachable: another process holds that app's port — stop it, or give the app a different port.");
+  }
+  if (apps.some((a) => a.dev !== null && a.dev.answering)) {
+    log.info(
+      "dev:<port> — a candidate is up and operate commands target IT, not live. " +
+        "Finish it: `agent-app <app> promote` · abandon it: `agent-app <app> stop --dev`.",
+    );
+  }
+  if (apps.some((a) => a.dev !== null && !a.dev.answering)) {
+    log.info("dev:stale — a recorded dev instance is no longer answering; `agent-app <app> stop --dev` clears it.");
   }
   return 0;
 }

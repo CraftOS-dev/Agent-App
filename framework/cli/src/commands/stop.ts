@@ -9,6 +9,9 @@
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { hasFlag } from "../lib/args.js";
+import { readDevRecord, stopDevInstance, sweepDevBootDirs } from "../lib/instance.js";
+import { lifecycleLock } from "../lib/lifecycle.js";
 import { loadProject } from "../lib/project.js";
 import { register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
@@ -16,8 +19,48 @@ import { identifyApp } from "../lib/net.js";
 import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
 import { log } from "../lib/log.js";
 
-export async function run(_args: string[], app: string): Promise<number> {
+/**
+ * `stop --dev`: tear down the DEV instance (abandoning the candidate) and
+ * sweep its state. Serialized on the lifecycle lock — the same lock `dev` and
+ * `promote` hold — because both also act on the dev record. The live app is
+ * untouched; operate commands target it again once the record is gone.
+ */
+async function runStopDev(app: string, project: ReturnType<typeof loadProject>): Promise<number> {
+  return withLock(lifecycleLock(project.dir), async () => {
+    const rec = readDevRecord(project.dir);
+    if (rec === null) {
+      log.info("no dev instance recorded (.a2app/dev.json)");
+      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      return 0;
+    }
+    const outcome = await stopDevInstance(project.dir, project.manifest.id);
+    if (outcome === "failed") {
+      log.error(`could not stop the dev instance (pid ${rec.pid}) — it is still running. Record kept for a retry.`);
+      log.raw(JSON.stringify({ ok: false, stopped: null, pid: rec.pid }, null, 2));
+      return 1;
+    }
+    sweepDevBootDirs(project.dir, null);
+    if (outcome === "stopped") log.ok(`dev instance stopped (pid ${rec.pid}) — candidate abandoned, state swept`);
+    else log.info("dev record was stale (nothing answering as this app) — cleared and swept");
+    log.info("operate commands target the live app again");
+    log.raw(JSON.stringify({ ok: true, stopped: outcome === "stopped" ? rec.pid : null }, null, 2));
+    return 0;
+  });
+}
+
+export async function run(args: string[], app: string): Promise<number> {
   const project = loadProject(app);
+  if (hasFlag(args, "dev")) return runStopDev(app, project);
+  // A dev instance is deliberately NOT stopped by a bare `stop` (the modify
+  // flow stops live for promote while the candidate stays up) — but it must
+  // never be invisible either, and the caller is at a fork with two exits.
+  if (readDevRecord(project.dir) !== null) {
+    log.info(
+      `a dev instance is also recorded and keeps running.\n` +
+        `  Promoting the change?   agent-app ${app} promote   (destroys the dev instance itself)\n` +
+        `  Abandoning the change?  agent-app ${app} stop --dev`,
+    );
+  }
   const serveLock = join(project.dir, ".a2app", "serve.lock");
 
   return withLock(serveLock, async () => {

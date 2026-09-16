@@ -198,14 +198,21 @@ health at `/api/health`… this blueprint serves identity at `/api/_a2app`). Nev
 start a server by hand.
 
 ```bash
-agent-app <dir> validate   # framework files → build → schema loads → operations resolve → ownership canon → describe budget
-agent-app <dir> dev        # scripts/dev-prepare.mjs: fresh seeded store in an isolated dir; starts NO server
-agent-app <dir> serve      # launch as a managed, health-polled background process; prints the URL
-agent-app <dir> promote    # scripts/promote-apply.mjs: pre-promote backup, then apply to live
+agent-app <dir> dev        # boot the candidate on a hidden port: fresh seeded store, prints the dev URL
+agent-app <dir> validate   # framework files → build → schema loads → operations resolve → ownership canon → describe budget (on dev)
+agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
+agent-app <dir> promote    # requires the gate pass; backup, scripts/promote-apply.mjs, destroys the dev instance
 ```
 
 Toolkit gate steps (from `a2app.toolkit.json`): **"schema loads (fresh,
 additive)"** and **"operations resolve"**. `lifecycle.dataDir` is `data/`.
+
+**Environments (one tree, redirected inputs).** `server.mjs` reads `PORT`,
+`A2APP_DATA_DIR` and `A2APP_ENV` from the framework. The dev instance runs
+against a disposable per-boot store and serves `public/` directly — a View
+edit shows on refresh; a `server.mjs`/schema edit needs `dev` again. The LIVE
+instance serves a boot-time snapshot of `public/` (`.a2app/public`), so edits
+never reach users until promote + serve.
 
 ## Footguns for this stack
 

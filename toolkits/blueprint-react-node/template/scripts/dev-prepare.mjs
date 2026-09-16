@@ -1,24 +1,29 @@
 /**
- * lifecycle.dev — build a FRESH dev database by replaying the schema seed into an
- * isolated dev data directory (`.a2app/dev/data`), and prove the current
- * (possibly just-edited) `server.mjs` + `a2app.schema.mjs` load cleanly.
+ * lifecycle.dev — build a FRESH dev database by replaying the schema seed into
+ * the isolated dev data directory the framework provides (`A2APP_DATA_DIR`, a
+ * per-boot dir under `.a2app/dev/`), and prove the current (possibly
+ * just-edited) `server.mjs` + `a2app.schema.mjs` load cleanly. `agent-app dev`
+ * runs this, then boots `server.mjs` against the same directory on a hidden
+ * port.
  *
  * This is the JSON-store analogue of "replay the full migration chain on a fresh
  * database": the schema IS the migration (schema-in-code), so a clean re-seed
  * from empty is exactly what proves an evolve is safe to promote. It NEVER reads
  * or writes the live `data/` directory — the framework `agent-app dev` command
- * fingerprints live before and after and aborts if this script touches it.
+ * fingerprints live around this script and aborts if it touched it.
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { schema } from "../a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // scripts/
 const ROOT = join(HERE, "..");
-const DEV_DATA = join(ROOT, ".a2app", "dev", "data");
+const DEV_DATA = process.env.A2APP_DATA_DIR
+  ? resolve(process.env.A2APP_DATA_DIR)
+  : join(ROOT, ".a2app", "dev", "data");
 
 /** Mirror of server.mjs materialize(): assign id, fill server-managed `created`,
  *  drop blanks. Kept self-contained so this script has no runtime dependency. */
@@ -53,7 +58,7 @@ writeFileSync(join(DEV_DATA, "db.json"), JSON.stringify(db, null, 2) + "\n");
 execFileSync(process.execPath, ["--check", join(ROOT, "server.mjs")], { stdio: "ignore" });
 
 process.stdout.write(
-  `dev database prepared at .a2app/dev/data — ${Object.keys(schema.entities).length} entit${
+  `dev database prepared at ${DEV_DATA} — ${Object.keys(schema.entities).length} entit${
     Object.keys(schema.entities).length === 1 ? "y" : "ies"
   } re-seeded from a fresh, empty store\n`,
 );

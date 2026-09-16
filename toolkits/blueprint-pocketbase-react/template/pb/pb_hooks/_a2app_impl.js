@@ -37,16 +37,30 @@ function identity(e) {
   // (PocketBase collections cannot carry one), and it is part of the fingerprint:
   // moving an entity between modules changes what describe publishes, so a client
   // caching against schemaVersion has to be told.
-  const entityModule = {};
+  // The app's identity comes from manifest.json — NEVER from PocketBase's
+  // settings.meta.appName. A fresh database answers "Acme" (PocketBase's
+  // default) there, so an id derived from it breaks every identity check the
+  // framework relies on (stop's pid-reuse guard, serve idempotency, dev-route
+  // verification) on exactly the boots where the check matters most. `app.id`
+  // must be stable across ports, URLs and database rebuilds; the manifest is
+  // the one place that holds it.
+  let manifest;
   try {
-    const mods = JSON.parse(toString($os.readFile(`${__hooks}/../../manifest.json`))).modules || [];
-    for (let i = 0; i < mods.length; i++) {
-      const owned = mods[i].entities || [];
-      for (let j = 0; j < owned.length; j++) entityModule[owned[j]] = mods[i].name;
-    }
+    manifest = JSON.parse(toString($os.readFile(`${__hooks}/../../manifest.json`)));
   } catch (_e) {
-    // A manifest that cannot be read is a broken app part; the describe routes
-    // report it. Identity still answers so a client can probe and see the app.
+    manifest = null;
+  }
+  if (manifest === null || typeof manifest.id !== "string" || manifest.id === "") {
+    // Answering with an invented id would defeat the "verify the id before
+    // writing" contract more subtly than an error does.
+    return e.json(500, { error: "manifest.json is unreadable or has no id — the app part is broken" });
+  }
+
+  const entityModule = {};
+  const mods = manifest.modules || [];
+  for (let i = 0; i < mods.length; i++) {
+    const owned = mods[i].entities || [];
+    for (let j = 0; j < owned.length; j++) entityModule[owned[j]] = mods[i].name;
   }
 
   const entities = {};
@@ -61,7 +75,7 @@ function identity(e) {
     a2app: true,
     protocol: "0.1",
     adapterVersion: "0.1.0",
-    app: { id: $app.settings().meta.appName || "pocketbase_app", name: $app.settings().meta.appName || null },
+    app: { id: manifest.id, name: manifest.name || null },
     schemaVersion: rules.schemaVersion(entities),
     serverNow: new Date().toISOString(),
     serverTzOffsetMinutes: 0,

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { startReferenceApp } from "./reference-app.js";
 import { parseSuite, runSuite, type RunContext, type SuiteResult } from "./runner.js";
 import { runToolkitClass } from "./toolkits.js";
+import { runSafeEvolveClass } from "./lifecycle.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SUITES_DIR = resolve(HERE, "..", "..", "suites");
@@ -108,6 +109,10 @@ async function main(): Promise<number> {
 
   // Artifact class: Toolkit — blueprints scaffold to conforming apps.
   results.push(await runToolkitClass(frameworkEntry));
+
+  // Artifact class: Safe-evolve — the framework 7.2 lifecycle over the runnable
+  // blueprint (dev instance, routed operate traffic, gate pass, backup, restore).
+  results.push(await runSafeEvolveClass(frameworkEntry, cliEntry));
 
   const code = report(results);
   await ref.close();

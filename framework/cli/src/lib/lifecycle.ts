@@ -1,9 +1,10 @@
 /**
  * Safe-evolve helpers. The framework CLI orchestrates the safety invariants —
  * backup before every code-change promotion, capture before restore, rollback on
- * failure, and NEVER mutate a data directory that a running app has open — and
- * delegates the stack-specific action (make a dev copy, apply migrations to
- * live) to toolkit-declared commands.
+ * failure, the validate→promote gate pass, and NEVER mutate a data directory
+ * that a running app has open — and delegates the stack-specific action
+ * (prepare a fresh dev database, apply migrations to live) to toolkit-declared
+ * commands.
  *
  * Every data mutation here is atomic (fsx.copyDirAtomic / replaceDirAtomic):
  * staged to a sibling, file-count verified, then renamed into place, with the
@@ -11,8 +12,9 @@
  * Windows file lock mid-operation therefore never leaves the user with a torn
  * or missing data directory.
  */
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import { copyDirAtomic, replaceDirAtomic } from "./fsx.js";
 import { identifyApp } from "./net.js";
 import { EnvError, type Project } from "./project.js";
@@ -126,6 +128,99 @@ export function dataFingerprint(projectDir: string): string | null {
     }
   }
   return `${files}:${bytes}:${newest}`;
+}
+
+/* ───────────────────────────── gate pass ─────────────────────────────────
+ *
+ * The ordering gate between `validate` and `promote`, decided structurally —
+ * the same principle as first-install-vs-update. `validate` records, on
+ * success, a fingerprint of the code surface it just gated (plus whether the
+ * describe-budget walk actually ran, which requires a live instance — during
+ * an evolve, the dev server). `promote` refuses without a pass whose
+ * fingerprint matches the tree as it stands NOW, and consumes the pass on
+ * success so one validation can never be replayed across edits.
+ *
+ * This is deliberately NOT a walk-verify enforcement: the verifier is an
+ * agent with the same local privileges as the builder, so a verdict file the
+ * CLI checked would be forgeable theater. Verify discipline belongs to the
+ * skills and the host; what the CLI can honestly enforce is "the code being
+ * promoted is exactly the code that passed the gate".
+ */
+
+const GATE_PASS_FILE = join(".a2app", "gate-pass.json");
+
+export interface GatePass {
+  fingerprint: string;
+  /** True when the describe-budget walk ran against a live instance — during
+   *  an evolve, the dev server (routing sends validate there while one is up). */
+  budgetChecked: boolean;
+  at: string;
+}
+
+/** Directory/file names that are runtime state, never gated code. */
+const FINGERPRINT_SKIP_DIRS = new Set([".a2app", ".git", ".lui", "node_modules"]);
+const FINGERPRINT_SKIP_FILES = new Set([".agent-token", ".principal", ".superuser", ".DS_Store", "Thumbs.db"]);
+
+/**
+ * A content fingerprint of the app's code surface: every file except framework
+ * runtime state (`.a2app/`), VCS internals, dependency trees, credentials, and
+ * the toolkit's declared live data directory. Deterministic across platforms
+ * (paths normalized to `/`, sorted, content-hashed — never mtimes).
+ */
+export function codeFingerprint(projectDir: string): string {
+  const root = resolve(projectDir);
+  const dataRoot = (() => {
+    const d = dataDir(projectDir);
+    return d === null ? null : resolve(d);
+  })();
+  const files: string[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const cur = stack.pop() as string;
+    for (const name of readdirSync(cur)) {
+      const full = join(cur, name);
+      const st = statSync(full);
+      if (st.isDirectory()) {
+        if (FINGERPRINT_SKIP_DIRS.has(name)) continue;
+        if (dataRoot !== null && resolve(full) === dataRoot) continue;
+        stack.push(full);
+      } else if (!FINGERPRINT_SKIP_FILES.has(name)) {
+        files.push(full);
+      }
+    }
+  }
+  const hash = createHash("sha256");
+  for (const file of files.map((f) => ({ f, rel: relative(root, f).split(sep).join("/") })).sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
+    hash.update(file.rel);
+    hash.update("\0");
+    hash.update(readFileSync(file.f));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+/** Record a gate pass for the tree as it stands now (called by `validate` on success). */
+export function writeGatePass(projectDir: string, budgetChecked: boolean): void {
+  const file = join(projectDir, GATE_PASS_FILE);
+  mkdirSync(join(projectDir, ".a2app"), { recursive: true });
+  const pass: GatePass = { fingerprint: codeFingerprint(projectDir), budgetChecked, at: new Date().toISOString() };
+  writeFileSync(file, JSON.stringify(pass, null, 2) + "\n");
+}
+
+export function readGatePass(projectDir: string): GatePass | null {
+  const file = join(projectDir, GATE_PASS_FILE);
+  if (!existsSync(file)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<GatePass>;
+    if (typeof raw.fingerprint !== "string") return null;
+    return { fingerprint: raw.fingerprint, budgetChecked: raw.budgetChecked === true, at: raw.at ?? "" };
+  } catch {
+    return null;
+  }
+}
+
+export function clearGatePass(projectDir: string): void {
+  rmSync(join(projectDir, GATE_PASS_FILE), { force: true });
 }
 
 /**

@@ -24,7 +24,8 @@ import {
   suggest,
 } from "@a2app/sdk";
 import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js";
-import { clientFor, loadProject, UsageError } from "../lib/project.js";
+import { UsageError } from "../lib/project.js";
+import { connect, labelFor } from "../lib/target.js";
 import { log } from "../lib/log.js";
 
 export async function run(args: string[], app: string): Promise<number> {
@@ -34,8 +35,7 @@ export async function run(args: string[], app: string): Promise<number> {
       "Usage: a2app <app> data schema | <entity> [schema|list|get <id>|create|update <id>|delete <id>] [--field value ...]",
     );
   }
-  const project = loadProject(app);
-  const client = await clientFor(project);
+  const { client, target } = await connect(app);
 
   // `data schema` is entity NAMES, grouped by module — never the whole model.
   // Field detail is one level in, which is what keeps this bounded at any app
@@ -46,7 +46,7 @@ export async function run(args: string[], app: string): Promise<number> {
       log.error("No readable entities — is the app running, and does your credential hold any data scope?");
       return 1;
     }
-    log.raw(`${project.manifest.name} — entities by module:\n${renderEntityIndex(index)}`);
+    log.raw(`${labelFor(target)} — entities by module:\n${renderEntityIndex(index)}`);
     log.raw(`\n  → a2app ${app} data <entity> schema     (that entity's fields)`);
     return 0;
   }

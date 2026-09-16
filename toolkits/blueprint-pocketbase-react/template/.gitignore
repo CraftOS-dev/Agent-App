@@ -10,10 +10,14 @@ pb/pb_data/
 pb/pocketbase
 pb/pocketbase.exe
 
-# Framework runtime state: serve records, logs, dev copies, and backups.
+# Framework runtime state: serve records, logs, the dev instance, the live
+# View snapshot, the gate pass, and backups.
 .a2app/serve.json
 .a2app/serve.log
+.a2app/dev.json
 .a2app/dev/
+.a2app/public/
+.a2app/gate-pass.json
 .a2app/backups/
 
 node_modules/

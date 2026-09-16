@@ -55,10 +55,10 @@ const COMMANDS: Record<string, CommandMeta> = {
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
   serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", surface: "agent-app", scope: "app" },
-  stop: { summary: "Stop an app launched with `agent-app <app> serve`", surface: "agent-app", scope: "app" },
+  stop: { summary: "Stop an app launched with `agent-app <app> serve` (--dev stops the dev instance instead)", surface: "agent-app", scope: "app", args: "[--dev]" },
   open: { summary: "Open a running app in a browser (--if-needed opens only when no tab is already on it)", surface: "agent-app", scope: "app", args: "[--if-needed] [--print-only]" },
-  dev: { summary: "Prepare a fresh, migration-replayed dev database (no server is started)", surface: "agent-app", scope: "app" },
-  promote: { summary: "Pre-promote backup, then apply the dev copy's migrations to live", surface: "agent-app", scope: "app" },
+  dev: { summary: "Boot the candidate on a hidden port with a fresh, migration-replayed database; operate commands target it until promote", surface: "agent-app", scope: "app" },
+  promote: { summary: "Require a fresh gate pass, take the pre-promote backup, apply the new migrations to live, destroy the dev instance", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },
   restore: { summary: "Restore a backup (captures current state, rolls back on failure)", surface: "agent-app", scope: "app", args: "[<backup-id>]" },
   forget: { summary: "Drop an app from the registry, releasing its port (never touches files)", surface: "agent-app", scope: "app", args: "[--force]" },
@@ -121,6 +121,12 @@ function usage(surface: Surface): void {
     log.raw(`  ${target} … <operation> [--…]    invoke, at the path that identifies it`);
     log.raw(`  ${target} --find <term>          search names, get locations\n`);
     log.raw(`  Every screen ends by naming the legal next moves.\n`);
+    // A URL is the whole of connect from the caller's side: the same walk,
+    // against an app that is not on this machine. Saying so here is what makes
+    // it discoverable without a separate verb to learn.
+    log.raw(`  ${target} is a directory, a registered id/name, or an http(s) URL.`);
+    log.raw(`  A URL operates a REMOTE app: its identity is verified and pinned, and the`);
+    log.raw(`  credential comes from A2APP_TOKEN or the credential store — never from the app.\n`);
     log.raw(`  Reserved (never module names):`);
   } else {
     log.raw(`  Usage: ${surface} ${target} <verb> [args] [--flags]   (the app comes first)\n`);

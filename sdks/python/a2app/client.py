@@ -88,8 +88,20 @@ class A2AppClient:
     # ----------------------------------------------------------- discovery
 
     def identity(self) -> Optional[Dict[str, Any]]:
+        """Probe an app's identity, or None when no identity document was served.
+
+        The success check is `res.ok` AND the marker, not the marker alone. Every
+        adapter error envelope also carries `a2app: true` -- it is how a client
+        knows a refusal came from the app rather than from something in front of
+        it -- so a marker-only test accepts a 403 forbidden_host or a 401 as an
+        identity document. What comes back then has no `protocol` and no
+        `app.id`, and the caller reports whichever of those it touches first
+        instead of the refusal that actually occurred.
+        """
         for path in ("/.well-known/a2app.json", "/api/_a2app"):
             res = self.request("GET", path)
+            if not res.ok:
+                continue
             if isinstance(res.json, dict) and res.json.get("a2app") is True:
                 return res.json
         return None

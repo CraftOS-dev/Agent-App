@@ -4,8 +4,9 @@
  * Toolkits are NOT part of the framework; nothing here may be required for
  * compliance. But when an app WAS scaffolded from a toolkit, the framework CLI
  * needs a stack-agnostic way to know which files the toolkit owns (to vendor and
- * canonize), which extra gate steps it defines, and how it makes a dev copy /
- * backup. That contract is a single JSON file at the toolkit root:
+ * canonize), which extra gate steps it defines, and how it prepares a fresh dev
+ * database / applies a promotion. That contract is a single JSON file at the
+ * toolkit root:
  *
  *   a2app.toolkit.json
  *   {

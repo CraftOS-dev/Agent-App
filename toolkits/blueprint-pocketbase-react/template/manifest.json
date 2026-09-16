@@ -19,7 +19,7 @@
     "integrations": []
   },
   "pipeline": {
-    "install": "node -e \"process.stdout.write('download the pocketbase binary into ./pb, then re-run\\n')\"",
+    "install": "node -e \"process.stdout.write('Download PocketBase v0.26.6 for your OS from https://github.com/pocketbase/pocketbase/releases/tag/v0.26.6 and place the binary at pb/pocketbase (pb/pocketbase.exe on Windows). The adapter targets the 0.26 JSVM API — only 0.26.x is supported.\\n')\"",
     "build": "node --check pb/pb_hooks/_a2app.pb.js",
     "start": "node pb-serve.mjs",
     "health": "/api/_a2app"

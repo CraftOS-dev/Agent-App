@@ -169,11 +169,16 @@ server by hand. (The start command reads `PORT` from the environment rather than
 interpolating `${PORT}` in the shell, so it is portable to cmd.exe on Windows.)
 
 ```bash
-agent-app <dir> validate   # framework files → build → python syntax + adapter self-test → operations resolve → ownership canon → describe budget
-agent-app <dir> dev        # fresh seeded store in an isolated dir; starts NO server
-agent-app <dir> serve      # launch as a managed, health-polled background process; prints the URL
-agent-app <dir> promote    # pre-promote backup, then apply to live
+agent-app <dir> dev        # boot the candidate on a hidden port; the store is in-memory, so every boot is a fresh seed
+agent-app <dir> validate   # framework files → build → python syntax + adapter self-test → operations resolve → ownership canon → describe budget (on dev)
+agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
 ```
+
+**Stack limitation — no persistence, no promote.** This blueprint's `Store` is
+in-memory: records vanish at process exit, `lifecycle.dataDir` is never
+written, and the toolkit declares no `lifecycle.promote` — so `promote`,
+`backup` and `restore` refuse on this stack. Record it in the spec as a known
+limitation; an app that needs durable data belongs on a persistent blueprint.
 
 Toolkit gate steps (from `a2app.toolkit.json`): **"python syntax + adapter
 self-test"** (`python -m py_compile … && python a2app_adapter.py --selftest`) and

@@ -9,24 +9,30 @@
  * derived from the live schema, an agent always sees the true model.
  */
 import { createA2App, createA2AppServer, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { schema } from "./a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// Records live inside the toolkit's declared `lifecycle.dataDir` ("data"), so
-// `agent-app backup` / `restore` / `promote` capture the live database, and the
-// template .gitignore keeps it out of the repo.
-const DATA_DIR = join(HERE, "data");
+// The launch contract (`serve` and `dev` both set these; defaults cover a
+// direct `node server.mjs`):
+//   A2APP_DATA_DIR  where records live. `serve` passes the toolkit's declared
+//                   lifecycle dataDir ("data" — what backup/restore/promote
+//                   protect); `dev` passes a fresh per-boot directory, which is
+//                   how a dev instance runs against a disposable database.
+//   A2APP_ENV       "live" or "dev" — decides how the static View is served.
+const ENV = process.env.A2APP_ENV ?? "live";
+const DATA_DIR = process.env.A2APP_DATA_DIR ? resolve(process.env.A2APP_DATA_DIR) : join(HERE, "data");
 const DATA_FILE = join(DATA_DIR, "db.json");
 const TOKEN_FILE = join(HERE, ".agent-token");
 const PUBLIC_DIR = join(HERE, "public");
 
 const manifest = JSON.parse(readFileSync(join(HERE, "manifest.json"), "utf8"));
 // The CLI reaches a running app at manifest.port; bind the same port so the two
-// always agree. PORT env overrides (a host may assign one), then manifest.port.
+// always agree. PORT env overrides (`serve` passes manifest.port; `dev` a
+// hidden port), then manifest.port.
 const PORT = Number(process.env.PORT ?? manifest.port ?? 8091);
 
 /* ----------------------------------------------------------- persistence */
@@ -202,6 +208,13 @@ if (existsSync(TOKEN_FILE)) {
 /**
  * The View, served from disk with real cache validators.
  *
+ * "Live loads code at boot": in the live environment the View is served from a
+ * SNAPSHOT of `public/` taken at this boot (`.a2app/public`), matching how the
+ * rest of the code is fixed at process start. Without it, an agent's
+ * mid-iteration edit to `public/` would reach live users on their next refresh
+ * — before any gate or verify has seen it. The dev instance serves the tree
+ * directly: edit → refresh is the point of dev.
+ *
  * `createStaticView` is the framework's static handler, not a per-app one: it
  * answers every asset with `ETag`, `Last-Modified` and `Cache-Control: no-cache`
  * and honours conditional requests, so a plain reload always re-checks and an
@@ -215,7 +228,28 @@ if (existsSync(TOKEN_FILE)) {
  * folded in as well: an operation's description is not in `schemaVersion` either,
  * yet it changes what the app tells an agent.
  */
-const view = createStaticView(PUBLIC_DIR, {
+/** Recursive copy without fs.cpSync — cpSync silently crashes on Windows when
+ *  the source path contains non-ASCII characters (exit 0xC0000409; the
+ *  framework's fsx.ts documents the same finding). */
+function copyDir(src, dest) {
+  mkdirSync(dest, { recursive: true });
+  for (const name of readdirSync(src)) {
+    const from = join(src, name);
+    const to = join(dest, name);
+    if (statSync(from).isDirectory()) copyDir(from, to);
+    else copyFileSync(from, to);
+  }
+}
+
+let servedPublicDir = PUBLIC_DIR;
+if (ENV === "live" && existsSync(PUBLIC_DIR)) {
+  const snapshot = join(HERE, ".a2app", "public");
+  rmSync(snapshot, { recursive: true, force: true });
+  copyDir(PUBLIC_DIR, snapshot);
+  servedPublicDir = snapshot;
+}
+
+const view = createStaticView(servedPublicDir, {
   // The update watcher lives at the project root, not inside `public/`: it is
   // system-owned, and `public/` is the agent's to rewrite entirely.
   aliases: { "/_a2app/update.js": join(HERE, "a2app-update.js") },

@@ -156,8 +156,11 @@ export async function runBudgetGate(project: Project): Promise<BudgetGateResult>
   let client;
   try {
     client = await clientFor(project);
-  } catch {
-    return unchecked("could not build a client for the app");
+  } catch (err) {
+    // Surface the real reason — a stale dev route, for example, arrives here as
+    // an EnvError whose message names the remedy, and hiding it behind a
+    // generic line would send the agent hunting.
+    return unchecked(err instanceof Error ? err.message : "could not build a client for the app");
   }
 
   let report;

@@ -58,6 +58,47 @@ export async function countViewers(
   }
 }
 
+/** Poll a health URL until it answers 2xx or the deadline passes. Shared by
+ *  `serve` and `dev`, which launch the same pipeline against different ports. */
+export async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetchWithTimeout(url, 2000);
+      if (res.ok) return true;
+    } catch {
+      /* not up yet, or this probe timed out — keep polling until the deadline */
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+/**
+ * A free loopback port, assigned by the OS (bind port 0, read the number,
+ * release). Used for the dev instance's hidden port: nothing needs to predict
+ * it — every consumer reads it from the dev record — so the ephemeral range is
+ * exactly right, and it can never collide with the registered app range. The
+ * tiny window between release and the app's own bind is closed by the health
+ * check + identity probe that follow the launch: a stolen port fails loudly.
+ */
+export async function freeEphemeralPort(): Promise<number> {
+  const { createServer } = await import("node:net");
+  return new Promise((resolvePort, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address();
+      if (address === null || typeof address === "string") {
+        srv.close(() => reject(new Error("could not allocate a port")));
+        return;
+      }
+      const port = address.port;
+      srv.close(() => resolvePort(port));
+    });
+  });
+}
+
 export async function identifyApp(port: number, timeoutMs = 1500): Promise<string | null> {
   try {
     const res = await fetchWithTimeout(`http://127.0.0.1:${port}/api/_a2app`, timeoutMs);

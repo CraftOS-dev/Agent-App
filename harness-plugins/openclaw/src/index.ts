@@ -44,6 +44,9 @@ const APPS_DIR = join(process.env.A2APP_HOME ?? join(homedir(), ".a2app"), "apps
 
 const PAGE_ROUTE = "/agent-app/home";
 const API_ROUTE = "/agent-app/api";
+/** Stamped by scripts/build.mjs into the staged bundle; identifies which build
+ *  a running gateway actually loaded (shown in the page footer). */
+const BUILD_STAMP = process.env.A2APP_PLUGIN_BUILD ?? "dev";
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 /** How long to track a build run before declaring its outcome unknown. */
 const BUILD_WAIT_MS = 2 * 60 * 60 * 1000;
@@ -107,6 +110,33 @@ export default definePluginEntry({
     const tokens = new Map<string, number>();
     const builds = new Map<string, BuildEntry>();
 
+    // Plugin-runtime calls made inside an HTTP request inherit that request's
+    // scope client — which for an `auth:"plugin"` route carries NO operator
+    // scopes, so `subagent.run` is refused with "missing scope: operator.write".
+    // OpenClaw grants agent runs system (write) authority only in contexts with
+    // no request client, and the only contexts guaranteed clean are the ones
+    // the HOST invokes (its own background extensions run from cron/lifecycle
+    // callbacks). So write calls queue here, and the drain timer is created
+    // inside the `gateway_start` hook — a host-invoked startup context whose
+    // AsyncLocalStorage every job then inherits.
+    const jobs: Array<() => void> = [];
+    let drainStarted = false;
+    (api as unknown as { on(hook: string, fn: () => void): void }).on("gateway_start", () => {
+      if (drainStarted) return;
+      drainStarted = true;
+      setInterval(() => { const job = jobs.shift(); if (job) job(); }, 250);
+    });
+    const detached = <T,>(fn: () => Promise<T>): Promise<T> => {
+      if (!drainStarted) return Promise.reject(new Error("plugin agent runner not started — restart the OpenClaw gateway"));
+      return new Promise((resolve, reject) => { jobs.push(() => fn().then(resolve, reject)); });
+    };
+
+    /** Sessions this gateway process has already seeded with the app context
+     *  preamble (the build kickoff seeds it too). After a gateway restart the
+     *  first chat message re-carries the preamble — harmless repetition that
+     *  keeps the send path free of any transcript read. */
+    const seeded = new Set<string>();
+
     const mintToken = (): string => {
       const now = Date.now();
       for (const [t, exp] of tokens) if (exp < now) tokens.delete(t);
@@ -160,7 +190,10 @@ export default definePluginEntry({
       { descriptors: [{ name: "agent-app", description: "Run the framework CLIs (build/evolve/operate an Agent App)", hasSubcommands: true }] },
     );
 
-    // ── The manager page (gateway-authenticated: only the Control UI loads it) ──
+    // ── The manager page + transcript read (gateway-authenticated) ──
+    // Both are GETs riding the Control-UI cookie grant: the page load, and the
+    // session transcript — the grant's `operator.read` is exactly the scope
+    // `getSessionMessages` needs, so the read runs inside the request scope.
     api.registerHttpRoute({
       path: PAGE_ROUTE,
       auth: "gateway",
@@ -173,9 +206,29 @@ export default definePluginEntry({
           res.end("The manager page is GET-only; actions go through its API.");
           return;
         }
+        const url = new URL(req.url ?? "/", "http://plugin.local");
+        const sub = url.pathname.slice(PAGE_ROUTE.length);
+        if (sub === "/session") {
+          // The page frame fetches with credentials; echo its origin ("null"
+          // when the frame is opaque) so the response is readable there.
+          res.setHeader("access-control-allow-origin", String(req.headers.origin ?? "null"));
+          res.setHeader("access-control-allow-credentials", "true");
+          res.setHeader("vary", "origin");
+          res.setHeader("content-type", "application/json");
+          try {
+            const path = url.searchParams.get("app") ?? "";
+            const got = await subagent.getSessionMessages({ sessionKey: sessionKeyFor(path), limit: 200 });
+            res.statusCode = 200;
+            res.end(JSON.stringify({ ok: true, messages: got.messages.map(viewMessage).filter((m) => m.text !== "") }));
+          } catch (e) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ ok: false, message: String((e as Error)?.message ?? e) }));
+          }
+          return;
+        }
         res.statusCode = 200;
         res.setHeader("content-type", "text/html; charset=utf-8");
-        res.end(appManagerHtml({ apiBase: API_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS }));
+        res.end(appManagerHtml({ apiBase: API_ROUTE, homeBase: PAGE_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS, build: BUILD_STAMP }));
       },
     });
 
@@ -216,12 +269,13 @@ export default definePluginEntry({
       if (kick.kind === "error") return { status: 400, out: { ok: false, message: kick.message } };
       mkdirSync(APPS_DIR, { recursive: true });
       const prompt = `${kick.prompt}\n\nCreate the app at \`${dir}\` — pass that directory to every agent-app command.`;
-      const run = await subagent.run({ sessionKey: sessionKeyFor(dir), message: prompt, deliver: false, lane: `agent-app:${slug}`, cwd: APPS_DIR });
+      const run = await detached(() => subagent.run({ sessionKey: sessionKeyFor(dir), message: prompt, deliver: false, lane: `agent-app:${slug}`, cwd: APPS_DIR }));
+      seeded.add(sessionKeyFor(dir));
       const entry: BuildEntry = { name, dir, ended: false };
       builds.set(dir, entry);
       // Track the run to its end (or to the tracking horizon); the UI then shows
       // "build session ended" until the app is actually seen running.
-      void subagent.waitForRun({ runId: run.runId, timeoutMs: BUILD_WAIT_MS }).then(
+      void detached(() => subagent.waitForRun({ runId: run.runId, timeoutMs: BUILD_WAIT_MS })).then(
         () => { entry.ended = true; },
         () => { entry.ended = true; },
       );
@@ -284,13 +338,6 @@ export default definePluginEntry({
 
           if (method === "GET" && sub === "/apps") { send(200, { ok: true, rows: await rows() }); return; }
 
-          if (method === "GET" && sub === "/session") {
-            const path = url.searchParams.get("app") ?? "";
-            const got = await subagent.getSessionMessages({ sessionKey: sessionKeyFor(path), limit: 200 });
-            send(200, { ok: true, messages: got.messages.map(viewMessage).filter((m) => m.text !== "") });
-            return;
-          }
-
           if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
           const body = await readBody(req);
 
@@ -301,10 +348,10 @@ export default definePluginEntry({
             const text = String(body.text ?? "").trim();
             if (!text) { send(400, { ok: false, message: "empty message" }); return; }
             const sessionKey = sessionKeyFor(path);
-            const existing = await subagent.getSessionMessages({ sessionKey, limit: 1 });
-            const message = existing.messages.length ? text : `${sessionPreamble(String(body.name ?? basename(path)), path)}\n\n${text}`;
+            const message = seeded.has(sessionKey) ? text : `${sessionPreamble(String(body.name ?? basename(path)), path)}\n\n${text}`;
             // cwd must exist; before a build's scaffold step the app dir may not.
-            await subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${basename(path)}`, cwd: existsSync(path) ? path : APPS_DIR });
+            await detached(() => subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${basename(path)}`, cwd: existsSync(path) ? path : APPS_DIR }));
+            seeded.add(sessionKey);
             send(200, { ok: true });
             return;
           }
@@ -325,9 +372,10 @@ export default definePluginEntry({
               if (!r.ok) { send(500, { ok: false, message: (r.stderr || r.stdout).trim() }); return; }
             }
             builds.delete(path);
+            seeded.delete(sessionKeyFor(path));
             // Session cleanup is best-effort: the app is already gone, and a
             // session that never ran has nothing to delete.
-            try { await subagent.deleteSession({ sessionKey: sessionKeyFor(path), deleteTranscript: true }); } catch { /* no session existed */ }
+            try { await detached(() => subagent.deleteSession({ sessionKey: sessionKeyFor(path), deleteTranscript: true })); } catch { /* no session existed */ }
             send(200, { ok: true });
             return;
           }

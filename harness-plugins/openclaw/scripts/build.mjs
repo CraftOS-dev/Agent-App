@@ -39,6 +39,7 @@ await build({
   format: "esm",
   target: "node20",
   external: ["openclaw/*"],
+  define: { "process.env.A2APP_PLUGIN_BUILD": JSON.stringify(new Date().toISOString()) },
 });
 
 const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));

@@ -21,8 +21,14 @@
  */
 export interface ManagerConfig {
   apiBase: string;
+  /** The gateway-authenticated page route; transcript reads go here, riding
+   *  the Control-UI cookie grant (a plain GET — no preflight, no token). */
+  homeBase: string;
   token: string;
   blueprints: readonly string[];
+  /** Build stamp of the plugin bundle serving this page (footer marker, so a
+   *  stale installed copy is immediately recognizable). */
+  build: string;
 }
 
 export function appManagerHtml(cfg: ManagerConfig): string {
@@ -119,6 +125,7 @@ textarea.input{min-height:120px;resize:vertical}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .form .btn.primary{width:100%;margin-top:20px;padding:11px 14px;font-weight:600}
 .err{margin-top:12px;font-size:13px;font-weight:600;color:var(--danger)}
+.buildstamp{margin:16px 0 0;font-size:11px;color:var(--muted);opacity:0.7}
 
 /* ── Session sidebar ───────────────────────────────────── */
 #side{width:380px;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}
@@ -349,6 +356,7 @@ function buildForm() {
   f.appendChild(go);
   const err = el("div", "err"); err.id = "f-err";
   f.appendChild(err);
+  f.appendChild(el("p", "buildstamp", "plugin build " + CFG.build));
   return f;
 }
 async function submitBuild(btn) {
@@ -375,7 +383,10 @@ function toggleSide(r, forceOpen) {
 document.getElementById("side-close").onclick = () => { S.side = false; S.sideRow = null; render(); };
 async function pollLog() {
   if (!S.side || !S.sideRow) return;
-  const out = await api("/session?app=" + encodeURIComponent(S.sideRow.path));
+  // Transcript reads ride the Control-UI cookie grant on the gateway route:
+  // a bare GET with credentials, nothing that would trigger a preflight.
+  const r = await fetch(CFG.homeBase + "/session?app=" + encodeURIComponent(S.sideRow.path), { credentials: "include" });
+  const out = await r.json();
   if (out.ok && S.side) { S.log = out.messages; renderLog(); }
 }
 function renderLog() {

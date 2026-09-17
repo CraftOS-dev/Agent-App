@@ -31,6 +31,7 @@ import {
   type Access,
   type DescribeDeps,
 } from "./describe.js";
+import { AGENT_TEXT, boundAppText } from "./agentText.js";
 import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
@@ -50,16 +51,6 @@ import {
 export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
 
-/**
- * The default answer to "how do I get a credential?", attached to every 401.
- *
- * Both challenges send the same text because they are the same question, and a
- * caller that met one and then the other should not have to learn the answer
- * twice. An app serving anyone but its owner sets `credentialHint` instead: this
- * default describes a file on the host, which is an answer only its owner can act
- * on.
- */
-const DEFAULT_CREDENTIAL_HINT = "Read the app's .agent-token file (mode 0600) in the project directory.";
 /** Page size for the referential scan a delete runs before it commits. */
 const REFERENCE_SCAN_PAGE = 500;
 /** How many blocking record ids are reported per field. The answer is "yes, and
@@ -492,7 +483,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       if (credentialRequired) {
         return {
           reply: err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "This write requires an agent credential.", {
-            how: config.credentialHint ?? DEFAULT_CREDENTIAL_HINT,
+            // App text is bounded before it is forwarded; the framework's own
+            // sentence is the fallback. Both live in agentText.ts — see the note
+            // there on why this channel is kept narrow.
+            how: boundAppText(config.credentialHint) ?? AGENT_TEXT.credentialHint,
           }),
         };
       }

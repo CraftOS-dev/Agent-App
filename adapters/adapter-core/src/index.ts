@@ -29,6 +29,10 @@ export type { StateStore, StoredTask, StoredEvent } from "./store.js";
 export { RateLimiter, DEFAULT_RATE_LIMITS } from "./rate.js";
 export type { RateLimits, RouteClass, RateDecision } from "./rate.js";
 export { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
+
+/** Text that reaches an agent's context, and the bound on the app-supplied
+ *  part of it. Exported so a host can see exactly what its callers are told. */
+export { AGENT_TEXT, APP_TEXT_MAX, boundAppText } from "./agentText.js";
 /** Navigational describe: the level builders, the model check the build gate
  *  reuses so it can never pass a model the adapter would refuse, and the size
  *  measurement the per-response budget is stated in. */

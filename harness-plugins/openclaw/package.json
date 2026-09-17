@@ -2,18 +2,17 @@
   "name": "@a2app/integration-openclaw",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework plugin for OpenClaw: agent tools + CLI passthrough + Control-UI tab, driving the agent-app and a2app CLIs",
+  "description": "Agent App Framework plugin for OpenClaw: agent-app CLI passthrough + Control-UI entry form + the six framework skills, driving the agent-app and a2app CLIs",
   "license": "MIT",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "engines": { "node": ">=20" },
-  "dependencies": {
-    "@a2app/integration-starter": "workspace:*"
+  "devDependencies": {
+    "@a2app/integration-starter": "workspace:*",
+    "esbuild": "^0.25.0"
   },
-  "//peer": "Provided by the OpenClaw plugin toolchain (not resolvable here): openclaw, typebox. See README.",
   "scripts": {
-    "build": "node -e \"process.stdout.write('openclaw plugin: compiled by the OpenClaw plugin toolchain (peer deps openclaw + typebox); ships as source here\\n')\"",
-    "typecheck": "node -e \"process.stdout.write('openclaw plugin: typechecked against the OpenClaw SDK in the plugin toolchain\\n')\"",
-    "test": "echo \"no tests\" && exit 0"
+    "build": "node scripts/build.mjs",
+    "test": "echo \"no tests yet\" && exit 0"
   }
 }

@@ -82,6 +82,7 @@ main{flex:1;display:flex;min-height:0}
 #frames{position:absolute;inset:0}
 #frames iframe{position:absolute;inset:0;width:100%;height:100%;border:none;background:#fff}
 .center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto}
+.center[hidden]{display:none}
 .card{width:100%;max-width:520px;border:1px solid var(--border);background:var(--elevated);border-radius:var(--radius-lg);padding:24px}
 .card h2{margin:0 0 4px;font-size:15px;font-weight:600;letter-spacing:-0.02em;color:var(--text-strong)}
 .card .sub{font-size:13px;color:var(--muted);margin:0 0 16px;line-height:1.5}
@@ -246,6 +247,9 @@ async function removeApp(r) {
 
 /* ── Views ─────────────────────────────────────────────── */
 const frames = new Map();
+// The panel rebuilds only when what it shows changes (this key), so the poll
+// loop never wipes in-progress form input or button state.
+let viewKey = "";
 function renderView() {
   const panel = document.getElementById("panel");
   const framesBox = document.getElementById("frames");
@@ -264,6 +268,13 @@ function renderView() {
     framesBox.appendChild(f);
   }
   panel.hidden = !!showFrame;
+  const key = showFrame
+    ? "frame:" + r.path
+    : S.active === "new" || !r
+      ? "new"
+      : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side && S.sideRow ? S.sideRow.path : ""].join("|");
+  if (key === viewKey) return;
+  viewKey = key;
   if (showFrame) return;
   panel.replaceChildren();
   if (S.active === "new" || !r) { panel.appendChild(buildForm()); return; }

@@ -683,6 +683,122 @@ await withApp([task("tsk_refused", "summarize", {})], async ({ port, state }) =>
   remove(dir);
 });
 
+/* ------------------- what a bridge that runs all night must not do */
+
+{
+  const { pumpOnce, createMemory } = await import(pathToFileURL(resolve(here, "..", "dist", "lib", "bridge.js")).href);
+
+  // A pass is driven directly here: these are properties of many passes over
+  // time, and spawning a CLI per pass would test the process, not the rule.
+  const said = [];
+  const capture = { info: [], warn: [], ok: [] };
+  const patched = await import("node:module");
+  void patched;
+
+  /** A client stub: the queue answers, and every call is recorded. */
+  const stubClient = (tasks, { pollOk = true } = {}) => ({
+    pollTasks: async () =>
+      pollOk
+        ? { ok: true, status: 200, body: "", json: { tasks } }
+        : { ok: false, status: 503, body: '{"code":"down"}', json: null },
+    claimTask: async (id) => {
+      said.push(`claim:${id}`);
+      const t = tasks.find((x) => x.id === id);
+      return { ok: true, status: 200, body: "", json: { ...t, status: "working" } };
+    },
+    progressTask: async () => ({ ok: true, status: 200, body: "", json: {} }),
+    getTask: async (id) => ({ ok: true, status: 200, body: "", json: tasks.find((x) => x.id === id) }),
+    completeTask: async (id) => {
+      said.push(`complete:${id}`);
+      return { ok: true, status: 200, body: "", json: {} };
+    },
+  });
+
+  const ctxFor = (client, over = {}) => ({
+    project: { dir: "/tmp/app", manifest: {}, baseUrl: "http://127.0.0.1:1" },
+    client,
+    profile: { id: "stub", routes: [] },
+    route: { mode: "inbound", url: "http://127.0.0.1:1/hook" },
+    prompt: { appRef: "/tmp/app", appName: "A", appId: "a", cwdIsApp: false, closesOnExit: false },
+    taskTimeoutMs: 1000,
+    capabilities: null,
+    dryRun: false,
+    ...over,
+  });
+
+  // --- a filtered task is announced once, not on every pass ---------------
+  {
+    const filtered = [task("tsk_skip", "export", {})];
+    const ctx = ctxFor(stubClient(filtered), { capabilities: ["summarize"] });
+    const memory = createMemory();
+    const before = capture.info.length;
+    const lines = [];
+    const realInfo = console.error;
+    console.error = (m) => lines.push(String(m));
+    for (let i = 0; i < 5; i++) await pumpOnce(ctx, () => false, memory);
+    console.error = realInfo;
+    void before;
+    const mentions = lines.filter((l) => l.includes("tsk_skip")).length;
+    check("a filtered task is reported once across five passes, not five times", mentions, 1);
+  }
+
+  // --- an app that is down is reported once, and its recovery is reported --
+  {
+    const ctx = ctxFor(stubClient([], { pollOk: false }));
+    const memory = createMemory();
+    const lines = [];
+    const realErr = console.error;
+    console.error = (m) => lines.push(String(m));
+    for (let i = 0; i < 4; i++) await pumpOnce(ctx, () => false, memory);
+    console.error = realErr;
+    const complaints = lines.filter((l) => l.includes("could not poll tasks")).length;
+    check("a down app is complained about once, not every poll", complaints, 1);
+
+    // …and coming back is news worth one line, so a reader knows the gap ended.
+    const upLines = [];
+    const realErr2 = console.error;
+    console.error = (m) => upLines.push(String(m));
+    await pumpOnce(ctxFor(stubClient([])), () => false, memory);
+    console.error = realErr2;
+    ok("recovery is reported", upLines.some((l) => l.includes("answering again")));
+  }
+
+  // --- a handed-off task coming back is never silent ----------------------
+  {
+    // An HTTP route hands off and does not close the task, so the app can
+    // return it to the queue. That is the app's safety net, and re-delivering
+    // is right — doing it quietly is not, because a second run may be live.
+    const t = task("tsk_again", "summarize", {});
+    const endpoint = createServer((req, res) => {
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    await new Promise((r) => endpoint.listen(0, "127.0.0.1", r));
+    const hookPort = endpoint.address().port;
+
+    const ctx = ctxFor(stubClient([t]), { route: { mode: "inbound", url: `http://127.0.0.1:${hookPort}/run` } });
+    const memory = createMemory();
+    const lines = [];
+    const realErr = console.error;
+    console.error = (m) => lines.push(String(m));
+    await pumpOnce(ctx, () => false, memory); // first delivery
+    const firstWarnings = lines.filter((l) => l.includes("back in the queue")).length;
+    await pumpOnce(ctx, () => false, memory); // the app gave it back
+    console.error = realErr;
+    await new Promise((r) => endpoint.close(r));
+
+    check("the first delivery warns about nothing", firstWarnings, 0);
+    ok(
+      "a redelivered handoff is called out",
+      lines.some((l) => l.includes("back in the queue") && l.includes("tsk_again")),
+    );
+    ok(
+      "…and names the fix, which is on the harness's side",
+      lines.some((l) => l.includes("tasks progress")),
+    );
+  }
+}
+
 /* ------------ rung 3: a gateway that is not up yet, brought up by the bridge */
 
 await withApp([task("tsk_gw", "summarize", {})], async ({ port, state }) => {

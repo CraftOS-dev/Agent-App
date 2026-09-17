@@ -49,7 +49,7 @@ Reserved protocol segments (never module names): `data`, `identity`, `whoami`, `
 | `agent-app <dir> toolkit-sync` / `adapter-sync` | Re-vendor system files / deliver the adapter, re-record hashes |
 | `agent-app <dir> serve` / `stop` | Launch via the manifest pipeline as a health-polled background process, and stop it |
 | `agent-app <dir> dev` / `promote` / `backup` / `restore` | Safe-evolve: boot the candidate on a hidden port with a fresh migration-replayed DB → gate + verify → promote with a pre-promote backup |
-| `agent-app list` | Every known Agent App with its port and live status (`--json`, `--prune`) |
+| `agent-app list` | Every known Agent App with its port and live status, plus a live dev instance or bridge on the app's own row (`--json`, `--prune`) |
 | `agent-app global` | The user's cross-app conventions (`GLOBAL_AGENT_APP.md`) |
 | `agent-app skills [--install <dir>]` | List the framework skills, or install them into a harness |
 | `agent-app <dir> bridge [status\|start\|stop]` | The app→agent direction: watch this app's task queue, claim what appears, and trigger an agent harness by the deepest route it offers — see [Bridge](#bridge-the-appagent-direction) |
@@ -102,11 +102,12 @@ A `gateway` route needs `health` as well as `start`: without it there is no way 
 
 **What the bridge guarantees.**
 
-- **One run per task.** A task is claimed before it is delivered, so two bridges — or a bridge and a harness running `tasks next` — can watch one queue and each task still runs once. Whoever claims first owns it; everyone else gets 409 and moves on.
+- **One run per task.** A task is claimed before it is delivered, so two bridges — or a bridge and a harness running `tasks next` — can watch one queue and each task still runs once. Whoever claims first owns it; everyone else gets 409 and moves on. The one hole is the app's own safety net: a task handed over an HTTP route stays `working`, and a harness that never reports has it returned to the queue after 60s and delivered again. Suppressing that would strand every task a dead agent was holding, so it is allowed — but the bridge remembers what it handed over and **says so loudly** when one comes back, naming the fix (the harness must call `tasks progress`). A duplicate run nobody is told about is the failure worth preventing.
 - **The claim stays alive.** The adapter sweeps a `working` task back to `submitted` after 60s without an update, so a dead agent's work is redelivered. A real run takes minutes, so the bridge sends progress heartbeats while a headless run is in flight. A heartbeat the app refuses means the claim was lost, and the run is killed rather than allowed to finish against a task somebody else now owns.
 - **Tasks are closed only where that is knowable.** A headless run is over when the process exits, so the task is closed from its exit code — unless the harness already closed it itself, in which case the harness's own result stands, `input-required` included. An HTTP trigger is different: a 2xx is an *acknowledgement*, the run happens elsewhere, and the task is deliberately left open for the harness to close. A trigger that is *refused* does fail the task, because nothing started.
 - **The payload is data.** It is fenced with a per-delivery nonce (so a payload cannot close its own fence), labelled as data rather than instructions, capped with a pointer to `tasks get <id>` for the rest, and the harness is spawned with **no shell** and an argument array — a record titled `"; rm -rf ~` arrives as a title.
 - **Nothing starts on its own.** A bridge is per-app and explicitly started. `--dry-run` shows the exact prompts a run would produce and claims nothing.
+- **It is quiet enough to leave running.** A bridge writes to `.a2app/bridge.log`, which nothing rotates, so repetition is the enemy: a task filtered out by `--capability` is announced once rather than every poll, and an app that goes down is complained about once (with one line when it comes back) rather than every few seconds. `agent-app list` marks apps with a live bridge as `bridge:<harness>/<route>`, so "which of my apps can start agent runs?" is answerable without visiting each one.
 
 * * *
 

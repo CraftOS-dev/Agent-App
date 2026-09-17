@@ -15,6 +15,13 @@
  * whose claim was lost mid-flight is abandoned rather than completed. Two
  * harness runs on one task would both write to the same app.
  *
+ * That promise has exactly one hole, and it is the app's safety net rather than
+ * a bug: a task handed over an HTTP route stays `working`, and if the harness
+ * never reports, the app returns it to the queue after 60s and the bridge
+ * delivers it again. Suppressing that would strand every task a dead agent was
+ * holding. So it is allowed, counted, and said out loud — a duplicate run that
+ * nobody is told about is the failure worth preventing.
+ *
  * THE CLAIM MUST BE KEPT ALIVE. The adapter sweeps a `working` task back to
  * `submitted` after 60s without an update, so that a dead agent's work is
  * redelivered rather than lost. A harness run takes minutes. Without a
@@ -587,6 +594,27 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
   return delivery;
 }
 
+/**
+ * What one bridge remembers between passes.
+ *
+ * A pass on its own is stateless, and that is fine for `--once`. A bridge that
+ * runs for a night is not: without memory it repeats the same line every poll
+ * interval, and — worse — cannot tell a task it has never seen from one it
+ * already handed over and is now being given back.
+ */
+export interface BridgeMemory {
+  /** tasks already reported as filtered out, so the reason is said once */
+  announcedSkips: Set<string>;
+  /** the last poll failure, so a down app is reported once and not every 5s */
+  lastPollError: string | null;
+  /** tasks handed to a harness that reports its own outcome, and how often */
+  handedOff: Map<string, number>;
+}
+
+export function createMemory(): BridgeMemory {
+  return { announcedSkips: new Set(), lastPollError: null, handedOff: new Map() };
+}
+
 export interface PumpResult {
   seen: number;
   delivered: number;
@@ -603,12 +631,27 @@ export interface PumpResult {
  * race the app's guard cannot see — both are valid writes — so concurrency here
  * would be the framework manufacturing conflicts the user never asked for.
  */
-export async function pumpOnce(ctx: BridgeContext, stopped: () => boolean): Promise<PumpResult> {
+export async function pumpOnce(
+  ctx: BridgeContext,
+  stopped: () => boolean,
+  memory: BridgeMemory = createMemory(),
+): Promise<PumpResult> {
   const result: PumpResult = { seen: 0, delivered: 0, failed: 0, skipped: 0 };
   const res = await ctx.client.pollTasks("submitted");
   if (!res.ok) {
-    log.warn(`could not poll tasks: HTTP ${res.status} ${tail(res.body, 200)}`);
+    // Say it once. An app that is down stays down for minutes or hours, and a
+    // line per poll interval buries the one thing worth reading in a log
+    // nothing rotates. The message changing IS the news, so that is the trigger.
+    const why = `could not poll tasks: HTTP ${res.status} ${tail(res.body, 200)}`;
+    if (memory.lastPollError !== why) {
+      log.warn(`${why} — polling continues; this is reported once until it changes`);
+      memory.lastPollError = why;
+    }
     return result;
+  }
+  if (memory.lastPollError !== null) {
+    log.ok("the app is answering again");
+    memory.lastPollError = null;
   }
   const tasks = parseTasks(res.json).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   result.seen = tasks.length;
@@ -617,7 +660,15 @@ export async function pumpOnce(ctx: BridgeContext, stopped: () => boolean): Prom
     if (stopped()) break;
     if (ctx.capabilities !== null && !ctx.capabilities.includes(task.request.capability)) {
       result.skipped += 1;
-      log.info(`skipping ${task.id}: capability "${task.request.capability}" is not in --capability`);
+      // Once per task. A filtered task is never claimed, so it stays in the
+      // queue and would otherwise be announced on every pass, forever.
+      if (!memory.announcedSkips.has(task.id)) {
+        memory.announcedSkips.add(task.id);
+        log.info(
+          `leaving ${task.id} alone: capability "${task.request.capability}" is not in --capability ` +
+            `(said once; it stays in the queue for someone else)`,
+        );
+      }
       continue;
     }
     // A dry run inspects; it must not touch the queue. Claiming here would take
@@ -642,10 +693,33 @@ export async function pumpOnce(ctx: BridgeContext, stopped: () => boolean): Prom
       continue;
     }
     const claimed = (claim.json as Task | null) ?? task;
+
+    // A task this bridge already handed over has come BACK. The app only
+    // returns a `working` task to the queue after 60s with no update, so the
+    // harness either never started it or is working silently — and either way
+    // "one run per task" is no longer something the bridge can promise here.
+    //
+    // It is still re-delivered: the app has declared the previous run dead, and
+    // second-guessing that would strand the task. What must not happen is doing
+    // it quietly, because the duplicate run is invisible from both ends.
+    const before = memory.handedOff.get(task.id);
+    if (before !== undefined) {
+      log.warn(
+        `task ${task.id} is back in the queue after being handed to ${ctx.profile.id} over ${ctx.route.mode} ` +
+          `(delivery ${before + 1}). The app returns a claimed task after 60s without an update, so the run ` +
+          `either never started or is working silently — a second run may now be in flight.\n` +
+          `  The fix is on the harness's side: call \`tasks progress\` while it works, and one of ` +
+          `\`tasks complete --result\` / \`--reason\` when it is done.`,
+      );
+    }
+
     log.step(`task ${task.id} (${task.request.capability}) → ${ctx.profile.id} via ${ctx.route.mode}`);
     const delivery = await deliverAndSettle(ctx, claimed);
     if (delivery.ok) {
       result.delivered += 1;
+      // Only a delivery the bridge does NOT close can come back, so only those
+      // are worth remembering.
+      if (!delivery.completes) memory.handedOff.set(task.id, (before ?? 0) + 1);
       log.ok(`task ${task.id}: ${delivery.detail} (${Math.round(delivery.ms / 1000)}s)`);
     } else {
       result.failed += 1;
@@ -672,9 +746,10 @@ async function sleepUntilStopped(ms: number, stopped: () => boolean): Promise<vo
 
 /** Poll until stopped. `intervalMs` is the gap between passes, not a deadline. */
 export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: () => boolean): Promise<void> {
+  const memory = createMemory();
   while (!stopped()) {
     try {
-      await pumpOnce(ctx, stopped);
+      await pumpOnce(ctx, stopped, memory);
     } catch (err) {
       // A bridge is a service: one bad pass must not end it. Report and keep
       // polling — the app coming back up is the common cause, and a loop that

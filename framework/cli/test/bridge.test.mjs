@@ -820,7 +820,15 @@ await withApp([task("tsk_gw", "summarize", {})], async ({ port, state }) => {
       `import { createServer } from "node:http";`,
       `import { writeFileSync, appendFileSync } from "node:fs";`,
       `writeFileSync(${JSON.stringify(join(dir, "gateway.pid"))}, String(process.pid));`,
-      `createServer((req, res) => {`,
+      // The port was chosen by binding and releasing, so there is a window in
+      // which another process on a busy machine can take it first. Retry rather
+      // than fail: a test that is flaky under load teaches people to re-run.
+      `let attempts = 0;`,
+      `const listen = (srv) => srv.listen(${gwPort}, "127.0.0.1").on("error", (e) => {`,
+      `  if (e.code !== "EADDRINUSE" || ++attempts > 40) throw e;`,
+      `  setTimeout(() => { srv.close(); listen(srv); }, 100);`,
+      `});`,
+      `listen(createServer((req, res) => {`,
       `  if (req.url === "/up") { res.writeHead(200).end("{}"); return; }`,
       `  let body = "";`,
       `  req.on("data", (c) => (body += c));`,
@@ -829,7 +837,7 @@ await withApp([task("tsk_gw", "summarize", {})], async ({ port, state }) => {
       `    res.writeHead(202, { "content-type": "application/json" });`,
       `    res.end(JSON.stringify({ accepted: true }));`,
       `  });`,
-      `}).listen(${gwPort}, "127.0.0.1");`,
+      `}));`,
     ].join("\n"),
   );
 

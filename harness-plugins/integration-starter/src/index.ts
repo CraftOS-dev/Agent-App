@@ -14,7 +14,10 @@
  * build/evolve, `a2app` for operate) and preserves the exit-code contract
  * (0 success · 1 rejected · 2 usage · 3 unreachable); nothing here is simulated.
  */
-import { spawn } from "node:child_process";
+// cross-spawn instead of node:child_process spawn: npm installs CLIs as .cmd
+// shims on Windows, which plain spawn cannot execute; cross-spawn runs them
+// while still passing argv literally (no shell interpretation of field values).
+import spawn from "cross-spawn";
 
 export const INTEGRATION_STARTER_VERSION = "0.1.0";
 
@@ -112,8 +115,10 @@ export function runA2App(cliBin: string, argv: string[]): Promise<CliResult> {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
+    // stdio is ["ignore", "pipe", "pipe"], so both streams exist; cross-spawn's
+    // types lack node's per-stdio-config narrowing.
+    child.stdout!.on("data", (d) => (stdout += d));
+    child.stderr!.on("data", (d) => (stderr += d));
     child.on("close", (code) => resolve(finish(code ?? -1, stdout, stderr)));
     child.on("error", (e) => resolve(finish(-1, "", String((e as Error).message))));
   });
@@ -382,11 +387,13 @@ export function showAgentApp(ctx: HarnessContext, app: { id: string; name: strin
 // A harness with a real dashboard (OpenClaw's Control UI, dsh's iframe) can show
 // a FORM as the framework's front door — the CraftBot-style "what do you want to
 // build?" surface — instead of leaving the framework invisible until the agent
-// happens to pick a skill. The form is harness-neutral: these helpers produce the
-// HTML and turn a submitted request into a **kickoff prompt** that routes the
-// agent to the right skill with the user's context. The host binding owns only
-// the two things that are host-specific: serving the HTML over its HTTP route and
-// handing the kickoff prompt to its agent session.
+// happens to pick a skill. The form is harness-neutral and READ-ONLY by design:
+// dashboard hosts frame plugin pages behind a GET/HEAD-only auth grant, so these
+// helpers never mutate anything. They produce the HTML and turn a submitted
+// request (query parameters on a GET) into a **kickoff prompt** that routes the
+// agent to the right skill with the user's context; the user hands that prompt
+// to the agent through the harness's own chat surface (e.g. the `/agent-app`
+// chat command). The host binding owns only serving the HTML over its HTTP route.
 
 /** Blueprints offered in the form's "Build new" stack dropdown. Kept in sync with
  *  the toolkits the CLI can scaffold; an unknown value is still accepted by the
@@ -430,11 +437,10 @@ export async function listKnownApps(frameworkBin = "agent-app"): Promise<KnownAp
   return parseKnownApps(await runA2App(frameworkBin, ["list", "--json"]));
 }
 
-/** The result of a form submission. `kickoff` is present when the host should
- *  start an agent turn with `prompt`; the host also echoes it in the UI so the
- *  operator sees exactly what the agent was asked to do (and can re-send it). */
+/** The result of composing a kickoff from the entry form. `kickoff` carries the
+ *  prompt the user hands to the agent (pasted into chat or sent via the harness's
+ *  `/agent-app` command); `error` reports what the submission was missing. */
 export type FormActionResult =
-  | { kind: "apps"; apps: KnownApp[] }
   | { kind: "kickoff"; activity: "creator" | "modify" | "operator"; prompt: string; dir?: string; message: string }
   | { kind: "error"; message: string };
 
@@ -459,7 +465,7 @@ export function buildKickoffPrompt(body: Record<string, unknown>): FormActionRes
       `Scaffold from blueprint \`${blueprint}\`${port ? ` on port ${port}` : ""}. Load the **creator** skill and follow it end to end: ` +
       `scaffold, build feature by feature under the ownership boundary, run \`agent-app validate\`, launch, and have a separate agent walk-verify before announcing. ` +
       `Do not build from general knowledge outside the skill.`;
-    return { kind: "kickoff", activity: "creator", prompt, message: `Starting a build of "${name}" with the creator skill.` };
+    return { kind: "kickoff", activity: "creator", prompt, message: `Kickoff prompt for building "${name}" with the creator skill:` };
   }
   if (action === "modify" || action === "operate") {
     const dir = str(body.dir);
@@ -469,28 +475,15 @@ export function buildKickoffPrompt(body: Record<string, unknown>): FormActionRes
         `Evolve the existing Agent App at \`${dir}\`.\n\n` +
         `Change requested:\n${requirement}\n\n` +
         `Load the **modify** skill and follow it: decide data-vs-code, edit under the ownership boundary, then dev → \`agent-app validate\` → walk-verify → promote with a pre-promote backup.`;
-      return { kind: "kickoff", activity: "modify", dir, prompt, message: "Starting an evolve with the modify skill." };
+      return { kind: "kickoff", activity: "modify", dir, prompt, message: "Kickoff prompt for evolving with the modify skill:" };
     }
     const prompt =
       `Operate the Agent App at \`${dir}\`.\n\n` +
       `Task:\n${requirement}\n\n` +
       `Load the **operator** skill: read state and act through the A2App adapter (the \`a2app\` CLI). No code changes.`;
-    return { kind: "kickoff", activity: "operator", dir, prompt, message: "Starting an operate task with the operator skill." };
+    return { kind: "kickoff", activity: "operator", dir, prompt, message: "Kickoff prompt for operating with the operator skill:" };
   }
   return { kind: "error", message: `Unknown action "${action}".` };
-}
-
-/** Turn a submitted form body into a result: `refresh` re-lists apps; anything
- *  else composes a kickoff prompt. Pure except for the `refresh` CLI call, so the
- *  host binding stays a thin req/res adapter. */
-export async function handleFormAction(
-  body: Record<string, unknown>,
-  opts: { frameworkBin?: string } = {},
-): Promise<FormActionResult> {
-  if (str(body.action) === "refresh") {
-    return { kind: "apps", apps: await listKnownApps(opts.frameworkBin ?? "agent-app") };
-  }
-  return buildKickoffPrompt(body);
 }
 
 function esc(s: string): string {
@@ -499,15 +492,41 @@ function esc(s: string): string {
 
 /**
  * The entry-point form as a single self-contained HTML document (inline CSS/JS,
- * no external assets — it renders in a sandboxed frame). It POSTs a JSON body
- * `{ action, ... }` back to `postPath` and renders the JSON result. The host serves
- * this on its plugin HTTP route and points a Control UI tab at that route.
+ * no external assets — it renders in a sandboxed, READ-ONLY frame: hosts like
+ * OpenClaw authenticate framed plugin pages with a GET/HEAD-only grant and no
+ * form or clipboard permissions). The form therefore never POSTs and never
+ * touches the clipboard: submitting navigates the frame to its own URL with the
+ * fields as query parameters, the host composes the kickoff prompt server-side
+ * (buildKickoffPrompt) and re-renders this page with the prompt in a
+ * click-to-select textarea the user copies into the harness chat. Everything is
+ * server-rendered — apps, selections, the prompt — so no data crosses into
+ * script context.
  */
-export function agentAppFormHtml(opts: { apps?: KnownApp[]; postPath?: string } = {}): string {
+export function agentAppFormHtml(opts: { apps?: KnownApp[]; values?: Record<string, string>; result?: FormActionResult } = {}): string {
   const apps = opts.apps ?? [];
-  const postPath = opts.postPath ?? "";
-  const blueprints = FRAMEWORK_BLUEPRINTS.map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join("");
-  const appData = esc(JSON.stringify(apps.map((a) => ({ path: a.path, name: a.name, id: a.id, status: a.status ?? "", port: a.port ?? null }))));
+  const values = opts.values ?? {};
+  const result = opts.result;
+  const active = values.action === "modify" || values.action === "operate" ? values.action : "build";
+  const requirement = str(values.requirement);
+  const blueprints = FRAMEWORK_BLUEPRINTS
+    .map((b) => `<option value="${esc(b)}"${b === values.blueprint ? " selected" : ""}>${esc(b)}</option>`)
+    .join("");
+  const appOptions = apps.length
+    ? apps
+        .map((a) => `<option value="${esc(a.path)}"${a.path === values.dir ? " selected" : ""}>${esc(`${a.name} (${a.path})${a.status ? ` · ${a.status}` : ""}`)}</option>`)
+        .join("")
+    : `<option value="">No known apps — build one first</option>`;
+  const tab = (mode: string, label: string) =>
+    `<button role="tab" data-mode="${mode}" aria-selected="${mode === active ? "true" : "false"}">${label}</button>`;
+  const panel = (mode: string) => `class="panel${mode === active ? " on" : ""}" data-panel="${mode}"`;
+  const resultHtml =
+    result == null
+      ? ""
+      : result.kind === "error"
+        ? `<div class="out err">${esc(result.message)}</div>`
+        : `<div class="out ok">${esc(result.message)}</div>
+<textarea class="prompt" readonly rows="12" onclick="this.select()">${esc(result.prompt)}</textarea>
+<p class="hint">Click the prompt to select it, copy it, and paste it into the chat — or send your request directly with <code>/agent-app &lt;what you want&gt;</code>.</p>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agent Apps</title>
@@ -524,85 +543,60 @@ input,select,textarea{width:100%;background:var(--panel);border:1px solid var(--
 textarea{min-height:110px;resize:vertical}
 .row{display:flex;gap:12px}.row>*{flex:1}
 button.go{margin-top:18px;width:100%;background:var(--acc);color:#fff;border:0;border-radius:8px;padding:12px;font:inherit;font-weight:600;cursor:pointer}
-button.go:disabled{opacity:.6;cursor:default}
 .panel{display:none}.panel.on{display:block}
-#out{margin-top:20px;display:none}
-#out .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
-#out .msg{font-weight:600;margin-bottom:10px}#out.ok .msg{color:var(--ok)}#out.err .msg{color:var(--err)}
-pre{white-space:pre-wrap;word-break:break-word;background:#000;border:1px solid var(--line);border-radius:8px;padding:12px;margin:10px 0 0;color:#cdd3dc;font:12px/1.5 ui-monospace,monospace}
-.copy{margin-top:8px;background:none;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:6px 10px;cursor:pointer;font:inherit}
-.empty{color:var(--mut);font-style:italic}
+.out{margin-top:20px;font-weight:600}.out.ok{color:var(--ok)}.out.err{color:var(--err)}
+textarea.prompt{margin-top:10px;min-height:0;background:#000;color:#cdd3dc;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap}
+p.hint{color:var(--mut);margin:8px 0 0}code{color:var(--fg)}
 </style></head><body><div class="wrap">
 <h1>Agent Apps</h1><p class="sub">Build, evolve, or operate a full-stack app the agent drives through A2App.</p>
 <div class="seg" role="tablist">
-  <button role="tab" data-mode="build" aria-selected="true">Build new</button>
-  <button role="tab" data-mode="modify" aria-selected="false">Evolve</button>
-  <button role="tab" data-mode="operate" aria-selected="false">Operate</button>
+  ${tab("build", "Build new")}
+  ${tab("modify", "Evolve")}
+  ${tab("operate", "Operate")}
 </div>
 
-<section class="panel on" data-panel="build">
+<section ${panel("build")}>
   <label for="b-name">App name</label>
-  <input id="b-name" placeholder="Acme CRM" autocomplete="off">
+  <input id="b-name" placeholder="Acme CRM" autocomplete="off" value="${esc(str(values.name))}">
   <label for="b-req">What should it do?</label>
-  <textarea id="b-req" placeholder="Track contacts, companies, and deals. A pipeline board, per-contact activity log, and a weekly summary."></textarea>
+  <textarea id="b-req" placeholder="Track contacts, companies, and deals. A pipeline board, per-contact activity log, and a weekly summary.">${active === "build" ? esc(requirement) : ""}</textarea>
   <div class="row">
     <div><label for="b-bp">Stack</label><select id="b-bp">${blueprints}</select></div>
-    <div><label for="b-port">Port (optional)</label><input id="b-port" type="number" placeholder="8110" autocomplete="off"></div>
+    <div><label for="b-port">Port (optional)</label><input id="b-port" type="number" placeholder="8110" autocomplete="off" value="${esc(str(values.port))}"></div>
   </div>
-  <button class="go" data-submit="build">Build it</button>
+  <button class="go" data-submit="build">Compose build prompt</button>
 </section>
 
-<section class="panel" data-panel="modify">
-  <label for="m-app">App</label><select id="m-app" data-apps></select>
+<section ${panel("modify")}>
+  <label for="m-app">App</label><select id="m-app">${appOptions}</select>
   <label for="m-req">Change to make</label>
-  <textarea id="m-req" placeholder="Add a monthly revenue report to the dashboard."></textarea>
-  <button class="go" data-submit="modify">Evolve it</button>
+  <textarea id="m-req" placeholder="Add a monthly revenue report to the dashboard.">${active === "modify" ? esc(requirement) : ""}</textarea>
+  <button class="go" data-submit="modify">Compose evolve prompt</button>
 </section>
 
-<section class="panel" data-panel="operate">
-  <label for="o-app">App</label><select id="o-app" data-apps></select>
+<section ${panel("operate")}>
+  <label for="o-app">App</label><select id="o-app">${appOptions}</select>
   <label for="o-req">Task</label>
-  <textarea id="o-req" placeholder="Add 12 sample contacts and mark the 3 oldest deals as won."></textarea>
-  <button class="go" data-submit="operate">Run it</button>
+  <textarea id="o-req" placeholder="Add 12 sample contacts and mark the 3 oldest deals as won.">${active === "operate" ? esc(requirement) : ""}</textarea>
+  <button class="go" data-submit="operate">Compose operate prompt</button>
 </section>
 
-<div id="out"><div class="card"><div class="msg"></div><div class="body"></div></div></div>
+${resultHtml}
 </div>
 <script>
-const POST=${JSON.stringify(postPath)};
-const APPS=JSON.parse(${JSON.stringify(appData)});
-function fillApps(){
-  const opts=APPS.length?APPS.map(a=>'<option value="'+a.path+'">'+(a.name||a.id)+' ('+a.path+')'+(a.status?' · '+a.status:'')+'</option>').join(''):'';
-  document.querySelectorAll('select[data-apps]').forEach(s=>{s.innerHTML=opts||'<option value="">No known apps — build one first</option>';});
-}
-fillApps();
 document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-selected',x===b));
+  document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-selected',String(x===b)));
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.dataset.panel===b.dataset.mode));
 });
-function body(action){
-  if(action==='build')return{action,name:val('b-name'),requirement:val('b-req'),blueprint:val('b-bp'),port:val('b-port')};
-  const id=action==='modify'?'m':'o';return{action,dir:val(id+'-app'),requirement:val(id+'-req')};
-}
-function val(id){const e=document.getElementById(id);return e?e.value:'';}
-function show(ok,msg,pre){
-  const out=document.getElementById('out');out.style.display='block';out.className=ok?'ok':'err';
-  out.querySelector('.msg').textContent=msg;
-  const b=out.querySelector('.body');b.innerHTML='';
-  if(pre){const p=document.createElement('pre');p.textContent=pre;b.appendChild(p);
-    const c=document.createElement('button');c.className='copy';c.textContent='Copy prompt';
-    c.onclick=()=>navigator.clipboard&&navigator.clipboard.writeText(pre);b.appendChild(c);}
-}
-document.querySelectorAll('button[data-submit]').forEach(btn=>btn.onclick=async()=>{
-  btn.disabled=true;const prev=btn.textContent;btn.textContent='Working…';
-  try{
-    const r=await fetch(POST,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body(btn.dataset.submit))});
-    const j=await r.json();
-    if(j.kind==='kickoff')show(true,j.message,j.prompt);
-    else if(j.kind==='error')show(false,j.message);
-    else show(true,'Done.');
-  }catch(e){show(false,'Request failed: '+e);}
-  finally{btn.disabled=false;btn.textContent=prev;}
+function val(id){return document.getElementById(id).value;}
+document.querySelectorAll('button[data-submit]').forEach(btn=>btn.onclick=()=>{
+  const action=btn.dataset.submit;
+  const p=new URLSearchParams({action});
+  if(action==='build'){p.set('name',val('b-name'));p.set('requirement',val('b-req'));p.set('blueprint',val('b-bp'));p.set('port',val('b-port'));}
+  if(action==='modify'){p.set('dir',val('m-app'));p.set('requirement',val('m-req'));}
+  if(action==='operate'){p.set('dir',val('o-app'));p.set('requirement',val('o-req'));}
+  location.assign('?'+p.toString());
 });
 </script></body></html>`;
 }
+

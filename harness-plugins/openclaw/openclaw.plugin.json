@@ -4,28 +4,18 @@
   "description": "Build and operate full Agent Apps over the A2App protocol via the agent-app and a2app CLIs. Adds an 'Agent Apps' Control UI tab — a form to build, evolve, or operate an app — as the framework's front door.",
   "icon": "https://cdn.simpleicons.org/probot",
   "enabledByDefault": false,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
   "skills": ["./skills"],
+  "commandAliases": [{ "name": "agent-app" }],
   "cliCommands": [
     { "name": "agent-app", "description": "Run the framework CLIs (build/evolve/operate an Agent App)", "hasSubcommands": true }
   ],
   "activation": {
-    "onStartup": false,
-    "onCommands": ["agent-app"],
-    "onCapabilities": ["tool"]
-  },
-  "contracts": {
-    "tools": [
-      "agent_app_describe",
-      "agent_app_list",
-      "agent_app_get",
-      "agent_app_create",
-      "agent_app_update",
-      "agent_app_delete",
-      "agent_app_find",
-      "agent_app_run_operation",
-      "agent_app_poll_tasks",
-      "agent_app_build",
-      "agent_app_validate"
-    ]
+    "onStartup": true,
+    "onCommands": ["agent-app"]
   }
 }

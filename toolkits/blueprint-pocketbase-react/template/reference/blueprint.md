@@ -150,9 +150,16 @@ close over file-scope variables; `require()` inside each handler.
 
 ## App→agent triggers
 
-**This blueprint ships no trigger manifest in v0.1.** The creator skill's
-"App→agent triggers" section does not apply — handle app events with plain hook
-code. Do not invent an unsupported mechanism.
+**This blueprint has no app→agent queue in v0.1.** The PocketBase hooks adapter
+implements the records, operations and describe surfaces, but not `tasks` /
+`events` — there is nothing to fire against, so the creator skill's
+"App→agent triggers" section does not apply here.
+
+Handle app events with plain hook code. If a feature genuinely needs an agent to
+react, record it in `reference/requirements.md` as a known limitation of this
+stack rather than inventing a mechanism — the other blueprints
+(`blueprint-react-node`, `blueprint-python-fastapi`) do carry the queue, and
+choosing one of those is the honest fix.
 
 ## Build, run, gate
 

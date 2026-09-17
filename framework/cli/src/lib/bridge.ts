@@ -134,6 +134,17 @@ export interface PromptContext {
   appName: string;
   appId: string;
   /**
+   * Whether the harness runs with the app's directory as its working directory.
+   *
+   * When it does, the app is addressable as `.` and every command in the prompt
+   * gets shorter — which matters, because an app can sit at a path long enough
+   * that repeating it four times is most of the instructions the agent reads.
+   * When it does not (an HTTP route, or a route with its own cwd), the full path
+   * is the only form that resolves, and brevity is not worth a command that
+   * runs somewhere else.
+   */
+  cwdIsApp: boolean;
+  /**
    * Whether the bridge will close this task when the run ends.
    *
    * True for a headless run, whose exit is observable. False for a run triggered
@@ -156,7 +167,9 @@ export interface PromptContext {
  */
 export function renderPrompt(task: Task, ctx: PromptContext): string {
   const nonce = randomBytes(6).toString("hex");
-  const ref = ctx.appRef.includes(" ") ? `"${ctx.appRef}"` : ctx.appRef;
+  // `.` when the harness is already standing in the app's directory; otherwise
+  // the full path, quoted if it has spaces.
+  const ref = ctx.cwdIsApp ? "." : ctx.appRef.includes(" ") ? `"${ctx.appRef}"` : ctx.appRef;
   const payload = JSON.stringify(task.request.payload ?? {}, null, 2);
   const truncated = payload.length > PAYLOAD_BUDGET;
   const shown = truncated ? payload.slice(0, PAYLOAD_BUDGET) : payload;
@@ -165,11 +178,13 @@ export function renderPrompt(task: Task, ctx: PromptContext): string {
     `An Agent App has work for you. Do it, then report the outcome back to the app.`,
     ``,
     `  app         ${ctx.appName} (${ctx.appId})`,
+    `  directory   ${ctx.appRef}`,
     `  task        ${task.id}`,
     `  capability  ${task.request.capability}`,
     ``,
     `This task is already claimed for you — do not claim it again.`,
     ``,
+    ...(ctx.cwdIsApp ? [`You are already in the app's directory, so it is addressed below as \`.\`.`, ``] : []),
     `Operate the app with the a2app CLI, never by driving its UI. Start at`,
     `\`a2app ${ref}\`: the root screen lists the app's modules, and every screen ends`,
     `by naming the legal next moves. Read the app's own state before acting on it.`,

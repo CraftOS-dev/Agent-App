@@ -210,14 +210,41 @@ After each feature: update `AGENT_APP.md` (entities, operations) and tick the
 completed tasks in `reference/tasks.md`.
 
 **App→agent triggers** — when a feature needs the AGENT to react to something in
-the app, declare it in the trigger manifest and fire it by **name + validated
-params only**; the instruction the agent runs is read from the declared manifest,
-never from the fire payload (so a compromised app cannot steer the agent beyond
-what its author declared). Make instructions idempotent; set generous cooldowns.
-Declare a trigger only where agent judgment adds value — plain code handles plain
-events. **Trigger support is stack-specific and not every blueprint ships it** —
-`reference/blueprint.md` says whether yours does and how; if it does not, handle
-the event with plain code and record the limitation in the spec.
+the app, the app puts the work on its **own queue** and an agent takes it from
+there. There is no manifest of instructions to write, and there is deliberately
+no way for the app to send one: an app declares the **event types** it may emit,
+and each trigger names a **capability** (the kind of work) plus a small payload.
+What the agent then does is decided by the agent, which is what stops a
+compromised app from steering it.
+
+```js
+// in an operation runner — the seam your blueprint gives you
+trigger("invoice.needs_review", { invoice: rec.id }, "review")
+```
+
+Three rules, and the first is the one that bites:
+
+- **Declare the event type** wherever your blueprint declares them. An
+  undeclared type is refused at the moment of firing — inside an operation, in
+  front of a user — so the set of things your app can ask for is fixed by you,
+  in code you own.
+- **Send ids, not prose and not data.** The agent re-reads the record itself, so
+  a copy is stale by the time it is read. Prose in a payload is an instruction
+  the app does not get to give: on the other side it is fenced and labelled as
+  data, and an agent that obeys it is misbehaving.
+- **Only where agent judgment adds value.** Plain events want plain code. Make
+  the work idempotent — a task can be redelivered if an agent dies holding it.
+
+**This is stack-specific, and not every blueprint has it** — `reference/blueprint.md`
+says whether yours does and how to reach it. If it does not, handle the event
+with plain code and record the limitation in `reference/requirements.md` rather
+than inventing a mechanism.
+
+Nothing is delivered until someone is listening: the user runs
+`agent-app <dir> bridge start` (the framework triggers their harness) or their
+harness polls `a2app <dir> tasks next --wait`. Say so when you ship a feature
+that queues work, or it will look broken. `agent-app <dir> bridge` reports
+whether this machine can reach a harness at all.
 
 ## Finish: boot the candidate, gate, then verify
 

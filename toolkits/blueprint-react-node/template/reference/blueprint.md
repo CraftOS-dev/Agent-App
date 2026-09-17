@@ -141,7 +141,7 @@ operationRunners: {
 },
 ```
 
-- **Runner signature:** `(args, ctx, { store }) => jsonableResult`. `store` is
+- **Runner signature:** `(args, ctx, { store, trigger }) => jsonableResult`. `store` is
   the SQLite-backed record store — `list(entity)` · `get(entity, id)` ·
   `put(entity, record)` · `remove(entity, id)`. Writes are durable when the
   call returns; there is no separate persist() step.
@@ -213,11 +213,42 @@ that fills the store when it is empty.
 
 ## App→agent triggers
 
-**This blueprint ships no trigger manifest in v0.1.** The creator skill's
-"App→agent triggers" section does not apply here — there is no declared-trigger
-surface to fire against. Handle app events with plain code. If a feature
-genuinely needs the agent to react, say so in `requirements.md` as a known
-limitation rather than inventing an unsupported mechanism.
+**This blueprint supports them.** `server.mjs` is system-owned, so the adapter
+handle that enqueues agent work is not yours to reach directly — you get it as
+`trigger` in an operation runner's toolbox, beside `store`:
+
+```js
+// a2app.schema.mjs
+events: [{ type: "task.needs_triage" }],
+
+operationRunners: {
+  "request-triage": (args, _ctx, { store, trigger }) => {
+    const task = store.get("tasks", args?.task);
+    if (!task) return { ok: false, reason: "no such task" };
+    const { taskId } = trigger("task.needs_triage", { task: task.id }, "triage");
+    return { ok: true, queued: taskId };
+  },
+},
+```
+
+`trigger(type, payload, capability)` emits the event and, when a capability is
+named, puts a task on the app's queue. Without a capability it only announces
+something — nothing is queued and no agent is ever handed it.
+
+- **The type must be in `schema.events`.** `server.mjs` passes that list to the
+  adapter, which refuses an undeclared type. That refusal happens at fire time,
+  inside the operation, so an undeclared type is a feature that works in review
+  and fails in front of a user. `test/app-to-agent.test.mjs` checks the two
+  agree.
+- **Send ids.** The agent re-reads the record; a copy in the payload is stale by
+  the time it is read, and prose there is an instruction the app does not get to
+  give.
+- An operation runner is the only firing point this blueprint offers. Record
+  creation and updates go through system-owned code, so "fire when a record is
+  created" is not available — model it as an operation the UI or an agent calls.
+
+The queue only moves when something is listening: `agent-app <dir> bridge start`,
+or a harness polling `a2app <dir> tasks next --wait`.
 
 ## Build, run, gate
 

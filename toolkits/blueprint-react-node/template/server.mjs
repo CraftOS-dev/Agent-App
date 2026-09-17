@@ -218,7 +218,16 @@ const binding = {
   runOperation(name, args, ctx) {
     const runner = schema.operationRunners?.[name];
     if (!runner) throw new Error(`no runner for operation "${name}"`);
-    return runner(args, ctx, { store });
+    // `trigger` is the app→agent seam. This file is system-owned, so without it
+    // an author whose only seam is `a2app.schema.mjs` could never enqueue agent
+    // work: the adapter handle that can do so lives here and nowhere they may
+    // edit. `app` is assigned further down and read at call time, which is
+    // always after boot.
+    return runner(args, ctx, {
+      store,
+      /** Emit a declared event, and enqueue a task when `capability` is given. */
+      trigger: (type, payload, capability) => app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}) }),
+    });
   },
 };
 
@@ -302,6 +311,12 @@ const a2app = createA2App(binding, {
   // under it — the same "derive, do not declare" rule schemaVersion follows.
   appVersion: () => view.version(),
   operations: schema.operations ?? [],
+  // The event types this app may emit. Declaring them is what keeps the
+  // app→agent queue from being an open channel: `trigger` refuses a type that
+  // is not here, so the set of things this app can ever ask an agent to react
+  // to is fixed by its author, in code they own, rather than by whatever a
+  // caller passes at the moment of firing.
+  events: schema.events ?? [],
   // Modules are declared in the manifest and are what describe's root level
   // lists; every entity and operation names one.
   modules: manifest.modules,

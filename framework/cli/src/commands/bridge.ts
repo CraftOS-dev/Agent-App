@@ -324,6 +324,10 @@ async function start(args: string[], app: string, project: Project): Promise<num
       // Only a headless run's end is observable from here, so only a headless
       // run is promised a safety net.
       closesOnExit: route.mode === "headless",
+      // `deliverHeadless` runs the child in the app's directory unless the route
+      // names its own. Anything reached over HTTP runs wherever it already was,
+      // so only the first case may shorten the app's address to `.`.
+      cwdIsApp: route.mode === "headless" && (route.cwd === undefined || route.cwd === "app"),
     },
     taskTimeoutMs,
     capabilities: capabilities.length > 0 ? capabilities : null,

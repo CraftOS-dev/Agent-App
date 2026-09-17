@@ -40,7 +40,7 @@
  * property of this computer, so they live in the framework home and are shared
  * by every app on it.
  */
-import { existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { homePath } from "./home.js";
 import { readJsonFile } from "./json.js";
@@ -137,8 +137,8 @@ export interface HarnessConfig {
  *
  * Each is the harness's own documented headless invocation and nothing more —
  * one prompt in, one run, exit. They are DEFAULTS, not assertions that the
- * binary is installed: {@link inspect} checks PATH, and a machine with none of
- * them installed correctly reports rung 5 rather than pretending.
+ * binary is installed: {@link chooseRoute} checks PATH, and a machine with none
+ * of them installed correctly reports rung 5 rather than pretending.
  *
  * A harness whose flags change, or one not listed here, is described in
  * `harnesses.json` instead; an entry there with the same id replaces the
@@ -309,9 +309,15 @@ export function loadHarnesses(): LoadedHarnesses {
  * both cheaper and the same answer.
  */
 export function resolveOnPath(command: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  const isFile = (p: string): boolean => {
+  // A file that is not executable is not a command. Reporting one as "installed"
+  // would pass the ladder's availability check and then fail at spawn time,
+  // which is the wrong place to find out — rung 5 exists to be told up front.
+  // Windows has no execute bit; there, the PATHEXT suffix is what says so.
+  const isCommand = (p: string): boolean => {
     try {
-      return statSync(p).isFile();
+      if (!statSync(p).isFile()) return false;
+      if (process.platform !== "win32") accessSync(p, constants.X_OK);
+      return true;
     } catch {
       return false;
     }
@@ -327,11 +333,11 @@ export function resolveOnPath(command: string, env: NodeJS.ProcessEnv = process.
   // would report a harness as installed that cannot actually be spawned.
   const withExts = (base: string): string[] => exts.map((e) => base + e);
   if (command.includes("/") || command.includes("\\") || isAbsolute(command)) {
-    return [command, ...withExts(command)].find(isFile) ?? null;
+    return [command, ...withExts(command)].find(isCommand) ?? null;
   }
   for (const dir of (env["PATH"] ?? "").split(delimiter)) {
     if (dir === "") continue;
-    const found = withExts(join(dir, command)).find(isFile);
+    const found = withExts(join(dir, command)).find(isCommand);
     if (found !== undefined) return found;
   }
   return null;

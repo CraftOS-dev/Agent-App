@@ -51,6 +51,13 @@ import {
 export const ADAPTER_CORE_VERSION = "0.1.0";
 const PROTOCOL_VERSION = "0.1";
 
+/** Page size for the referential scan a delete runs before it commits. */
+const REFERENCE_SCAN_PAGE = 500;
+/** How many blocking record ids are reported per field. The answer is "yes, and
+ *  here are examples" — a caller does not need ten thousand of them. */
+const REFERENCE_SCAN_LIMIT = 10;
+/** Hard stop on paging, so a binding that ignores `page` cannot spin forever. */
+const REFERENCE_SCAN_MAX_PAGES = 200;
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";

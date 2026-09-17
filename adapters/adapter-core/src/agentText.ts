@@ -76,7 +76,11 @@ export function boundAppText(value: unknown, max: number = APP_TEXT_MAX): string
   const single = value.replace(/\s+/g, " ").trim();
   if (single === "") return undefined;
   if (single.length <= max) return single;
-  // Marked rather than silently cut, so a caller reading the reply can tell the
-  // difference between a short hint and a long one that was shortened.
-  return single.slice(0, max - 1) + "…";
+  // Marked rather than silently cut, and the marker says what happened and how
+  // much is gone — the reader needs no other context to know it was shortened.
+  // The suffix counts toward the cap, and its own length changes the count it
+  // reports; three passes reach the fixed point (digit count grows at most twice).
+  let suffix = "";
+  for (let i = 0; i < 3; i++) suffix = ` [truncated by adapter, ${single.length - max + suffix.length} chars cut]`;
+  return single.slice(0, Math.max(0, max - suffix.length)) + suffix;
 }

@@ -44,7 +44,11 @@ check("tabs and runs of spaces collapse too", boundAppText("a\t\t b  \n c"), "a 
 const long = "x".repeat(APP_TEXT_MAX + 50);
 const bounded = boundAppText(long);
 ok("a long payload is capped", bounded.length === APP_TEXT_MAX);
-ok("and marked, so a reader can tell it was shortened", bounded.endsWith("…"));
+ok("and marked with what was cut", /\[truncated by adapter, \d+ chars cut\]$/.test(bounded));
+// The reported count is exact: kept chars + cut chars = the collapsed original.
+const cut = Number(bounded.match(/(\d+) chars cut\]$/)[1]);
+const kept = bounded.indexOf(" [truncated");
+check("the count is exact", kept + cut, long.length);
 check("text exactly at the cap is left alone", boundAppText("y".repeat(APP_TEXT_MAX)).length, APP_TEXT_MAX);
 
 /* -------------------------------------------- the framework's own text */

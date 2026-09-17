@@ -55,6 +55,16 @@ apps/expense-tracker/
 # both are removed on a clean stop.
 **/.a2app/serve.json
 **/.a2app/serve.lock
+# `agent-app <dir> bridge` bookkeeping: the same three, for the app→agent
+# service — its pid record, its lock, and the log its detached process writes.
+**/.a2app/bridge.json
+**/.a2app/bridge.lock
+**/.a2app/bridge.log
+# A lock broken after its holder died is renamed aside before being deleted
+# (that rename is what makes the break atomic). On Windows the delete can lose a
+# race with an open handle and leave the copy behind — inert, never read, and
+# never something to commit.
+**/.a2app/*.lock.breaking.*
 **/data/db.json
 **/data/a2app-state.json
 a2app-state.json

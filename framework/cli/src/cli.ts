@@ -57,6 +57,12 @@ const COMMANDS: Record<string, CommandMeta> = {
   serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", surface: "agent-app", scope: "app" },
   stop: { summary: "Stop an app launched with `agent-app <app> serve` (--dev stops the dev instance instead)", surface: "agent-app", scope: "app", args: "[--dev]" },
   open: { summary: "Open a running app in a browser (--if-needed opens only when no tab is already on it)", surface: "agent-app", scope: "app", args: "[--if-needed] [--print-only]" },
+  bridge: {
+    summary: "Watch this app's task queue and trigger an agent harness when work appears (the app→agent direction)",
+    surface: "agent-app",
+    scope: "app",
+    args: "[status|start|stop] [--harness <id>] [--once] [--dry-run]",
+  },
   dev: { summary: "Boot the candidate on a hidden port with a fresh, migration-replayed database; operate commands target it until promote", surface: "agent-app", scope: "app" },
   promote: { summary: "Require a fresh gate pass, take the pre-promote backup, apply the new migrations to live, destroy the dev instance", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },

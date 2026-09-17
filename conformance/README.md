@@ -8,7 +8,7 @@ Runnable suites: language-agnostic YAML cases plus thin per-language harnesses. 
 |---|---|
 | **A: Core** | discovery, describe, HTTP binding, guard, idempotency, read-back, receipts, security, IAM, errors — **required for a stable release**; skipping a class-A check fails class A |
 | **B: CLI** | A + the `a2app` operate-client binding (exit codes, coercion, envelope passthrough) |
-| **C: Bidirectional** | B (or A) + events, tasks (full lifecycle incl. cancel + sweeper redelivery), verbs, context |
+| **C: Bidirectional** | B (or A) + events, tasks (full lifecycle incl. cancel + sweeper redelivery), the CLI's listen primitive (`tasks next`: claims the next task; an idle queue is exit 0 with no task, never an error), verbs, context |
 
 ## Framework artifact classes
 

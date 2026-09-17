@@ -33,6 +33,27 @@ export function hasFlag(args: string[], name: string): boolean {
   return args.includes(`--${name}`);
 }
 
+/**
+ * Every value of a repeatable `--name value` flag, in the order given.
+ *
+ * {@link flag} returns the first occurrence, which is the right answer for a
+ * flag that names one thing. A flag that names a SET (`--capability a
+ * --capability b`) needs all of them, and silently honouring only the first
+ * would narrow a filter the caller widened.
+ */
+export function flagAll(args: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== `--${name}`) continue;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new ValuelessFlagError(`--${name} has no value. Every flag needs one: --${name} "value".`);
+    }
+    out.push(value);
+  }
+  return out;
+}
+
 /** Positionals: tokens that are neither a `--flag` nor a flag's value. */
 export function positionals(args: string[]): string[] {
   return args.filter((a, i) => !a.startsWith("--") && !(args[i - 1] ?? "").startsWith("--"));

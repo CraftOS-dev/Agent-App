@@ -70,6 +70,7 @@ a2app <app> planning cards          # one entity: its fields and operations
 a2app <app> planning cards <id>     # one record, and what its state allows now
 a2app <app> data cards create --title "Buy milk" --due tomorrow
 a2app <app> --find invoice          # search names, get locations
+a2app <app> tasks next --wait 60000 # block until the app has work, claim it, print it
 ```
 
 `<app>` is a directory, a registered id/name, or an `http(s)` URL (a URL operates a remote app, with its identity verified and pinned).
@@ -81,6 +82,7 @@ agent-app <dir> scaffold            # framework files + ownership canon
 agent-app <dir> validate            # the validation + security gate
 agent-app <dir> serve               # launch via the manifest pipeline
 agent-app <dir> dev / promote       # safe-evolve: build on a hidden port, gate, promote with backup
+agent-app <dir> bridge start        # watch the app's task queue and trigger your harness
 agent-app list                      # every app with its port and live status
 ```
 
@@ -105,6 +107,14 @@ Both commands are machine-first: exit codes `0` success · `1` rejected · `2` u
 | **A2App** | **How do agents safely operate full stateful applications?** |
 
 Three pillars: **Describe** (the app publishes its own data model, operations, and conventions — generated live so it cannot drift, answered one level at a time so cost follows the task, not the app size) · **Guard** (the app validates every write before the backend touches it; no silent 200s) · **Receipt** (what the user is told is generated from the stored record, never composed by the model). Under hard budgets: every describe response ≤ 2,000 chars at any app size, a correct write in ≤ 2 round trips, every violation reported in one response.
+
+* * *
+
+## 🔁 When the app asks the agent for work
+
+The other direction. An app can put work in its own queue — a card fell overdue, a report is due, a user pressed "ask the agent" — and A2App carries that as an **event** and a **task**. What the protocol cannot do is make an agent turn up, because *triggering* is the one part of this that depends on the harness rather than on the app. The framework supplies that part, and it picks from a ladder, deepest integration first: an inbound endpoint the harness already exposes; the harness's one-shot headless CLI (`claude -p`, `codex exec`, `gemini -p`, `aider --message`) — universal, and the default; a local gateway the framework brings up itself; or, for a harness that can only poll, a listen command the harness runs in its own loop (`a2app <app> tasks next --wait`). When none of those exists, the framework says bi-directional operation is not supported here and names what would change it, rather than starting something that delivers nothing.
+
+Run it with `agent-app <dir> bridge start`; `agent-app <dir> bridge` first shows which rung this machine lands on. A task is claimed before it is delivered, so one task runs once no matter how many agents are watching, and every task reaches a terminal state the app can report from. See [framework/cli/](framework/cli/#bridge-the-appagent-direction).
 
 * * *
 

@@ -56,6 +56,8 @@ Flags: `--harness <id>`, `--interval <ms>` (default 5000), `--task-timeout <ms>`
 
 A profile lists whichever routes its harness offers, in any order; the ladder decides which one is used. `tokenEnv` names the environment variable holding a token — never the token itself, which would be a credential at rest in a hand-edited file.
 
+A `gateway` route needs `health` as well as `start`: without it there is no way to tell a gateway that is already up from one that needs starting, and starting a second copy of a running one is how ports get fought over. A gateway is a service, so it outlives the pass that started it and later runs reuse it — `bridge stop` takes down only a gateway owned by a long-running `bridge start`, and `--once` says the pid of any gateway it had to start.
+
 **What the bridge guarantees.**
 
 - **One run per task.** A task is claimed before it is delivered, so two bridges — or a bridge and a harness running `tasks next` — can watch one queue and each task still runs once. Whoever claims first owns it; everyone else gets 409 and moves on.

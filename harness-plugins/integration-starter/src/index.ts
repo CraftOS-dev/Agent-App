@@ -28,7 +28,7 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
  *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
 export const FRAMEWORK_VERBS = new Set([
   "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
-  "list", "global", "skills", "dev", "promote", "backup", "restore",
+  "list", "global", "skills", "dev", "promote", "backup", "restore", "remove", "forget",
 ]);
 
 /** The closed set of verbs that address every app rather than one, and so take
@@ -382,18 +382,16 @@ export function showAgentApp(ctx: HarnessContext, app: { id: string; name: strin
   ctx.registerDisplay?.({ id: `agent-app:${app.id}`, label: app.name, url: app.url });
 }
 
-// ── Entry-point form ────────────────────────────────────────────────────────
+// ── Entry-point kickoff ─────────────────────────────────────────────────────
 //
-// A harness with a real dashboard (OpenClaw's Control UI, dsh's iframe) can show
-// a FORM as the framework's front door — the CraftBot-style "what do you want to
-// build?" surface — instead of leaving the framework invisible until the agent
-// happens to pick a skill. The form is harness-neutral and READ-ONLY by design:
-// dashboard hosts frame plugin pages behind a GET/HEAD-only auth grant, so these
-// helpers never mutate anything. They produce the HTML and turn a submitted
-// request (query parameters on a GET) into a **kickoff prompt** that routes the
-// agent to the right skill with the user's context; the user hands that prompt
-// to the agent through the harness's own chat surface (e.g. the `/agent-app`
-// chat command). The host binding owns only serving the HTML over its HTTP route.
+// A harness with a real dashboard (OpenClaw's Control UI) can offer a front
+// door — the CraftBot-style "what do you want to build?" surface — instead of
+// leaving the framework invisible until the agent happens to pick a skill.
+// These helpers are the harness-neutral core of that surface: the app registry
+// read (listKnownApps) and the composition of a **kickoff prompt** that routes
+// the agent to the right skill with the user's context. The host binding owns
+// the UI itself and how the prompt reaches its agent (a chat command, a
+// session run, a copyable block — whatever that harness supports).
 
 /** Blueprints offered in the form's "Build new" stack dropdown. Kept in sync with
  *  the toolkits the CLI can scaffold; an unknown value is still accepted by the
@@ -485,118 +483,3 @@ export function buildKickoffPrompt(body: Record<string, unknown>): FormActionRes
   }
   return { kind: "error", message: `Unknown action "${action}".` };
 }
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
-}
-
-/**
- * The entry-point form as a single self-contained HTML document (inline CSS/JS,
- * no external assets — it renders in a sandboxed, READ-ONLY frame: hosts like
- * OpenClaw authenticate framed plugin pages with a GET/HEAD-only grant and no
- * form or clipboard permissions). The form therefore never POSTs and never
- * touches the clipboard: submitting navigates the frame to its own URL with the
- * fields as query parameters, the host composes the kickoff prompt server-side
- * (buildKickoffPrompt) and re-renders this page with the prompt in a
- * click-to-select textarea the user copies into the harness chat. Everything is
- * server-rendered — apps, selections, the prompt — so no data crosses into
- * script context.
- */
-export function agentAppFormHtml(opts: { apps?: KnownApp[]; values?: Record<string, string>; result?: FormActionResult } = {}): string {
-  const apps = opts.apps ?? [];
-  const values = opts.values ?? {};
-  const result = opts.result;
-  const active = values.action === "modify" || values.action === "operate" ? values.action : "build";
-  const requirement = str(values.requirement);
-  const blueprints = FRAMEWORK_BLUEPRINTS
-    .map((b) => `<option value="${esc(b)}"${b === values.blueprint ? " selected" : ""}>${esc(b)}</option>`)
-    .join("");
-  const appOptions = apps.length
-    ? apps
-        .map((a) => `<option value="${esc(a.path)}"${a.path === values.dir ? " selected" : ""}>${esc(`${a.name} (${a.path})${a.status ? ` · ${a.status}` : ""}`)}</option>`)
-        .join("")
-    : `<option value="">No known apps — build one first</option>`;
-  const tab = (mode: string, label: string) =>
-    `<button role="tab" data-mode="${mode}" aria-selected="${mode === active ? "true" : "false"}">${label}</button>`;
-  const panel = (mode: string) => `class="panel${mode === active ? " on" : ""}" data-panel="${mode}"`;
-  const resultHtml =
-    result == null
-      ? ""
-      : result.kind === "error"
-        ? `<div class="out err">${esc(result.message)}</div>`
-        : `<div class="out ok">${esc(result.message)}</div>
-<textarea class="prompt" readonly rows="12" onclick="this.select()">${esc(result.prompt)}</textarea>
-<p class="hint">Click the prompt to select it, copy it, and paste it into the chat — or send your request directly with <code>/agent-app &lt;what you want&gt;</code>.</p>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent Apps</title>
-<style>
-:root{color-scheme:light dark;--bg:#0b0c0e;--panel:#16181c;--line:#2a2e35;--fg:#e7e9ee;--mut:#9aa1ac;--acc:#5b8cff;--ok:#3fb950;--err:#f85149}
-*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-.wrap{max-width:640px;margin:0 auto;padding:24px 20px 48px}
-h1{font-size:18px;margin:0 0 4px}p.sub{color:var(--mut);margin:0 0 20px}
-.seg{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:20px}
-.seg button{flex:1;background:none;border:0;color:var(--mut);padding:8px;border-radius:7px;cursor:pointer;font:inherit}
-.seg button[aria-selected=true]{background:var(--acc);color:#fff}
-label{display:block;margin:14px 0 6px;font-weight:600}
-input,select,textarea{width:100%;background:var(--panel);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px;font:inherit}
-textarea{min-height:110px;resize:vertical}
-.row{display:flex;gap:12px}.row>*{flex:1}
-button.go{margin-top:18px;width:100%;background:var(--acc);color:#fff;border:0;border-radius:8px;padding:12px;font:inherit;font-weight:600;cursor:pointer}
-.panel{display:none}.panel.on{display:block}
-.out{margin-top:20px;font-weight:600}.out.ok{color:var(--ok)}.out.err{color:var(--err)}
-textarea.prompt{margin-top:10px;min-height:0;background:#000;color:#cdd3dc;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap}
-p.hint{color:var(--mut);margin:8px 0 0}code{color:var(--fg)}
-</style></head><body><div class="wrap">
-<h1>Agent Apps</h1><p class="sub">Build, evolve, or operate a full-stack app the agent drives through A2App.</p>
-<div class="seg" role="tablist">
-  ${tab("build", "Build new")}
-  ${tab("modify", "Evolve")}
-  ${tab("operate", "Operate")}
-</div>
-
-<section ${panel("build")}>
-  <label for="b-name">App name</label>
-  <input id="b-name" placeholder="Acme CRM" autocomplete="off" value="${esc(str(values.name))}">
-  <label for="b-req">What should it do?</label>
-  <textarea id="b-req" placeholder="Track contacts, companies, and deals. A pipeline board, per-contact activity log, and a weekly summary.">${active === "build" ? esc(requirement) : ""}</textarea>
-  <div class="row">
-    <div><label for="b-bp">Stack</label><select id="b-bp">${blueprints}</select></div>
-    <div><label for="b-port">Port (optional)</label><input id="b-port" type="number" placeholder="8110" autocomplete="off" value="${esc(str(values.port))}"></div>
-  </div>
-  <button class="go" data-submit="build">Compose build prompt</button>
-</section>
-
-<section ${panel("modify")}>
-  <label for="m-app">App</label><select id="m-app">${appOptions}</select>
-  <label for="m-req">Change to make</label>
-  <textarea id="m-req" placeholder="Add a monthly revenue report to the dashboard.">${active === "modify" ? esc(requirement) : ""}</textarea>
-  <button class="go" data-submit="modify">Compose evolve prompt</button>
-</section>
-
-<section ${panel("operate")}>
-  <label for="o-app">App</label><select id="o-app">${appOptions}</select>
-  <label for="o-req">Task</label>
-  <textarea id="o-req" placeholder="Add 12 sample contacts and mark the 3 oldest deals as won.">${active === "operate" ? esc(requirement) : ""}</textarea>
-  <button class="go" data-submit="operate">Compose operate prompt</button>
-</section>
-
-${resultHtml}
-</div>
-<script>
-document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-selected',String(x===b)));
-  document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.dataset.panel===b.dataset.mode));
-});
-function val(id){return document.getElementById(id).value;}
-document.querySelectorAll('button[data-submit]').forEach(btn=>btn.onclick=()=>{
-  const action=btn.dataset.submit;
-  const p=new URLSearchParams({action});
-  if(action==='build'){p.set('name',val('b-name'));p.set('requirement',val('b-req'));p.set('blueprint',val('b-bp'));p.set('port',val('b-port'));}
-  if(action==='modify'){p.set('dir',val('m-app'));p.set('requirement',val('m-req'));}
-  if(action==='operate'){p.set('dir',val('o-app'));p.set('requirement',val('o-req'));}
-  location.assign('?'+p.toString());
-});
-</script></body></html>`;
-}
-

@@ -5,7 +5,7 @@ Per-harness **plugins**: each exposes the framework in the harness's own plugin 
 | Directory | Harness | Language / API | What it registers |
 |---|---|---|---|
 | [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 14 build+operate tools, skills, display, and `runA2App`; every plugin below uses it |
-| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | `/agent-app` chat command (the action path) + `agent-app` CLI + a read-only "Agent Apps" entry-form Control-UI tab + a launched-app tab + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
+| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel, and a build form that starts the agent run directly) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
 | [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)` | 11 tools via `ctx.register_tool(...)` |
 | [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 11 tools via `ctx.tools.register(defineTool(...))`; a browser iframe renderer |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 11 actions in the `agent_app` action set |

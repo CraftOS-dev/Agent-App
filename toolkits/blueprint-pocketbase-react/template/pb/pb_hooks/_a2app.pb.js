@@ -52,3 +52,9 @@ routerAdd("GET", "/api/_a2app/describe/{p1}/{p2}/{p3}/{p4}", (e) =>
 // its `guard`, which either throws an ApiError (rejection) or calls `e.next()`.
 onRecordCreateRequest((e) => require(`${__hooks}/_a2app_impl.js`).guard(e));
 onRecordUpdateRequest((e) => require(`${__hooks}/_a2app_impl.js`).guard(e));
+
+// Delete was the unhooked one. An app that guards deletion inside an operation
+// guards its own UI; the native records route is the other way in, and it went
+// straight to the store — so the rule held until an agent took the path it did
+// not cover, and the orphan that left was reported as a successful delete.
+onRecordDeleteRequest((e) => require(`${__hooks}/_a2app_impl.js`).deleteGuard(e));

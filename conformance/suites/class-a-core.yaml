@@ -376,3 +376,69 @@ checks:
     expect:
       status: 404
       match: { a2app: true, ok: false, code: unknown_operation }
+
+  # --- Deletion: the app's referential rules bind the generic route too -------
+  # Self-contained (creates what it deletes) so it does not depend on seed data
+  # or on where in the suite it runs.
+  #
+  # This route is the second door. An app that guards deletion inside an
+  # operation guards its own UI; `a2app <app> data <entity> delete <id>` arrives
+  # here, and before this it went straight to the store — so the rule held until
+  # an agent took the path the rule did not cover, and the orphan it left was
+  # reported as a successful delete.
+
+  - name: a list and a card that references it
+    request:
+      method: POST
+      path: /api/collections/lists/records
+      token: full
+      body: { title: "Doomed", position: 9 }
+    expect:
+      status: 200
+      save: { doomedList: id }
+
+  - name: the card that points at it
+    request:
+      method: POST
+      path: /api/collections/cards/records
+      token: full
+      body: { title: "Holds a reference", list: "${doomedList}" }
+    expect:
+      status: 200
+      save: { holdingCard: id }
+
+  - name: deleting the referenced list is refused, naming what blocks it
+    request: { method: DELETE, path: "/api/collections/lists/records/${doomedList}", token: full }
+    expect:
+      status: 409
+      match:
+        a2app: true
+        ok: false
+        code: record_referenced
+        referencedBy.0.entity: cards
+        referencedBy.0.field: list
+      has: [resolution]
+
+  - name: and the list is still there — the refusal left nothing half-done
+    request: { method: GET, path: "/api/collections/lists/records/${doomedList}", token: full }
+    expect:
+      status: 200
+      match: { id: "${doomedList}" }
+
+  - name: removing the reference removes the block
+    request: { method: DELETE, path: "/api/collections/cards/records/${holdingCard}", token: full }
+    expect:
+      status: 200
+      match: { ok: true }
+
+  - name: and now the list deletes
+    request: { method: DELETE, path: "/api/collections/lists/records/${doomedList}", token: full }
+    expect:
+      status: 200
+      match: { ok: true, deleted: "${doomedList}" }
+
+  - name: deleting a record that does not exist is 404, not 409
+    request: { method: DELETE, path: /api/collections/lists/records/list_nope, token: full }
+    expect:
+      status: 404
+      match: { code: record_not_found }

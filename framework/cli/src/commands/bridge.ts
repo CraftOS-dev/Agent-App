@@ -293,6 +293,20 @@ async function start(args: string[], app: string, project: Project): Promise<num
     }
     log.ok(up.detail);
     gatewayPid = up.pid;
+    // A gateway outlives the run that started it, and only a LONG-RUNNING bridge
+    // records its pid (in `.a2app/bridge.json`, for `bridge stop`). A one-shot
+    // pass clears that record on the way out, so a gateway it started would be
+    // left with nothing tracking it. That is the right behaviour — a gateway is
+    // a service, and a cron'd `--once` should reuse it rather than restart it
+    // every time — but it must be said, or the process becomes unstoppable by
+    // anything except the task manager.
+    if ((once || dryRun) && gatewayPid !== undefined) {
+      log.warn(
+        `this pass started the gateway (pid ${gatewayPid}) and it keeps running after the pass ends — ` +
+          `later runs reuse it. \`bridge stop\` only takes down a gateway that a long-running ` +
+          `\`bridge start\` owns, so stop this one by its pid when you are done with it.`,
+      );
+    }
   }
 
   const ctx: BridgeContext = {

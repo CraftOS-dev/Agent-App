@@ -677,6 +677,92 @@ await withApp([task("tsk_refused", "summarize", {})], async ({ port, state }) =>
   remove(dir);
 });
 
+/* ------------ rung 3: a gateway that is not up yet, brought up by the bridge */
+
+await withApp([task("tsk_gw", "summarize", {})], async ({ port, state }) => {
+  const dir = makeAppDir(port);
+  // A port nothing is on yet — the gateway will claim it when the bridge starts
+  // it. Picked by binding and releasing, the same way the framework picks the
+  // dev instance's hidden port.
+  const probe = createServer();
+  await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+  const gwPort = probe.address().port;
+  await new Promise((r) => probe.close(r));
+
+  // The gateway itself: a process the framework is expected to launch, which
+  // then answers a health url and accepts triggers.
+  const gateway = join(dir, "gateway.mjs");
+  writeFileSync(
+    gateway,
+    [
+      `import { createServer } from "node:http";`,
+      `import { writeFileSync, appendFileSync } from "node:fs";`,
+      `writeFileSync(${JSON.stringify(join(dir, "gateway.pid"))}, String(process.pid));`,
+      `createServer((req, res) => {`,
+      `  if (req.url === "/up") { res.writeHead(200).end("{}"); return; }`,
+      `  let body = "";`,
+      `  req.on("data", (c) => (body += c));`,
+      `  req.on("end", () => {`,
+      `    appendFileSync(${JSON.stringify(join(dir, "gateway-received.jsonl"))}, body + "\\n");`,
+      `    res.writeHead(202, { "content-type": "application/json" });`,
+      `    res.end(JSON.stringify({ accepted: true }));`,
+      `  });`,
+      `}).listen(${gwPort}, "127.0.0.1");`,
+    ].join("\n"),
+  );
+
+  const home = makeHome(
+    [
+      {
+        id: "gated",
+        routes: [
+          {
+            mode: "gateway",
+            url: `http://127.0.0.1:${gwPort}/run`,
+            health: `http://127.0.0.1:${gwPort}/up`,
+            start: `"${process.execPath}" "${gateway}"`,
+            readyMs: 15000,
+          },
+        ],
+      },
+    ],
+    "gated",
+  );
+
+  // Nothing is listening yet, so this only works if the framework starts the
+  // gateway itself — which is the whole of rung 3.
+  ok("the gateway is not up before the bridge runs", !existsSync(join(dir, "gateway.pid")));
+
+  const res = await cli(AGENT_APP, [dir, "bridge", "start", "--once"], { A2APP_HOME: home });
+  check("the pass succeeds", res.code, 0);
+  check("…via the gateway rung", firstJson(res.stdout)?.mode, "gateway");
+  check("…delivering the task", firstJson(res.stdout)?.delivered, 1);
+  ok("…having started the gateway itself", existsSync(join(dir, "gateway.pid")));
+
+  const lines = readFileSync(join(dir, "gateway-received.jsonl"), "utf8").trim().split("\n");
+  check("the gateway received exactly one trigger", lines.length, 1);
+  const payload = JSON.parse(lines[0]);
+  check("…naming the task", payload.task?.id, "tsk_gw");
+  ok("…with the rendered prompt beside it", String(payload.prompt).includes("tsk_gw"));
+  // Same handoff rule as rung 1: an acknowledgement is not a completion.
+  check("…and the task is left open for the harness to close", state.get("tsk_gw").status, "working");
+
+  // A gateway already up is reused rather than started a second time: two
+  // copies would fight over the port.
+  const again = await cli(AGENT_APP, [dir, "bridge"], { A2APP_HOME: home });
+  const rung = firstJson(again.stdout)?.ladder?.find((r) => r.mode === "gateway");
+  ok("a running gateway is reported as already up, not as one to start", String(rung?.detail).includes("already up"));
+
+  const gwPid = Number(readFileSync(join(dir, "gateway.pid"), "utf8"));
+  try {
+    process.kill(gwPid);
+  } catch {
+    /* already gone */
+  }
+  remove(home);
+  remove(dir);
+});
+
 /* ------------------------------ the detached daemon: start, status, stop */
 
 await withApp([], async ({ port }) => {

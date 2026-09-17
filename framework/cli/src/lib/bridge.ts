@@ -640,6 +640,21 @@ export async function pumpOnce(ctx: BridgeContext, stopped: () => boolean): Prom
   return result;
 }
 
+/**
+ * Wait `ms`, but wake as soon as `stopped()` turns true.
+ *
+ * One long `setTimeout` between passes would make a stop take up to a whole
+ * poll interval to be noticed — Ctrl-C that appears to hang, and a `bridge stop`
+ * that falls through to a force-kill because the process did not exit in time.
+ * Slicing the wait costs a few no-op timers and makes stopping immediate.
+ */
+async function sleepUntilStopped(ms: number, stopped: () => boolean): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !stopped()) {
+    await new Promise((r) => setTimeout(r, Math.min(200, deadline - Date.now())));
+  }
+}
+
 /** Poll until stopped. `intervalMs` is the gap between passes, not a deadline. */
 export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: () => boolean): Promise<void> {
   while (!stopped()) {
@@ -652,7 +667,7 @@ export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: 
       log.warn(`poll failed: ${(err as Error).message}`);
     }
     if (stopped()) break;
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await sleepUntilStopped(intervalMs, stopped);
   }
 }
 

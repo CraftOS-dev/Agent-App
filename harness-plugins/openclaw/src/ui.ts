@@ -60,23 +60,24 @@ body{margin:0;font:400 14px/1.55 var(--font);letter-spacing:-0.01em;background:v
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{font:inherit;letter-spacing:inherit;cursor:pointer}
 
-/* ── Tab strip ─────────────────────────────────────────── */
-.tabbar{display:flex;align-items:flex-end;gap:2px;padding:8px 10px 0;background:var(--bg);border-bottom:1px solid var(--border);flex:none;overflow-x:auto;scrollbar-width:none}
+/* ── Tab strip (Chrome-style: slim, rounded-top, merging into content) ── */
+.tabbar{display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--bg);border-bottom:1px solid var(--border);flex:none;overflow-x:auto;scrollbar-width:none}
 .tabbar::-webkit-scrollbar{display:none}
-.tab{display:flex;align-items:center;gap:8px;max-width:220px;min-width:0;padding:7px 12px;border:1px solid transparent;border-bottom:none;border-radius:var(--radius-md) var(--radius-md) 0 0;background:transparent;color:var(--muted);font-size:13px;font-weight:550;white-space:nowrap}
-.tab:hover{color:var(--text);background:color-mix(in srgb,var(--bg-hover) 60%,transparent)}
+.tab{position:relative;display:flex;align-items:center;gap:7px;max-width:200px;min-width:0;height:30px;padding:0 11px;border:1px solid transparent;border-bottom:none;border-radius:8px 8px 0 0;background:transparent;color:var(--muted);font-size:12px;font-weight:550;white-space:nowrap}
+.tab:not(.active):not(:hover)+.tab:not(.active):not(:hover)::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:1px;background:var(--border-strong)}
+.tab:hover{color:var(--text);background:color-mix(in srgb,var(--bg-hover) 70%,transparent)}
 .tab.active{background:var(--surface);border-color:var(--border);color:var(--text-strong);box-shadow:0 1px 0 var(--surface)}
 .tab.offline{color:var(--muted)}
 .tab.offline .tab-name{opacity:0.55}
 .tab.active.offline .tab-name{opacity:0.7}
 .tab-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
-.tab .dot{flex:none;width:8px;height:8px;border-radius:var(--radius-full)}
-.dot.ok{background:var(--ok);box-shadow:0 0 8px color-mix(in srgb,var(--ok) 50%,transparent)}
-.dot.warn{background:var(--warn);box-shadow:0 0 8px color-mix(in srgb,var(--warn) 50%,transparent)}
+.tab .dot{flex:none;width:6px;height:6px;border-radius:var(--radius-full)}
+.dot.ok{background:var(--ok);box-shadow:0 0 6px color-mix(in srgb,var(--ok) 50%,transparent)}
+.dot.warn{background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 50%,transparent)}
 .dot.off{background:var(--muted);opacity:0.5}
 .dot.busy{background:var(--warn);animation:pulse 1.4s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
-.tab-more{flex:none;display:none;align-items:center;justify-content:center;width:20px;height:20px;border:none;border-radius:var(--radius-sm);background:transparent;color:var(--muted);padding:0;line-height:1}
+.tab-more{flex:none;display:none;align-items:center;justify-content:center;width:18px;height:18px;border:none;border-radius:var(--radius-sm);background:transparent;color:var(--muted);padding:0;line-height:1;font-size:12px}
 .tab.active .tab-more{display:inline-flex}
 .tab-more:hover{background:var(--bg-hover);color:var(--text-strong)}
 .tab.newtab{margin-left:auto;flex:none;color:var(--muted);font-weight:600}
@@ -127,8 +128,11 @@ textarea.input{min-height:120px;resize:vertical}
 .err{margin-top:12px;font-size:13px;font-weight:600;color:var(--danger)}
 .buildstamp{margin:16px 0 0;font-size:11px;color:var(--muted);opacity:0.7}
 
-/* ── Session sidebar ───────────────────────────────────── */
-#side{width:380px;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}
+/* ── Session sidebar (drag its left edge to resize) ────── */
+#resizer{flex:none;width:5px;margin:0 -2px;cursor:col-resize;background:transparent;z-index:5;touch-action:none}
+#resizer:hover,#resizer.dragging{background:color-mix(in srgb,var(--accent) 35%,transparent)}
+#resizer[hidden]{display:none}
+#side{width:380px;min-width:280px;max-width:70vw;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}
 #side[hidden]{display:none}
 .side-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);flex:none}
 .side-head .t{font-size:12px;font-weight:600;color:var(--text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
@@ -137,15 +141,24 @@ textarea.input{min-height:120px;resize:vertical}
 .side-close:hover{background:var(--bg-hover);color:var(--text-strong)}
 #log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
 .msg{max-width:100%;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
-.msg .who{font-size:10px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
-.msg.user{border-left:2px solid var(--accent);padding-left:10px}
-.msg.user .who{color:var(--accent)}
-.msg.other{color:var(--muted);font-size:12px}
+.msg.user{align-self:flex-end;max-width:88%;background:var(--accent-subtle);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);border-radius:14px 14px 4px 14px;padding:8px 12px;color:var(--text-strong)}
+.msg.assistant{align-self:flex-start;max-width:95%;color:var(--text)}
+.toolsline{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;font-weight:550}
+.toolsline::before{content:"\\2261";font-size:13px;opacity:0.7}
+.toolrow{max-width:100%}
+.toolrow summary{cursor:pointer;color:var(--muted);font-size:11px;font-weight:550;user-select:none}
+.toolrow summary:hover{color:var(--text)}
+.toolrow pre{font:11px/1.5 var(--mono);color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;margin:6px 0 0;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .log-empty{margin:auto;text-align:center;color:var(--muted);font-size:13px}
-.composer{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--border);flex:none}
-.composer textarea{flex:1;min-height:38px;max-height:140px;resize:none;padding:8px 10px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--elevated);color:var(--text);font:inherit;font-size:13px}
-.composer textarea:focus-visible{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,var(--border) 45%)}
-.composer .btn{flex:none;align-self:flex-end}
+.composer{padding:10px 12px 12px;border-top:1px solid var(--border);flex:none}
+.composer-box{display:flex;align-items:flex-end;gap:8px;border:1px solid var(--border);background:var(--elevated);border-radius:var(--radius-lg);padding:7px 7px 7px 12px;transition:border-color var(--duration-fast) var(--ease)}
+.composer-box:focus-within{border-color:color-mix(in srgb,var(--accent) 55%,var(--border) 45%);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 14%,transparent)}
+.composer-box textarea{flex:1;min-width:0;max-height:160px;resize:none;border:none;background:transparent;color:var(--text);font:inherit;font-size:13px;line-height:1.45;padding:4px 0;outline:none}
+.composer-box textarea::placeholder{color:var(--muted)}
+.send{flex:none;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius-full);border:1px solid var(--accent);background:var(--primary);color:#fff;padding:0;transition:background var(--duration-fast) var(--ease),opacity var(--duration-fast) var(--ease)}
+.send:hover:not(:disabled){background:var(--accent-hover)}
+.send:disabled{cursor:default;border-color:var(--border);background:var(--bg-hover);color:var(--muted);opacity:0.7}
+.send svg{display:block}
 .spinner{width:22px;height:22px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:var(--radius-full);animation:spin 0.8s linear infinite;margin:0 auto 14px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .cfgline{font:12px/1.6 var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;color:var(--text);user-select:all}
@@ -153,10 +166,14 @@ textarea.input{min-height:120px;resize:vertical}
 <header class="tabbar" id="tabbar"></header>
 <main>
   <section id="view"><div id="frames"></div><div id="panel" class="center" hidden></div></section>
+  <div id="resizer" hidden></div>
   <aside id="side" hidden>
     <div class="side-head"><span class="t" id="side-title"></span><span class="s">session</span><button class="side-close" id="side-close" title="Close">&#10005;</button></div>
     <div id="log"></div>
-    <div class="composer"><textarea id="chat-in" placeholder="Ask for a change, a task, a report&hellip;"></textarea><button class="btn primary" id="chat-send">Send</button></div>
+    <div class="composer"><div class="composer-box">
+      <textarea id="chat-in" rows="1" placeholder="Ask for a change, a task, a report&hellip;"></textarea>
+      <button class="send" id="chat-send" title="Send" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button>
+    </div></div>
   </aside>
 </main>
 <div id="menu" hidden></div>
@@ -389,40 +406,81 @@ async function pollLog() {
   const out = await r.json();
   if (out.ok && S.side) { S.log = out.messages; renderLog(); }
 }
+function prettify(text) {
+  try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+}
 function renderLog() {
   const log = document.getElementById("log");
   const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
   log.replaceChildren();
   if (!S.log.length) { log.appendChild(el("div", "log-empty", "No session activity yet.")); return; }
   for (const m of S.log.slice(-200)) {
-    const cls = m.role === "user" ? "user" : m.role === "assistant" ? "assistant" : "other";
-    const d = el("div", "msg " + cls);
-    d.appendChild(el("div", "who", m.role));
-    d.appendChild(el("div", null, m.text));
-    log.appendChild(d);
+    const tools = m.tools ?? [];
+    if (m.role === "user") {
+      log.appendChild(el("div", "msg user", m.text));
+    } else if (m.role === "assistant") {
+      if (tools.length) log.appendChild(el("div", "toolsline", "Used " + tools.join(", ")));
+      if (m.text) log.appendChild(el("div", "msg assistant", m.text));
+    } else {
+      // tool / toolResult / system: a collapsed row, payload pretty-printed on demand
+      const d = document.createElement("details");
+      d.className = "toolrow";
+      d.appendChild(el("summary", null, tools[0] ?? (m.role === "system" ? "System" : "Tool result")));
+      d.appendChild(el("pre", null, prettify(m.text)));
+      log.appendChild(d);
+    }
   }
   if (stick) log.scrollTop = log.scrollHeight;
 }
+const chatIn = document.getElementById("chat-in");
+const chatSend = document.getElementById("chat-send");
 async function sendChat() {
-  const input = document.getElementById("chat-in");
-  const text = input.value.trim();
+  const text = chatIn.value.trim();
   if (!text || !S.sideRow || S.sending) return;
-  S.sending = true; input.value = "";
+  S.sending = true;
+  chatIn.value = ""; chatIn.style.height = "auto"; chatSend.disabled = true;
   S.log.push({ role: "user", text }); renderLog();
   try { await api("/session/send", { path: S.sideRow.path, name: S.sideRow.name, text }); }
   finally { S.sending = false; }
 }
-document.getElementById("chat-send").onclick = sendChat;
-document.getElementById("chat-in").addEventListener("keydown", (e) => {
+chatSend.onclick = sendChat;
+chatIn.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+chatIn.addEventListener("input", () => {
+  chatSend.disabled = !chatIn.value.trim();
+  chatIn.style.height = "auto";
+  chatIn.style.height = Math.min(chatIn.scrollHeight, 160) + "px";
+});
+
+/* ── Sidebar resize (drag the divider) ─────────────────── */
+const resizer = document.getElementById("resizer");
+const sideEl = document.getElementById("side");
+resizer.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  resizer.setPointerCapture(e.pointerId);
+  resizer.classList.add("dragging");
+  const startX = e.clientX;
+  const startW = sideEl.getBoundingClientRect().width;
+  const move = (ev) => {
+    const w = Math.min(innerWidth * 0.7, Math.max(280, startW + (startX - ev.clientX)));
+    sideEl.style.width = w + "px";
+  };
+  const up = () => {
+    resizer.classList.remove("dragging");
+    resizer.removeEventListener("pointermove", move);
+    resizer.removeEventListener("pointerup", up);
+  };
+  resizer.addEventListener("pointermove", move);
+  resizer.addEventListener("pointerup", up);
 });
 
 /* ── Render root ───────────────────────────────────────── */
 function render() {
   renderTabs();
   renderView();
-  const side = document.getElementById("side");
-  side.hidden = !S.side;
+  document.getElementById("side").hidden = !S.side;
+  document.getElementById("resizer").hidden = !S.side;
   if (S.side && S.sideRow) document.getElementById("side-title").textContent = S.sideRow.name;
 }
 

@@ -219,7 +219,7 @@ export default definePluginEntry({
             const path = url.searchParams.get("app") ?? "";
             const got = await subagent.getSessionMessages({ sessionKey: sessionKeyFor(path), limit: 200 });
             res.statusCode = 200;
-            res.end(JSON.stringify({ ok: true, messages: got.messages.map(viewMessage).filter((m) => m.text !== "") }));
+            res.end(JSON.stringify({ ok: true, messages: got.messages.map(viewMessage).filter((m) => m.text !== "" || m.tools.length > 0) }));
           } catch (e) {
             res.statusCode = 500;
             res.end(JSON.stringify({ ok: false, message: String((e as Error)?.message ?? e) }));
@@ -282,17 +282,27 @@ export default definePluginEntry({
       return { status: 200, out: { ok: true, path: dir } };
     }
 
-    /** Render-ready view of a session message: role + concatenated text parts. */
-    function viewMessage(m: unknown): { role: string; text: string } {
+    /** Render-ready view of a transcript message (roles: user / assistant /
+     *  tool / toolResult / system; content: string or typed parts). Text parts
+     *  concatenate; tool names collect so the page can render tool activity as
+     *  collapsed rows the way OpenClaw's chat does. */
+    function viewMessage(m: unknown): { role: string; text: string; tools: string[] } {
       const r = m as Record<string, unknown>;
       const role = typeof r.role === "string" ? r.role : "";
       const c = r.content;
-      const text = typeof c === "string"
-        ? c
-        : Array.isArray(c)
-          ? c.map((p) => { const q = p as Record<string, unknown>; return typeof q.text === "string" ? q.text : ""; }).join("")
-          : "";
-      return { role, text };
+      const texts: string[] = [];
+      const tools: string[] = [];
+      if (typeof c === "string") texts.push(c);
+      else if (Array.isArray(c)) {
+        for (const p of c) {
+          const q = p as Record<string, unknown>;
+          if (typeof q.text === "string") texts.push(q.text);
+          const name = typeof q.name === "string" ? q.name : typeof q.toolName === "string" ? q.toolName : "";
+          if (name) tools.push(name);
+        }
+      }
+      if (typeof r.toolName === "string") tools.push(r.toolName);
+      return { role, text: texts.join(""), tools };
     }
 
     function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {

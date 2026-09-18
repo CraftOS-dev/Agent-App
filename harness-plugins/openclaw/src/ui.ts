@@ -153,7 +153,8 @@ textarea.input{min-height:120px;resize:vertical}
 .composer{padding:10px 12px 12px;border-top:1px solid var(--border);flex:none}
 .composer-box{display:flex;align-items:flex-end;gap:8px;border:1px solid var(--border);background:var(--elevated);border-radius:var(--radius-lg);padding:7px 7px 7px 12px;transition:border-color var(--duration-fast) var(--ease)}
 .composer-box:focus-within{border-color:color-mix(in srgb,var(--accent) 55%,var(--border) 45%);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 14%,transparent)}
-.composer-box textarea{flex:1;min-width:0;max-height:160px;resize:none;border:none;background:transparent;color:var(--text);font:inherit;font-size:13px;line-height:1.45;padding:4px 0;outline:none}
+/* max-height = 6 rows: 6 × (13px × 1.45 line-height) + 4px padding top/bottom */
+.composer-box textarea{flex:1;min-width:0;max-height:122px;resize:none;border:none;background:transparent;color:var(--text);font:inherit;font-size:13px;line-height:1.45;padding:4px 0;outline:none}
 .composer-box textarea::placeholder{color:var(--muted)}
 .send{flex:none;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius-full);border:1px solid var(--accent);background:var(--primary);color:#fff;padding:0;transition:background var(--duration-fast) var(--ease),opacity var(--duration-fast) var(--ease)}
 .send:hover:not(:disabled){background:var(--accent-hover)}
@@ -182,7 +183,7 @@ textarea.input{min-height:120px;resize:vertical}
 "use strict";
 const CFG = JSON.parse(document.getElementById("cfg").textContent);
 const OPAQUE = self.origin === "null";
-const S = { rows: [], active: null, side: false, sideRow: null, log: [], sending: false, busy: new Set(), confirmDelete: null };
+const S = { rows: [], active: null, side: false, log: [], sending: false, busy: new Set(), confirmDelete: null };
 
 function api(path, body) {
   const opts = { method: body ? "POST" : "GET", headers: { "x-a2app-token": CFG.token } };
@@ -202,7 +203,6 @@ async function refresh() {
   S.rows = data.rows;
   if (S.active === null) S.active = S.rows.length ? S.rows[0].path : "new";
   if (S.active !== "new" && !S.rows.some((r) => r.path === S.active)) S.active = S.rows.length ? S.rows[0].path : "new";
-  if (S.sideRow) { const cur = S.rows.find((r) => r.path === S.sideRow.path); if (cur) S.sideRow = cur; }
   render();
 }
 function activeRow() { return S.rows.find((r) => r.path === S.active) ?? null; }
@@ -240,7 +240,7 @@ function openMenu(r, anchor) {
   const item = (label, cls, fn) => { const b = el("button", cls, label); b.onclick = fn; m.appendChild(b); };
   if (r.status === "running") item("Pause", "", () => { closeMenu(); act(r, "stop"); });
   else if (!r.building) item("Launch", "", () => { closeMenu(); act(r, "serve"); });
-  item(S.side && S.sideRow && S.sideRow.path === r.path ? "Hide session" : "Show session", "", () => { closeMenu(); toggleSide(r); });
+  item(S.side ? "Hide session" : "Show session", "", () => { closeMenu(); toggleSide(); });
   m.appendChild(el("hr"));
   if (S.confirmDelete === r.path) {
     item("Confirm delete \\u2014 removes files", "danger", () => { closeMenu(); removeApp(r); });
@@ -264,7 +264,6 @@ async function act(r, verb) {
 async function removeApp(r) {
   S.busy.add(r.path); render();
   try { await api("/app/remove", { path: r.path }); } finally { S.busy.delete(r.path); }
-  if (S.sideRow && S.sideRow.path === r.path) { S.side = false; S.sideRow = null; }
   S.active = null;
   await refresh();
 }
@@ -296,7 +295,7 @@ function renderView() {
     ? "frame:" + r.path
     : S.active === "new" || !r
       ? "new"
-      : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side && S.sideRow ? S.sideRow.path : ""].join("|");
+      : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side].join("|");
   if (key === viewKey) return;
   viewKey = key;
   if (showFrame) return;
@@ -311,9 +310,9 @@ function appPanel(r) {
     c.appendChild(el("div", "spinner"));
     c.appendChild(el("h2", null, "The agent is building \\u201C" + r.name + "\\u201D"));
     c.appendChild(el("p", "sub", "It scaffolds, builds feature by feature, validates, walk-verifies, and serves the app. Watch it work in the session panel \\u2014 the tab goes live the moment the app is up."));
-    if (!S.side || !S.sideRow || S.sideRow.path !== r.path) {
+    if (!S.side) {
       const b = el("button", "btn", "Show session");
-      b.onclick = () => toggleSide(r);
+      b.onclick = () => toggleSide(true);
       c.appendChild(b);
     }
     return c;
@@ -341,7 +340,7 @@ function appPanel(r) {
   launch.onclick = () => act(r, "serve");
   row.appendChild(launch);
   const sess = el("button", "btn", "Show session");
-  sess.onclick = () => toggleSide(r);
+  sess.onclick = () => toggleSide(true);
   row.appendChild(sess);
   c.appendChild(row);
   return c;
@@ -387,60 +386,91 @@ async function submitBuild(btn) {
   if (!out.ok) { err.textContent = out.message; btn.disabled = false; btn.textContent = "Build it"; return; }
   S.active = out.path;
   await refresh();
-  const row = activeRow();
-  if (row) toggleSide(row, true);
+  toggleSide(true);
 }
 
 /* ── Session sidebar ───────────────────────────────────── */
-function toggleSide(r, forceOpen) {
-  if (S.side && !forceOpen && S.sideRow && S.sideRow.path === r.path) { S.side = false; S.sideRow = null; }
-  else { S.side = true; S.sideRow = r; S.log = []; pollLog(); }
+function toggleSide(force) {
+  S.side = force === true ? true : !S.side;
   render();
 }
-document.getElementById("side-close").onclick = () => { S.side = false; S.sideRow = null; render(); };
+document.getElementById("side-close").onclick = () => { S.side = false; render(); };
 async function pollLog() {
-  if (!S.side || !S.sideRow) return;
+  const row = S.side ? activeRow() : null;
+  if (!row) return;
   // Transcript reads ride the Control-UI cookie grant on the gateway route:
   // a bare GET with credentials, nothing that would trigger a preflight.
-  const r = await fetch(CFG.homeBase + "/session?app=" + encodeURIComponent(S.sideRow.path), { credentials: "include" });
+  const r = await fetch(CFG.homeBase + "/session?app=" + encodeURIComponent(row.path), { credentials: "include" });
   const out = await r.json();
-  if (out.ok && S.side) { S.log = out.messages; renderLog(); }
+  if (out.ok && S.side && activeRow()?.path === row.path) { S.log = out.messages; renderLog(); }
 }
 function prettify(text) {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
+// One transcript item can render as up to two nodes (tools line + text).
+function nodesFor(m, i) {
+  const tools = m.tools ?? [];
+  const out = [];
+  if (m.role === "user") {
+    out.push(el("div", "msg user", m.text));
+  } else if (m.role === "assistant") {
+    if (tools.length) out.push(el("div", "toolsline", "Used " + tools.join(", ")));
+    if (m.text) out.push(el("div", "msg assistant", m.text));
+  } else {
+    // tool / toolResult / system: a collapsed row, payload pretty-printed on demand
+    const d = document.createElement("details");
+    d.className = "toolrow";
+    d.dataset.i = String(i);
+    d.appendChild(el("summary", null, tools[0] ?? (m.role === "system" ? "System" : "Tool result")));
+    d.appendChild(el("pre", null, prettify(m.text)));
+    out.push(d);
+  }
+  return out;
+}
+// The transcript is append-only, so polling must never rebuild what is already
+// on screen — that would collapse expanded tool rows and kill text selection.
+// Unchanged → untouched; grown → append only; rewritten (rare) → rebuild with
+// expanded rows restored by position.
+let logKeys = [];
+const itemKey = (m) => m.role + "\\u001f" + m.text + "\\u001f" + (m.tools ?? []).join(",");
+function resetLogView() {
+  logKeys = [];
+  document.getElementById("log").replaceChildren();
+}
 function renderLog() {
   const log = document.getElementById("log");
-  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
-  log.replaceChildren();
-  if (!S.log.length) { log.appendChild(el("div", "log-empty", "No session activity yet.")); return; }
-  for (const m of S.log.slice(-200)) {
-    const tools = m.tools ?? [];
-    if (m.role === "user") {
-      log.appendChild(el("div", "msg user", m.text));
-    } else if (m.role === "assistant") {
-      if (tools.length) log.appendChild(el("div", "toolsline", "Used " + tools.join(", ")));
-      if (m.text) log.appendChild(el("div", "msg assistant", m.text));
-    } else {
-      // tool / toolResult / system: a collapsed row, payload pretty-printed on demand
-      const d = document.createElement("details");
-      d.className = "toolrow";
-      d.appendChild(el("summary", null, tools[0] ?? (m.role === "system" ? "System" : "Tool result")));
-      d.appendChild(el("pre", null, prettify(m.text)));
-      log.appendChild(d);
-    }
+  const items = S.log.slice(-200);
+  if (!items.length) {
+    if (logKeys.length || !log.childElementCount) { logKeys = []; log.replaceChildren(el("div", "log-empty", "No session activity yet.")); }
+    return;
   }
+  const keys = items.map(itemKey);
+  const grown = keys.length >= logKeys.length && logKeys.every((k, i) => k === keys[i]);
+  if (grown && keys.length === logKeys.length) return;
+  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+  if (grown) {
+    if (!logKeys.length) log.replaceChildren();
+    for (let i = logKeys.length; i < items.length; i++) for (const n of nodesFor(items[i], i)) log.appendChild(n);
+  } else {
+    const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.i));
+    log.replaceChildren();
+    items.forEach((m, i) => {
+      for (const n of nodesFor(m, i)) { if (n.tagName === "DETAILS" && open.has(n.dataset.i)) n.open = true; log.appendChild(n); }
+    });
+  }
+  logKeys = keys;
   if (stick) log.scrollTop = log.scrollHeight;
 }
 const chatIn = document.getElementById("chat-in");
 const chatSend = document.getElementById("chat-send");
 async function sendChat() {
   const text = chatIn.value.trim();
-  if (!text || !S.sideRow || S.sending) return;
+  const row = activeRow();
+  if (!text || !row || S.sending) return;
   S.sending = true;
   chatIn.value = ""; chatIn.style.height = "auto"; chatSend.disabled = true;
-  S.log.push({ role: "user", text }); renderLog();
-  try { await api("/session/send", { path: S.sideRow.path, name: S.sideRow.name, text }); }
+  S.log.push({ role: "user", text, tools: [] }); renderLog();
+  try { await api("/session/send", { path: row.path, name: row.name, text }); }
   finally { S.sending = false; }
 }
 chatSend.onclick = sendChat;
@@ -450,7 +480,7 @@ chatIn.addEventListener("keydown", (e) => {
 chatIn.addEventListener("input", () => {
   chatSend.disabled = !chatIn.value.trim();
   chatIn.style.height = "auto";
-  chatIn.style.height = Math.min(chatIn.scrollHeight, 160) + "px";
+  chatIn.style.height = Math.min(chatIn.scrollHeight, 122) + "px";
 });
 
 /* ── Sidebar resize (drag the divider) ─────────────────── */
@@ -476,12 +506,27 @@ resizer.addEventListener("pointerdown", (e) => {
 });
 
 /* ── Render root ───────────────────────────────────────── */
+// The session panel is bound to the ACTIVE tab: switching tabs switches the
+// session; the New + tab has no session, so the panel hides there.
+let sidePath = null;
 function render() {
   renderTabs();
   renderView();
-  document.getElementById("side").hidden = !S.side;
-  document.getElementById("resizer").hidden = !S.side;
-  if (S.side && S.sideRow) document.getElementById("side-title").textContent = S.sideRow.name;
+  const row = activeRow();
+  const showSide = S.side && row != null;
+  document.getElementById("side").hidden = !showSide;
+  document.getElementById("resizer").hidden = !showSide;
+  if (showSide) {
+    document.getElementById("side-title").textContent = row.name;
+    if (sidePath !== row.path) {
+      sidePath = row.path;
+      S.log = [];
+      resetLogView();
+      pollLog().catch(() => {});
+    }
+  } else {
+    sidePath = null;
+  }
 }
 
 // Poll guards: a transient fetch failure (gateway restart, sleep/wake) must not

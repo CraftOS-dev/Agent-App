@@ -155,11 +155,30 @@ HTTP client to `requirements.txt`.
 
 ## App→agent (tasks/events)
 
-The adapter exposes the A2App **tasks/events** surface (an app→agent queue) —
-this is the one blueprint that ships the primitive (`a2app_adapter.py` has a
-`trigger()` method). There is **no declarative trigger manifest** in v0.1: prefer
-plain code for plain events, and consult `a2app_adapter.py` directly if a feature
-genuinely needs to enqueue agent work. Do not invent a manifest format.
+**This blueprint supports them.** `a2app_adapter.py` carries the primitive:
+
+```python
+adapter.trigger("invoice.needs_review", {"invoice": rec["id"]}, capability="review")
+```
+
+`trigger(etype, payload, capability=None)` emits the event and, when a
+capability is named, puts a task on the app's queue; it returns
+`{"eventId": ..., "taskId": ...}`. Without a capability it only announces
+something — nothing is queued and no agent is handed it.
+
+- **Send ids, not prose or copies.** The agent re-reads the record itself, so a
+  copy is stale by the time it is read, and prose in a payload is an instruction
+  the app does not get to give: on the agent's side it is fenced and labelled as
+  data.
+- There is **no declarative trigger manifest**, and none is coming — what the
+  agent does is the agent's decision, which is what keeps a compromised app from
+  steering it. Do not invent a manifest format.
+- Prefer plain code for plain events. A task is for work a person would
+  otherwise have to think about, and it must be idempotent: a task can be
+  redelivered if an agent dies holding it.
+
+The queue only moves when something is listening: `agent-app <dir> bridge start`,
+or a harness polling `a2app <dir> tasks next --wait`.
 
 ## Build, run, gate
 

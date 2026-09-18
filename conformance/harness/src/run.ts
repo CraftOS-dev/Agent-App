@@ -99,6 +99,11 @@ async function main(): Promise<number> {
 
   // Seed a task so class C can drive the lifecycle over HTTP.
   ref.app.trigger({ type: "card.due_soon", payload: { card: "card_seed" }, capability: "summarize" });
+  // And a second, with its own capability, so class C can also exercise the
+  // CLI's listen primitive (`tasks next`) without racing the HTTP checks for
+  // the first one. Distinct capability on purpose: the check asserts which task
+  // it was handed, which a duplicate capability could not tell apart.
+  ref.app.trigger({ type: "card.handoff", payload: { card: "card_seed" }, capability: "handoff" });
 
   const results: SuiteResult[] = [];
   const files = readdirSync(SUITES_DIR).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort();

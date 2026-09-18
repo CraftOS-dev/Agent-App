@@ -112,7 +112,11 @@ export function buildReferenceApp(): A2App {
         params: { card: { type: "ref", entity: "cards", required: true } },
       },
     ],
-    events: [{ type: "card.due_soon" }],
+    // Two declared types, because class C drives two independent task
+    // occurrences: one over HTTP through the full lifecycle, and one taken by
+    // the CLI's listen primitive. An undeclared type is refused at `trigger`,
+    // which is the app's own rule and worth exercising by obeying it.
+    events: [{ type: "card.due_soon" }, { type: "card.handoff" }],
     credentialHint: "Read the app's .agent-token file (mode 0600).",
   });
 }

@@ -74,6 +74,9 @@ a2app <dir>                     # arrive: the app’s modules
 a2app <dir> planning cards      # one entity: its fields and the operations on it
 a2app <dir> planning cards <id> # one record, and what its current state allows
 a2app <dir> data cards create --title "Buy milk" --due tomorrow
+# be driven BY the app (the app→agent direction)
+a2app <dir> tasks next --wait 60000        # block until the app has work, claim it, print it
+agent-app <dir> bridge start               # or let the framework watch the queue and trigger your harness
 # build / evolve (framework CLI)
 agent-app <dir> scaffold [--blueprint <id>] # scaffold: framework files + ownership canon
 agent-app <dir> validate # the validation + security gate
@@ -103,6 +106,20 @@ An Agent App is never finished. Keep talking to your harness to change the app a
 ### Turning third-party code into an Agent App
 
 Have existing software with no A2App adapter yet? The harness uses the pipeline/skill to read the codebase, understand it, and create its A2App adapter — so the app can be launched and used as an Agent App.
+
+### An Agent App asking an agent for work
+
+The other direction. An app can put work in its own queue — a card fell overdue, a report is due, a user pressed "ask the agent" — and A2App carries that as an **event** and a **task**. What the protocol cannot do is make an agent turn up, because *triggering* is the one part of this that depends on the harness rather than on the app. The framework supplies that part, and it picks from a ladder, deepest integration first: an inbound endpoint the harness already exposes; the harness's one-shot headless CLI (`claude -p`, `codex exec`, `gemini -p`, `aider --message`) — universal, and the default; a local gateway the framework brings up itself; or, for a harness that can only poll, a listen command the harness runs in its own loop (`a2app <app> tasks next --wait`). When none of those exists, the framework says bi-directional operation is not supported here and names what would change it, rather than starting something that delivers nothing.
+
+The app's side is one call. It declares the event types it may emit, and fires one with a capability and a few ids:
+
+```js
+trigger("invoice.needs_review", { invoice: rec.id }, "review")
+```
+
+An undeclared type is refused, so what an app can ever ask for is fixed by its author. There is no manifest of instructions to write and deliberately no way to send one: what the agent does is the agent's decision, and the payload reaches it fenced and labelled as data. Send ids — the agent re-reads the record, so a copy would be stale by the time it is read.
+
+Run the other half with `agent-app <dir> bridge start`; `agent-app <dir> bridge` first shows which rung this machine lands on. A task is claimed before it is delivered, so one task runs once no matter how many agents are watching, and every task reaches a terminal state the app can report from. See [framework/cli/](framework/cli/#bridge-the-appagent-direction).
 
 ### A human using an Agent App
 

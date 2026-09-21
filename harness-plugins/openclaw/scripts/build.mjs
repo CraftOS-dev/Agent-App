@@ -1,21 +1,13 @@
 /**
- * Build the installable OpenClaw plugin into `dist/`.
+ * Stage the installable OpenClaw plugin into `dist/`.
  *
- * OpenClaw installs a plugin by COPYING its folder, rejects node_modules
- * symlinks that escape it, and never installs dependencies for a local-dir
- * install — so the installable artifact must be self-contained. This script
- * stages exactly that:
- *
- *   dist/index.js            src/index.ts bundled with the shared engine
- *                            (@a2app/integration-starter) inlined; only the
- *                            host-provided `openclaw/plugin-sdk/*` stays external
- *   dist/package.json        generated from this package.json; declares the
- *                            entry via `openclaw.extensions` (OpenClaw does not
- *                            read `main`)
- *   dist/openclaw.plugin.json  copied manifest
- *   dist/skills/             copied from the repo-root skills/ (the single
- *                            source of truth) so the manifest's `./skills`
- *                            resolves inside the plugin root
+ * OpenClaw installs a plugin by copying its folder, rejects node_modules symlinks
+ * that escape it, and never installs dependencies for a local-dir install, so the
+ * artifact must be self-contained: the entry is bundled with the shared engine
+ * inlined (only `openclaw/plugin-sdk/*` stays external), the generated
+ * package.json declares it via `openclaw.extensions` (OpenClaw ignores `main`),
+ * and the manifest and repo-root skills/ are copied in so `./skills` resolves
+ * inside the plugin root.
  *
  * Install with: openclaw plugins install ./harness-plugins/openclaw/dist
  */

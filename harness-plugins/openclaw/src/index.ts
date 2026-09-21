@@ -2,25 +2,15 @@
  * Agent App Framework plugin for OpenClaw — the Agent Apps manager.
  *
  * Registers an `/agent-app` chat command, an `openclaw agent-app …` CLI
- * passthrough, and an "Agent Apps" Control-UI tab that is a full app manager:
- * every Agent App is a browser-style tab embedding the running app, with a
- * dedicated OpenClaw session per app in a side panel, lifecycle actions
- * (launch / pause / delete), and a build form whose "Build it" button starts
- * the agent's creator-skill run directly — no prompt copy-pasting.
+ * passthrough, and an "Agent Apps" Control-UI tab that manages Agent Apps as
+ * browser-style tabs: build, launch/pause/delete, an embedded view of each
+ * running app, and a per-app OpenClaw session in a side panel.
  *
- * Two HTTP surfaces:
- *  - `/agent-app/home` (`auth: "gateway"`) serves the page. Only the
- *    authenticated Control UI can load it; each load embeds a fresh API token.
- *  - `/agent-app/api` (`auth: "plugin"`) is the JSON API the page calls. The
- *    plugin owns its auth (the page token) and CORS (the tab frame is an
- *    opaque origin, so every response carries `access-control-allow-origin: *`
- *    and OPTIONS preflights are answered here).
- *
- * Agent work runs through OpenClaw's plugin runtime: `runtime.subagent.run`
- * drives each app's dedicated session (the workboard pattern) and lifecycle
- * actions shell the framework CLI (`serve` / `stop` / `remove`). Built by
- * `pnpm --filter @a2app/integration-openclaw build` into the installable
- * `dist/`: `openclaw plugins install ./harness-plugins/openclaw/dist`.
+ * The tab is backed by two HTTP routes:
+ *   - `/agent-app/home` (auth: gateway) serves the page and reads session
+ *     transcripts; only the authenticated Control UI can reach it.
+ *   - `/agent-app/api`  (auth: plugin)  is the JSON action API the page calls,
+ *     authorized by a per-page token minted into each page load.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { randomBytes } from "node:crypto";
@@ -31,29 +21,24 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runA2App, binFor, buildKickoffPrompt, listKnownApps, FRAMEWORK_BLUEPRINTS, type KnownApp } from "@a2app/integration-starter";
 import { appManagerHtml } from "./ui.js";
 
-/** The a2app binary (or JS entry) to shell. Override with A2APP_CLI. */
+/** Operate client (a2app) and build/evolve client (agent-app). `binFor` routes
+ *  each verb to its owner; a2app rejects build verbs by design. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
-/** Build/evolve binary. The operate client rejects build verbs by design
- *  (framework spec 5.1), so `binFor` routes each verb to its owner. */
 const FRAMEWORK_CLI = process.env.AGENT_APP_CLI ?? "agent-app";
 
-/** Where this host puts NEW apps. The framework imposes no app home (the
- *  registry stores absolute paths, spec 5.6) — the directory convention is the
- *  caller's, and this host keeps apps under the framework home. */
+/** Where new apps are created. The framework imposes no app home (the registry
+ *  tracks absolute paths), so the directory convention is the host's. */
 const APPS_DIR = join(process.env.A2APP_HOME ?? join(homedir(), ".a2app"), "apps");
 
 const PAGE_ROUTE = "/agent-app/home";
 const API_ROUTE = "/agent-app/api";
-/** Stamped by scripts/build.mjs into the staged bundle; identifies which build
- *  a running gateway actually loaded (shown in the page footer). */
+/** Bundle build time, stamped by scripts/build.mjs; shown in the page footer. */
 const BUILD_STAMP = process.env.A2APP_PLUGIN_BUILD ?? "dev";
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
-/** How long to track a build run before declaring its outcome unknown. */
 const BUILD_WAIT_MS = 2 * 60 * 60 * 1000;
 
-/** Standing system-prompt guidance registered with the `/agent-app` command, so
- *  the agent routes a request through the framework skills instead of building
- *  or operating from general knowledge. */
+/** System-prompt guidance registered with `/agent-app`, so the agent routes a
+ *  request through the framework skills rather than general knowledge. */
 const AGENT_GUIDANCE =
   "The /agent-app command is the front door to the Agent App Framework. An Agent App is a " +
   "self-contained full-stack web app operated through its A2App adapter (the `a2app` CLI) — " +
@@ -64,22 +49,19 @@ const AGENT_GUIDANCE =
   "connect (a published app you do not own). Do not build or operate an app from general " +
   "knowledge outside these skills. `agent-app list` locates every known Agent App.";
 
-/** Each app's dedicated session, keyed by its directory name — stable from the
- *  moment a build starts through the app's whole life (workboard's derived-key
- *  pattern). */
+/** Deterministic session key per app, stable for the app's whole life. */
 const sessionKeyFor = (path: string): string => `subagent:agent-app:${basename(path)}`;
 
-/** First message of an app's session carries the working context; every later
- *  send is just the user's text — the session itself holds the history. */
+/** Context prepended to the first message of an app's session; later messages
+ *  are the user's text alone. */
 const sessionPreamble = (name: string, path: string): string =>
   `You are working on the Agent App "${name}" at \`${path}\`. For a code or feature change ` +
   "load the **modify** skill; for using the app (data, tasks, reports) load the **operator** " +
   "skill. Work through the `agent-app` and `a2app` CLIs, respect the ownership boundary, and " +
   "never drive the app UI.";
 
-/** Mirrors the verified shapes in OpenClaw's plugin runtime
- *  (src/plugins/runtime/types.ts); local because the SDK types resolve only in
- *  OpenClaw's own toolchain. */
+/** Subset of OpenClaw's plugin runtime, typed locally — the SDK types resolve
+ *  only inside OpenClaw's own toolchain. */
 interface SubagentRuntime {
   run(p: { sessionKey: string; message: string; deliver: boolean; lane: string; cwd: string }): Promise<{ runId: string }>;
   waitForRun(p: { runId: string; timeoutMs: number }): Promise<unknown>;
@@ -87,7 +69,7 @@ interface SubagentRuntime {
   deleteSession(p: { sessionKey: string; deleteTranscript: boolean }): Promise<void>;
 }
 
-/** An in-flight (or finished-but-unconfirmed) build started from the form. */
+/** An in-flight, or finished-but-not-yet-registered, build started from the form. */
 interface BuildEntry {
   name: string;
   dir: string;
@@ -96,7 +78,6 @@ interface BuildEntry {
 
 /** One row of the manager UI: a registered app, or a build not yet registered. */
 interface AppRow extends KnownApp {
-  sessionKey: string;
   building: boolean;
   buildEnded: boolean;
 }
@@ -110,15 +91,10 @@ export default definePluginEntry({
     const tokens = new Map<string, number>();
     const builds = new Map<string, BuildEntry>();
 
-    // Plugin-runtime calls made inside an HTTP request inherit that request's
-    // scope client — which for an `auth:"plugin"` route carries NO operator
-    // scopes, so `subagent.run` is refused with "missing scope: operator.write".
-    // OpenClaw grants agent runs system (write) authority only in contexts with
-    // no request client, and the only contexts guaranteed clean are the ones
-    // the HOST invokes (its own background extensions run from cron/lifecycle
-    // callbacks). So write calls queue here, and the drain timer is created
-    // inside the `gateway_start` hook — a host-invoked startup context whose
-    // AsyncLocalStorage every job then inherits.
+    // subagent.run needs operator.write, which OpenClaw grants only to calls made
+    // outside a request scope (a request client carries no operator scopes). Runs
+    // are queued and drained from the host-invoked gateway_start context, which
+    // every queued job then inherits.
     const jobs: Array<() => void> = [];
     let drainStarted = false;
     (api as unknown as { on(hook: string, fn: () => void): void }).on("gateway_start", () => {
@@ -131,10 +107,8 @@ export default definePluginEntry({
       return new Promise((resolve, reject) => { jobs.push(() => fn().then(resolve, reject)); });
     };
 
-    /** Sessions this gateway process has already seeded with the app context
-     *  preamble (the build kickoff seeds it too). After a gateway restart the
-     *  first chat message re-carries the preamble — harmless repetition that
-     *  keeps the send path free of any transcript read. */
+    /** Sessions this process has already seeded with the context preamble, so a
+     *  send never has to read the transcript to decide whether to prepend it. */
     const seeded = new Set<string>();
 
     const mintToken = (): string => {
@@ -146,8 +120,6 @@ export default definePluginEntry({
     };
     const tokenValid = (t: unknown): boolean => typeof t === "string" && (tokens.get(t) ?? 0) > Date.now();
 
-    // The chat command — hands the request to the agent (`continueAgent: true`),
-    // where AGENT_GUIDANCE routes it to the owning framework skill.
     api.registerCommand({
       name: "agent-app",
       description: "Build, evolve, or operate an Agent App — routes the request to the right framework skill.",
@@ -165,11 +137,8 @@ export default definePluginEntry({
       },
     });
 
-    // A CLI passthrough: `openclaw agent-app …`. Commander's own option parsing
-    // and help are off (the gateway restart-handoff passthrough shape) and the
-    // action reads `command.args`: with passThroughOptions, everything after
-    // the first operand — flags like `--json` included — stays an operand in
-    // its original order.
+    // Passthrough: forward every token, flags included, to the framework CLIs in
+    // its original order (Commander's own parsing and help are disabled).
     api.registerCli(
       ({ program }) => {
         program
@@ -190,10 +159,8 @@ export default definePluginEntry({
       { descriptors: [{ name: "agent-app", description: "Run the framework CLIs (build/evolve/operate an Agent App)", hasSubcommands: true }] },
     );
 
-    // ── The manager page + transcript read (gateway-authenticated) ──
-    // Both are GETs riding the Control-UI cookie grant: the page load, and the
-    // session transcript — the grant's `operator.read` is exactly the scope
-    // `getSessionMessages` needs, so the read runs inside the request scope.
+    // The manager page and session transcript are both GETs under the Control-UI
+    // cookie grant, whose operator.read scope is what getSessionMessages needs.
     api.registerHttpRoute({
       path: PAGE_ROUTE,
       auth: "gateway",
@@ -209,8 +176,7 @@ export default definePluginEntry({
         const url = new URL(req.url ?? "/", "http://plugin.local");
         const sub = url.pathname.slice(PAGE_ROUTE.length);
         if (sub === "/session") {
-          // The page frame fetches with credentials; echo its origin ("null"
-          // when the frame is opaque) so the response is readable there.
+          // Echo the frame's origin ("null" when opaque) so the response reads.
           res.setHeader("access-control-allow-origin", String(req.headers.origin ?? "null"));
           res.setHeader("access-control-allow-credentials", "true");
           res.setHeader("vary", "origin");
@@ -232,23 +198,18 @@ export default definePluginEntry({
       },
     });
 
-    // ── The JSON API (plugin-authenticated: the page token is the credential) ──
-
-    /** The manager rows: registered apps merged with builds the registry does
-     *  not know yet. A build entry retires the moment its app is seen running. */
+    /** Manager rows: registered apps merged with builds not yet in the registry.
+     *  A build entry retires once its app is seen running. */
     async function rows(): Promise<AppRow[]> {
       const apps = await listKnownApps(FRAMEWORK_CLI);
       for (const a of apps) if (a.status === "running") builds.delete(a.path);
       const out: AppRow[] = apps.map((a) => {
         const b = builds.get(a.path);
-        return { ...a, sessionKey: sessionKeyFor(a.path), building: b != null && !b.ended, buildEnded: b?.ended === true };
+        return { ...a, building: b != null && !b.ended, buildEnded: b?.ended === true };
       });
       for (const b of builds.values()) {
         if (apps.some((a) => a.path === b.dir)) continue;
-        out.push({
-          id: basename(b.dir), name: b.name, path: b.dir, url: null,
-          sessionKey: sessionKeyFor(b.dir), building: !b.ended, buildEnded: b.ended, status: "stopped",
-        });
+        out.push({ id: basename(b.dir), name: b.name, path: b.dir, url: null, building: !b.ended, buildEnded: b.ended, status: "stopped" });
       }
       return out;
     }
@@ -273,8 +234,6 @@ export default definePluginEntry({
       seeded.add(sessionKeyFor(dir));
       const entry: BuildEntry = { name, dir, ended: false };
       builds.set(dir, entry);
-      // Track the run to its end (or to the tracking horizon); the UI then shows
-      // "build session ended" until the app is actually seen running.
       void detached(() => subagent.waitForRun({ runId: run.runId, timeoutMs: BUILD_WAIT_MS })).then(
         () => { entry.ended = true; },
         () => { entry.ended = true; },
@@ -282,10 +241,8 @@ export default definePluginEntry({
       return { status: 200, out: { ok: true, path: dir } };
     }
 
-    /** Render-ready view of a transcript message (roles: user / assistant /
-     *  tool / toolResult / system; content: string or typed parts). Text parts
-     *  concatenate; tool names collect so the page can render tool activity as
-     *  collapsed rows the way OpenClaw's chat does. */
+    /** Flatten a transcript message to role, concatenated text, and tool names,
+     *  so the page can render prose and tool activity separately. */
     function viewMessage(m: unknown): { role: string; text: string; tools: string[] } {
       const r = m as Record<string, unknown>;
       const role = typeof r.role === "string" ? r.role : "";
@@ -325,8 +282,8 @@ export default definePluginEntry({
       auth: "plugin",
       match: "prefix",
       async handler(req: IncomingMessage, res: ServerResponse) {
-        // The page is an opaque-origin frame, so every response must be CORS-
-        // readable and the JSON POST preflight is answered here.
+        // The page is an opaque-origin frame: responses must be CORS-readable and
+        // the JSON POST preflight is answered here.
         res.setHeader("access-control-allow-origin", "*");
         const send = (status: number, body: unknown): void => {
           res.statusCode = status;
@@ -383,9 +340,7 @@ export default definePluginEntry({
             }
             builds.delete(path);
             seeded.delete(sessionKeyFor(path));
-            // Session cleanup is best-effort: the app is already gone, and a
-            // session that never ran has nothing to delete.
-            try { await detached(() => subagent.deleteSession({ sessionKey: sessionKeyFor(path), deleteTranscript: true })); } catch { /* no session existed */ }
+            try { await detached(() => subagent.deleteSession({ sessionKey: sessionKeyFor(path), deleteTranscript: true })); } catch { /* no session to delete */ }
             send(200, { ok: true });
             return;
           }
@@ -397,7 +352,6 @@ export default definePluginEntry({
       },
     });
 
-    // The Control-UI tab pointing at the manager page.
     api.session.controls.registerControlUiDescriptor({
       surface: "tab",
       id: "agent-app-home",

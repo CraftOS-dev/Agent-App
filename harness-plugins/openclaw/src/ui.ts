@@ -1,33 +1,24 @@
 /**
- * The Agent Apps manager page, served into OpenClaw's Control UI tab frame.
+ * The Agent Apps manager page, served into OpenClaw's Control UI tab frame as
+ * one self-contained HTML document styled with OpenClaw's design tokens.
  *
- * One self-contained HTML document (inline CSS/JS, no external assets) styled
- * with OpenClaw's own design tokens (extracted from its Control UI source) so
- * the page reads as part of the host. Layout: a browser-style tab strip — one
- * tab per Agent App plus a "New +" tab — a content area that embeds the active
- * app (iframe), and a right sidebar rendering the app's dedicated OpenClaw
- * session (transcript + composer).
+ * Layout: a browser-style tab strip (one tab per Agent App plus a "New +" tab),
+ * a content area embedding the active app, and a resizable side panel rendering
+ * that app's OpenClaw session. Data flows through the plugin's JSON API; the
+ * page polls apps every 4s and the open transcript every 2.5s. DOM is built with
+ * createElement/textContent so app-provided strings never reach innerHTML.
  *
- * All data flows through the plugin's own JSON API (`cfg.apiBase`), authorized
- * by the per-page token; the page polls (apps every 4s, transcript every 2.5s
- * while the sidebar is open) — no copy-pasting anywhere. DOM is built with
- * createElement/textContent, so app-provided strings never reach innerHTML.
- *
- * Embedding note: the app iframe needs a real origin, which OpenClaw grants
- * plugin frames only under `gateway.controlUi.embedSandbox: "trusted"`. The
- * page detects an opaque origin and shows that exact requirement instead of a
- * broken frame; everything else (tabs, build, lifecycle, session) works under
- * the default sandbox.
+ * Embedding an app iframe needs a real origin, which OpenClaw grants plugin
+ * frames only under `gateway.controlUi.embedSandbox: "trusted"`; the page
+ * detects an opaque origin and shows that requirement instead of a broken frame.
  */
 export interface ManagerConfig {
   apiBase: string;
-  /** The gateway-authenticated page route; transcript reads go here, riding
-   *  the Control-UI cookie grant (a plain GET — no preflight, no token). */
+  /** Gateway route for transcript reads (a plain GET under the cookie grant). */
   homeBase: string;
   token: string;
   blueprints: readonly string[];
-  /** Build stamp of the plugin bundle serving this page (footer marker, so a
-   *  stale installed copy is immediately recognizable). */
+  /** Bundle build stamp, shown in the footer to flag a stale installed copy. */
   build: string;
 }
 
@@ -60,7 +51,7 @@ body{margin:0;font:400 14px/1.55 var(--font);letter-spacing:-0.01em;background:v
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{font:inherit;letter-spacing:inherit;cursor:pointer}
 
-/* ── Tab strip (Chrome-style: slim, rounded-top, merging into content) ── */
+/* ── Tab strip ── */
 .tabbar{display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--bg);border-bottom:1px solid var(--border);flex:none;overflow-x:auto;scrollbar-width:none}
 .tabbar::-webkit-scrollbar{display:none}
 .tab{position:relative;display:flex;align-items:center;gap:7px;max-width:200px;min-width:0;height:30px;padding:0 11px;border:1px solid transparent;border-bottom:none;border-radius:8px 8px 0 0;background:transparent;color:var(--muted);font-size:12px;font-weight:550;white-space:nowrap}
@@ -128,7 +119,7 @@ textarea.input{min-height:120px;resize:vertical}
 .err{margin-top:12px;font-size:13px;font-weight:600;color:var(--danger)}
 .buildstamp{margin:16px 0 0;font-size:11px;color:var(--muted);opacity:0.7}
 
-/* ── Session sidebar (drag its left edge to resize) ────── */
+/* ── Session sidebar ── */
 #resizer{flex:none;width:5px;margin:0 -2px;cursor:col-resize;background:transparent;z-index:5;touch-action:none}
 #resizer:hover,#resizer.dragging{background:color-mix(in srgb,var(--accent) 35%,transparent)}
 #resizer[hidden]{display:none}
@@ -270,8 +261,8 @@ async function removeApp(r) {
 
 /* ── Views ─────────────────────────────────────────────── */
 const frames = new Map();
-// The panel rebuilds only when what it shows changes (this key), so the poll
-// loop never wipes in-progress form input or button state.
+// Rebuild the panel only when its content key changes, so polling never wipes
+// in-progress form input.
 let viewKey = "";
 function renderView() {
   const panel = document.getElementById("panel");
@@ -398,8 +389,8 @@ document.getElementById("side-close").onclick = () => { S.side = false; render()
 async function pollLog() {
   const row = S.side ? activeRow() : null;
   if (!row) return;
-  // Transcript reads ride the Control-UI cookie grant on the gateway route:
-  // a bare GET with credentials, nothing that would trigger a preflight.
+  // A bare GET under the cookie grant; guarded so a late response for a tab the
+  // user already switched away from is discarded.
   const r = await fetch(CFG.homeBase + "/session?app=" + encodeURIComponent(row.path), { credentials: "include" });
   const out = await r.json();
   if (out.ok && S.side && activeRow()?.path === row.path) { S.log = out.messages; renderLog(); }
@@ -407,7 +398,6 @@ async function pollLog() {
 function prettify(text) {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 }
-// One transcript item can render as up to two nodes (tools line + text).
 function nodesFor(m, i) {
   const tools = m.tools ?? [];
   const out = [];
@@ -417,7 +407,6 @@ function nodesFor(m, i) {
     if (tools.length) out.push(el("div", "toolsline", "Used " + tools.join(", ")));
     if (m.text) out.push(el("div", "msg assistant", m.text));
   } else {
-    // tool / toolResult / system: a collapsed row, payload pretty-printed on demand
     const d = document.createElement("details");
     d.className = "toolrow";
     d.dataset.i = String(i);
@@ -427,10 +416,9 @@ function nodesFor(m, i) {
   }
   return out;
 }
-// The transcript is append-only, so polling must never rebuild what is already
-// on screen — that would collapse expanded tool rows and kill text selection.
-// Unchanged → untouched; grown → append only; rewritten (rare) → rebuild with
-// expanded rows restored by position.
+// The transcript is append-only: unchanged renders touch nothing, growth appends
+// only (so expanded tool rows and text selection survive), and a rare rewrite
+// rebuilds while restoring expanded rows by position.
 let logKeys = [];
 const itemKey = (m) => m.role + "\\u001f" + m.text + "\\u001f" + (m.tools ?? []).join(",");
 function resetLogView() {
@@ -483,7 +471,7 @@ chatIn.addEventListener("input", () => {
   chatIn.style.height = Math.min(chatIn.scrollHeight, 122) + "px";
 });
 
-/* ── Sidebar resize (drag the divider) ─────────────────── */
+/* ── Sidebar resize ── */
 const resizer = document.getElementById("resizer");
 const sideEl = document.getElementById("side");
 resizer.addEventListener("pointerdown", (e) => {
@@ -505,9 +493,9 @@ resizer.addEventListener("pointerdown", (e) => {
   resizer.addEventListener("pointerup", up);
 });
 
-/* ── Render root ───────────────────────────────────────── */
-// The session panel is bound to the ACTIVE tab: switching tabs switches the
-// session; the New + tab has no session, so the panel hides there.
+/* ── Render root ── */
+// The session panel is bound to the active tab, so switching tabs switches the
+// session and the New + tab shows none.
 let sidePath = null;
 function render() {
   renderTabs();
@@ -529,8 +517,7 @@ function render() {
   }
 }
 
-// Poll guards: a transient fetch failure (gateway restart, sleep/wake) must not
-// kill the loops; the next tick retries.
+// A transient fetch failure must not kill the poll loops; the next tick retries.
 const quiet = (fn) => () => fn().catch(() => {});
 quiet(refresh)();
 setInterval(quiet(refresh), 4000);

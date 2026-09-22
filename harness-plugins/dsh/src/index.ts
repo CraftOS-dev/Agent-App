@@ -15,6 +15,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { runA2App, binFor } from "@a2app/integration-starter";
 import { registerManager, type ManagerHost } from "./manager.js";
+import { registerSkills, type SkillHost } from "./skills.js";
 
 /** The a2app binary (or JS entry). Override with A2APP_CLI. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
@@ -45,6 +46,13 @@ function cliTool(name: string, description: string, parameters: Record<string, u
   });
 }
 
+/** Required host services. Cordis refuses to hand out an undeclared service, so
+ *  omitting `tools` here makes apply() throw at `ctx.tools.register(...)` and the
+ *  entry never activates (dsh reports "1 entry did not activate" and serves on
+ *  without the tools or the manager). `webServer` stays a late `ctx.inject`
+ *  dependency below, so the plugin still activates in profiles without a web UI. */
+export const inject = ["tools"];
+
 export function apply(ctx: Context): void {
   const DIR = req("Agent App project directory");
   const ENTITY = req("entity / collection name");
@@ -71,11 +79,14 @@ export function apply(ctx: Context): void {
     { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => [s(a.dir), "data", s(a.entity), "get", s(a.id)]));
 
   ctx.tools.register(cliTool("agent_app_create", "Create a record; the app's guard validates it and rejections are returned verbatim.",
-    { dir: DIR, entity: ENTITY, fields: { type: "object", required: true, description: "field → value" } },
+    // `additionalProperties` is mandatory on every object param in dsh's tool
+    // schema DSL (defineTool → parameterSchemaSpecToJsonSchema); omitting it
+    // throws at registration time and takes the whole plugin down with it.
+    { dir: DIR, entity: ENTITY, fields: { type: "object", required: true, additionalProperties: true, description: "field → value" } },
     (a) => [s(a.dir), "data", s(a.entity), "create", "--json", JSON.stringify(a.fields ?? {})]));
 
   ctx.tools.register(cliTool("agent_app_update", "Update a record by id.",
-    { dir: DIR, entity: ENTITY, id: req("record id"), fields: { type: "object", required: true, description: "field → value" } },
+    { dir: DIR, entity: ENTITY, id: req("record id"), fields: { type: "object", required: true, additionalProperties: true, description: "field → value" } },
     (a) => [s(a.dir), "data", s(a.entity), "update", s(a.id), "--json", JSON.stringify(a.fields ?? {})]));
 
   ctx.tools.register(cliTool("agent_app_delete", "Delete a record by id.",
@@ -88,7 +99,7 @@ export function apply(ctx: Context): void {
     { dir: DIR, term: req("search term") }, (a) => [s(a.dir), "--find", s(a.term)]));
 
   ctx.tools.register(cliTool("agent_app_run_operation", "Invoke a declared operation at the path that identifies it. A destructive op returns approval_required with a key; pass `approve` to execute.",
-    { dir: DIR, path: req("module/entity/id path the operation was found under"), operation: req("operation name"), fields: { type: "object", description: "operation arguments" }, approve: opt("approval key") },
+    { dir: DIR, path: req("module/entity/id path the operation was found under"), operation: req("operation name"), fields: { type: "object", additionalProperties: true, description: "operation arguments" }, approve: opt("approval key") },
     (a) => {
       const argv = [s(a.dir), ...s(a.path).split("/").filter((seg) => seg !== ""), s(a.operation)];
       for (const [k, v] of Object.entries((a.fields as Args) ?? {})) argv.push(`--${k}`, s(v));
@@ -112,6 +123,13 @@ export function apply(ctx: Context): void {
     { dir: DIR, noBuild: { type: "boolean", description: "skip the build step" } },
     (a) => (a.noBuild ? [s(a.dir), "validate", "--no-build"] : [s(a.dir), "validate"])));
 
+  // The framework's six skills. dsh has no per-bundle skill discovery, so the
+  // bundle supplies them through the registry. A late `ctx.inject` (not a hard
+  // `inject` entry) keeps the plugin activatable in a profile with no skills.
+  ctx.inject(["skills"], (scoped: Context) => {
+    ctx.effect(() => registerSkills(scoped as unknown as SkillHost), "agent-app: skills provider");
+  });
+
   // The Agent Apps manager — mounted once dsh's web server is available. The
   // client half points a UI slot iframe at the route this serves.
   ctx.inject(["webServer"], (scoped: Context) => {
@@ -119,4 +137,8 @@ export function apply(ctx: Context): void {
   });
 }
 
-export default apply;
+// Deliberately NO `export default`. The Loader's unwrapExports is
+// `exports.default ?? exports`, so a default export makes it collapse this
+// namespace to the bare `apply` function and drop `name` and `inject` — which
+// is what raises "cannot get property \"tools\" without inject" at boot. See
+// dsh docs/postmortem/0001-acp-default-export-drops-inject.md.

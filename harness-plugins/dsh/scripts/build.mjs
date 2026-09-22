@@ -39,6 +39,14 @@ rmSync(dist, { recursive: true, force: true });
 mkdirSync(lib, { recursive: true });
 
 // Host half: ESM for Node; inline the shared engine, keep dsh SDK external.
+//
+// The banner is load-bearing, not cosmetic. The inlined engine uses cross-spawn,
+// which is CommonJS and calls require("child_process") at module scope. Bundling
+// CJS into an ESM output turns that into esbuild's __require shim, which has no
+// require to delegate to in ESM and throws "Dynamic require of ... is not
+// supported" during module evaluation — i.e. at import, before apply() runs, so
+// dsh marks the entry failed and the profile refuses to boot. Defining a real
+// require restores the shim's fallback path.
 await build({
   entryPoints: [join(pluginDir, "src", "index.ts")],
   outfile: join(lib, "index.js"),
@@ -47,6 +55,9 @@ await build({
   format: "esm",
   target: "node20",
   external: ["cordis", "@deepseek-ai/*"],
+  banner: {
+    js: "import { createRequire as __a2appCreateRequire } from 'node:module';\nconst require = __a2appCreateRequire(import.meta.url);",
+  },
   define: { "process.env.A2APP_PLUGIN_BUILD": JSON.stringify(new Date().toISOString()) },
 });
 

@@ -88,15 +88,15 @@ One person, desktop-first, phone for glancing at the list and quick additions.
 PART B — TECHNICAL SPECIFICATION. QUALITY.md read is mandatory before writing it. Evolves during build; never silently contradicts Part A.
 
 ## System Overview
-Blueprint: react-node — Node built-in `http` + vanilla SPA + JSON store, the
-adapter mounted as embedded middleware. One module — `planning` — mirrored by
-the single screen; the human's navigation and the agent's walk share one map.
+Blueprint: react-node — a React (Vite) View + a Hono server + a SQLite store,
+the adapter mounted as embedded middleware. One module — `planning` — mirrored
+by the single screen; the human's navigation and the agent's walk share one map.
 
 ## UI Design
-- **Design system:** the blueprint token set (`public/tokens.css`, two-tier:
-  primitives → semantic) used as shipped, no extensions. Components in
-  `public/ui.css` + `public/ui.js`: buttons, fields, status pills, toasts,
-  confirm dialog, inline SVG icon set.
+- **Design system:** the blueprint token set (`public/tokens.css`, foundation
+  → semantic bridge) used as shipped, no extensions. Component styles in
+  `public/ui.css`; shared React pieces in `src/` (Icon set, toasts, confirm
+  dialog): buttons, fields, status pills.
 - **Layout:** single centered column, max 640 px: header, add form in a card,
   filter toolbar, task list in a card, count footer. Calm density — one list,
   no data tables.
@@ -118,7 +118,7 @@ This app's decisions per Quality Standard section — never the rules restated.
   filter plus "Show more" paging is the scaling path.
 - **Q2 Design system:** blueprint tokens as shipped; semantic roles used:
   accent (primary action), danger (delete), neutral/info/success (the three
-  statuses); icons from the ui.js inline SVG set only; light and dark both
+  statuses); icons from the `src/Icon.jsx` inline SVG set only; light and dark both
   fully resolved, following the system scheme.
 - **Q3 Layout & composition:** 4 px spacing grid via tokens; single calm
   column; list rows one-line with title truncated by ellipsis (full title in
@@ -149,7 +149,8 @@ This app's decisions per Quality Standard section — never the rules restated.
   horizontal page scroll at any width.
 - **Q10 Performance:** list renders bounded pages (100 rows + "Show more")
   against the A-1 ceiling; skeletons reserve layout so content arrival shifts
-  nothing; no images or fonts to budget — system font stack, inline SVG.
+  nothing; one hashed JS bundle from the Vite build; no images or fonts to
+  budget — system font stack, inline SVG.
 - **Q11 Caching & freshness:** static assets ETag-revalidated (`no-cache` +
   304s); data responses adapter-governed; one in-flight load at a time with a
   stale-response guard; writes update the view from the stored response — no
@@ -160,10 +161,10 @@ This app's decisions per Quality Standard section — never the rules restated.
   defense.
 - **Q13 API:** adapter surface only — the View talks to the same records API
   the agent uses; no app-specific endpoints exist.
-- **Q14 Architecture:** View in `public/` (app.js composes ui.js widgets on
-  tokens.css), Model in `a2app.schema.mjs`, serving/persistence in the
-  system-owned `server.mjs`; every widget and formatting helper exists once
-  in ui.js.
+- **Q14 Architecture:** View in `index.html` + `src/` (App.jsx composes the
+  shared components on tokens.css, compiled by Vite into `dist/`), Model in
+  `a2app.schema.mjs`, serving/persistence in the system-owned `server.mjs`;
+  every shared component and formatting helper exists once in `src/`.
 - **Q15 Resilience:** every fetch has a 10 s timeout; idempotent GETs retry
   once with jitter, writes never auto-retry (the pending control makes retry
   the user's call); mid-session failure keeps stale data visible with an

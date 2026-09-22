@@ -17,7 +17,7 @@
   },
   "pipeline": {
     "install": "npm install",
-    "build": "node --check server.mjs",
+    "build": "npm run build",
     "start": "node server.mjs",
     "health": "/api/_a2app"
   }

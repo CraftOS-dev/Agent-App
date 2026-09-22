@@ -1,0 +1,20 @@
+{
+  "name": "pocketbase-react-agent-app-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The React View of an Agent App scaffolded from blueprint-pocketbase-react. `npm run build` compiles it into ../pb/pb_public, which PocketBase serves.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite"
+  }
+}

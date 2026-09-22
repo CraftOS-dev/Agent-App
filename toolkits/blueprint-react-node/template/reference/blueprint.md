@@ -1,7 +1,7 @@
 # Blueprint reference — react-node
 
-Node's built-in `http` server + a JSON-file store + a dependency-free SPA View,
-with the A2App adapter mounted as embedded `@a2app/adapter-core` middleware.
+A React (Vite) View + a Hono server + a SQLite store, with the A2App adapter
+mounted as embedded `@a2app/adapter-core` middleware.
 
 Where the `creator`/`modify` skill says "per your stack", the answer is here. If
 this file and the source disagree, the source wins.
@@ -9,13 +9,13 @@ this file and the source disagree, the source wins.
 ## Read this first
 
 The scaffold gives you a complete, runnable starter app — the A2App adapter, a
-working data model, and a full View — which you edit into your own:
+working data model, and a full React View — which you edit into your own:
 
 - **entities** — the data model in `a2app.schema.mjs` (see **Schema** below);
 - **custom operations** — declared in `schema.operations` + `operations.json` and
   implemented in `schema.operationRunners` (see **Operations**);
-- **the View** — the SPA in `public/`, built on the shipped widget kit and design
-  tokens (see **The View**).
+- **the View** — the React app in `index.html` + `src/`, built on the shipped
+  shared components and design tokens (see **The View**).
 
 The starter models a to-do list; replace it with your own entities, operations,
 and screens.
@@ -28,39 +28,48 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 |---|---|---|
 | `a2app.schema.mjs` | **YOURS** | the data model + operations: exports `schema = { entities, operations, operationRunners }`, each entity carrying `module`/`summary`/`fields`/`seed`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Byte-mirror of `schema.operations`. |
-| `public/index.html` | **YOURS** | the View shell + first-paint skeleton; links `tokens.css`/`ui.css`, loads `app.js`. Keep the `/_a2app/update.js` script tag. |
-| `public/app.js` | **YOURS** | the View logic: fetch wrapper, load/render, add/advance/delete actions, filters, the `a2app:datachange` listener, boot. |
-| `public/ui.js` | **YOURS** | the widget kit — `el` · `icon` · `toast` · `confirmDialog` · `fmtDay` · `isPastDay`. One impl each; compose, never re-implement. |
-| `public/ui.css` | **YOURS** | component styles (buttons, cards, list rows, dialog, toasts). Consumes Tier-2 tokens only. |
-| `public/tokens.css` | **YOURS** | design tokens: Tier-1 primitives → Tier-2 semantic, light + dark, WCAG AA. Re-point values; keep the NAMES stable. |
+| `index.html` | **YOURS** | the Vite entry: links `tokens.css`/`ui.css`, mounts `#root`, loads `src/main.jsx`. |
+| `src/main.jsx` | **YOURS** | React root: StrictMode + ToastProvider + App; imports `updater.js` to start the update watcher. |
+| `src/App.jsx` | **YOURS** | the View logic: state machine (loading/ready/error), add/advance/delete actions, filters, the `a2app:datachange` listener, boot. |
+| `src/api.js` | **YOURS** | the one fetch wrapper — 10 s timeout, GET retry-once, readable error messages. |
+| `src/Icon.jsx` · `src/toast.jsx` · `src/ConfirmDialog.jsx` · `src/format.js` | **YOURS** | the shared pieces — icon set, `useToast`, `useConfirm` (in-app dialog, never `window.confirm`), day formatting. One impl each; compose, never re-implement. |
+| `src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher. Keep it when you rewrite the View. |
+| `public/tokens.css` | **YOURS** | design tokens (the kit sheet): foundation `--agent-app-*` + semantic bridge, light + dark + style packs. Re-point values; keep the NAMES stable. |
+| `public/ui.css` | **YOURS** | component styles (buttons, cards, list rows, dialog, toasts). Consumes semantic tokens only. |
+| `vite.config.js` | **YOURS** | the View build: React plugin, `dist/` output, dev-server proxy to the running app. |
 | `AGENT_APP.md` | **YOURS** | this app's index: plan, modules, entities, operations, conventions, checklist. |
 | `reference/requirements.md` | **YOURS** | the binding spec — Part A (SRS) + Part B (tech spec + Quality Conformance). |
 | `reference/tasks.md` | **YOURS** | the build ledger — one task per feature/quality item, ticked as you complete it. |
 | `reference/blueprint.md` | reference | this file — the stack map. |
-| `.gitignore` | **YOURS** | ignores `data/`, credentials, and framework state. Extend for your own artifacts. |
-| `package.json` | build | dependencies + build script (`type: module`, Node ≥ 20). Referenced by the pipeline. |
+| `.gitignore` | **YOURS** | ignores `data/`, `dist/`, credentials, and framework state. Extend for your own artifacts. |
+| `package.json` | build | dependencies (react, hono, better-sqlite3, adapter-core) + scripts (`build` = vite build, `dev:ui` = vite dev server). Referenced by the pipeline. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
-| `server.mjs` | SYSTEM (hash-locked) | the Node `http` server + `@a2app/adapter-core` middleware: serves the records API, identity, describe, and `/_a2app/update.js`. Never edit. |
+| `server.mjs` | SYSTEM (hash-locked) | the Hono server + `@a2app/adapter-core` middleware + the SQLite binding: serves the records API, identity, describe, the built View (`dist/`), and `/_a2app/update.js`. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
-| `scripts/dev-prepare.mjs` | lifecycle | run by `agent-app dev`: builds a fresh, seeded store in an isolated dir. Leave it alone. |
+| `scripts/dev-prepare.mjs` | lifecycle | run by `agent-app dev`: builds a fresh, seeded SQLite store in an isolated dir. Leave it alone. |
 | `scripts/promote-apply.mjs` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup. Leave it alone. |
-| `data/` | runtime | the live JSON store (git-ignored, created on first boot). Never edit by hand; never commit. |
+| `dist/` | build output | the compiled View (`npm run build`). Git-ignored; served by `server.mjs`. Never edit by hand. |
+| `data/` | runtime | the live SQLite database (git-ignored, created on first boot). Never edit by hand; never commit. |
 
 SYSTEM files are hashed in `.a2app/system-hashes.json`; the gate fails the build
-if one changes. Need a variant of a kit widget? Wrap it in `public/`, never edit
-the locked original.
+if one changes. Need a variant of a shared component? Wrap it in `src/`, never
+edit the locked original.
 
 ## Mental model
 
 - The **adapter is the only agent surface.** A human uses the View; an agent
-  operates the same records through A2App. Both converge on the JSON store.
+  operates the same records through A2App. Both converge on the SQLite store.
 - **`a2app.schema.mjs` is the single source of truth for the model.** You never
   hand-write `describe` — the adapter derives it (and `schemaVersion`) from your
   schema. Change the schema, and every A2App screen updates.
-- **The store is schema-derived and additive.** There are no migration files on
-  this stack. Add a field to the schema and it is simply available; existing rows
-  keep their stored values. This is the opposite of the pocketbase stack — do not
-  go looking for a `migrations/` directory.
+- **The store is schema-derived and additive.** Records are JSON rows in one
+  SQLite table keyed (entity, id); there are no migration files on this stack.
+  Add a field to the schema and it is simply available; existing rows keep
+  their stored values. This is the opposite of the pocketbase stack — do not go
+  looking for a `migrations/` directory.
+- **The View is served BUILT.** `vite build` compiles `index.html` + `src/`
+  into `dist/`; `server.mjs` serves `dist/` with real cache validators. A
+  source edit does nothing until the next build.
 
 ## Schema — entities & fields
 
@@ -116,14 +125,26 @@ operations: [
     params: { task: { type: "ref", entity: "tasks", required: true } } },
 ],
 operationRunners: {
-  "clear-done": (_args, _ctx, { db, persist }) => { /* mutate db, then */ persist(); return { removed }; },
-  "complete-task": (args, _ctx, { db, persist }) => { const t = db.tasks?.[args.task]; /* … */ persist(); return { ok: true }; },
+  "clear-done": (_args, _ctx, { store }) => {
+    let removed = 0;
+    for (const rec of store.list("tasks")) {
+      if (rec.status === "done" && store.remove("tasks", rec.id)) removed++;
+    }
+    return { removed };
+  },
+  "complete-task": (args, _ctx, { store }) => {
+    const task = store.get("tasks", args?.task);
+    /* … */
+    store.put("tasks", task);
+    return { ok: true };
+  },
 },
 ```
 
-- **Runner signature:** `(args, ctx, { db, persist }) => jsonableResult`. `db` is
-  the live store object (`db.<entity>[id]`); call `persist()` after any mutation
-  or the write is lost.
+- **Runner signature:** `(args, ctx, { store }) => jsonableResult`. `store` is
+  the SQLite-backed record store — `list(entity)` · `get(entity, id)` ·
+  `put(entity, record)` · `remove(entity, id)`. Writes are durable when the
+  call returns; there is no separate persist() step.
 - **`params` is REQUIRED and typed** (same vocabulary as fields); use `{}` for
   none. The record screen renders it as the signature — args described only in
   prose can neither be shown nor checked.
@@ -136,10 +157,10 @@ operationRunners: {
 - The gate step **"operations resolve"** fails the build if any declared
   operation has no runner function.
 
-## The View — `public/`
+## The View — `index.html` + `src/`
 
-A dependency-free SPA over the same records API the agent uses. Same-origin
-writes are trusted by the adapter, so the browser needs no token.
+A React SPA over the same records API the agent uses. Same-origin writes are
+trusted by the adapter, so the browser needs no token.
 
 **Records API** the View calls (PocketBase-compatible REST, served by the adapter):
 
@@ -154,24 +175,31 @@ writes are trusted by the adapter, so the browser needs no token.
 Always render back what the server **stored**, not what you sent. Never render an
 unbounded collection — page with `perPage`.
 
-**Widget kit — `public/ui.js`** (one implementation each; import, don't rebuild):
-`el(tag, attrs, ...children)` · `icon(name, size)` · `toast(kind, message)` ·
-`confirmDialog({ title, body, confirmLabel, danger })` (in-app dialog — never
-`window.confirm`) · `fmtDay(dayKey)` · `isPastDay(dayKey)`.
+**Shared pieces — `src/`** (one implementation each; import, don't rebuild):
+`<Icon name size>` · `useToast()` → `toast(kind, message)` ·
+`useConfirm()` → `[confirm, confirmElement]` (in-app dialog — never
+`window.confirm`) · `api(path, init)` · `fmtDay(dayKey)` · `isPastDay(dayKey)`.
+Component styles are plain CSS classes in `public/ui.css`.
 
-**Tokens — `public/tokens.css`:** two tiers, primitives → semantic. Components
-consume ONLY the semantic tier (`--bg-surface`, `--text-primary`,
-`--accent-solid`, `--danger-solid`, `--focus-ring`, `--sp-*`, `--r-*`, `--fs-*`,
-`--dur-*`, …). Theme by re-pointing semantic tokens; keep the names stable. Light
-and dark both resolve every token and hold WCAG AA. Never hardcode a value where
-a token exists.
+**Tokens — `public/tokens.css`:** the kit sheet — `--agent-app-*` foundation →
+semantic bridge. Components consume ONLY semantic tokens (`--bg-surface`,
+`--text-primary`, `--accent-solid`, `--danger-solid`, `--focus-ring`, `--sp-*`,
+`--r-*`, `--fs-*`, `--dur-*`, …). Theme by re-pointing the foundation or picking
+a `[data-style]` pack; keep the names stable. Light and dark both resolve every
+token and hold WCAG AA. Never hardcode a value where a token exists.
 
-**Realtime / staleness — `/_a2app/update.js`** (system-owned, loaded by
-`index.html`). It reloads the tab on a CODE change when nothing is unsaved, and
-on a DATA change (an agent wrote through A2App) dispatches `a2app:datachange` on
-`window` so the View re-reads without discarding a half-typed form. Keep the
-script tag and the listener when you rewrite the View. Do not add your own
-polling or reload logic.
+**Realtime / staleness — `src/updater.js`** bridges to the system-owned
+watcher (`/_a2app/update.js`, a RUNTIME import the bundler must leave alone).
+It reloads the tab on a CODE change when nothing is unsaved, and on a DATA
+change (an agent wrote through A2App) dispatches `a2app:datachange` on `window`
+so the View re-reads without discarding a half-typed form. Keep the bridge and
+the listener when you rewrite the View. Do not add your own polling or reload
+logic.
+
+**Building:** `npm run build` (the pipeline build step) compiles the View into
+`dist/`. For tight iteration `npm run dev:ui` runs Vite's dev server with
+`/api` and `/_a2app` proxied to the running app — start the app first
+(`agent-app <dir> serve` or `dev`).
 
 ## External data (third-party APIs)
 
@@ -194,12 +222,11 @@ limitation rather than inventing an unsupported mechanism.
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything (`install` → `build` → `start`,
-health at `/api/health`… this blueprint serves identity at `/api/_a2app`). Never
-start a server by hand.
+health at `/api/_a2app`). Never start a server by hand.
 
 ```bash
 agent-app <dir> dev        # boot the candidate on a hidden port: fresh seeded store, prints the dev URL
-agent-app <dir> validate   # framework files → build → schema loads → operations resolve → ownership canon → describe budget (on dev)
+agent-app <dir> validate   # framework files → build (vite) → schema loads → operations resolve → ownership canon → describe budget (on dev)
 agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
 agent-app <dir> promote    # requires the gate pass; backup, scripts/promote-apply.mjs, destroys the dev instance
 ```
@@ -209,23 +236,24 @@ additive)"** and **"operations resolve"**. `lifecycle.dataDir` is `data/`.
 
 **Environments (one tree, redirected inputs).** `server.mjs` reads `PORT`,
 `A2APP_DATA_DIR` and `A2APP_ENV` from the framework. The dev instance runs
-against a disposable per-boot store and serves `public/` directly — a View
-edit shows on refresh; a `server.mjs`/schema edit needs `dev` again. The LIVE
-instance serves a boot-time snapshot of `public/` (`.a2app/public`), so edits
-never reach users until promote + serve.
+against a disposable per-boot SQLite store and serves `dist/` directly — a
+View edit needs a rebuild to show; a `server.mjs`/schema edit needs `dev`
+again. The LIVE instance serves a boot-time snapshot of `dist/`
+(`.a2app/public`), so edits never reach users until promote + serve.
 
 ## Footguns for this stack
 
 - **Two files, one truth.** Every operation lives in BOTH `schema.operations`
   and `operations.json`, byte-agreeing on name/module/params/flags. The gate
   fails a mismatch.
-- **`persist()` or it never happened.** A runner that mutates `db` without
-  calling `persist()` returns success while storing nothing.
+- **The View is served built.** Editing `src/` changes nothing a browser sees
+  until `npm run build` runs. If the app looks stale, check `dist/` before
+  debugging the server.
 - **No migrations here.** Schema is declarative and additive; do not look for or
   create a `migrations/` directory.
 - **Empty-DB first paint.** A fresh app has no records — the View must render its
   loading/empty/error states without erroring. The verifier fails any first-paint
   error.
-- **Keep the update-watcher tag.** Rewriting `index.html` without
-  `<script type="module" src="/_a2app/update.js">` leaves already-open tabs stale
+- **Keep the update-watcher bridge.** Rewriting the View without `src/updater.js`
+  (the runtime import of `/_a2app/update.js`) leaves already-open tabs stale
   forever.

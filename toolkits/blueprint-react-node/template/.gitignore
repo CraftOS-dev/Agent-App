@@ -17,3 +17,6 @@ data/
 .a2app/backups/
 
 node_modules/
+
+# The built View (vite build output) — rebuilt by the pipeline, never committed.
+dist/

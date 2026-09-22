@@ -5,6 +5,14 @@ protocol; this file only translates HTTP <-> the adapter's `dispatch()`. Run:
 `python main.py` — the `__main__` block below binds uvicorn to the environment's
 `PORT` (what `agent-app <dir> serve` sets), so the start command needs no shell
 variable and is portable across POSIX shells and cmd.exe.
+
+The launch contract (`serve` and `dev` both set these; defaults cover a direct
+`python main.py`):
+  A2APP_DATA_DIR  where records live (SQLite at <dir>/db.sqlite). `serve`
+                  passes the toolkit's declared lifecycle dataDir ("data" —
+                  what backup/restore/promote protect); `dev` passes a fresh
+                  per-boot directory, which is how a dev instance runs against
+                  a disposable database that re-seeds from empty.
 """
 import json
 import os
@@ -14,12 +22,13 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from a2app_adapter import Adapter, Store
+from a2app_adapter import Adapter, SqliteStore
 import schema
 
 HERE = Path(__file__).resolve().parent
 manifest = json.loads((HERE / "manifest.json").read_text())
 PORT = int(os.environ.get("PORT", manifest.get("port", 8090)))
+DATA_DIR = Path(os.environ.get("A2APP_DATA_DIR", HERE / "data")).resolve()
 
 
 def _agent_token() -> str:
@@ -40,7 +49,9 @@ adapter = Adapter(
     app_name=manifest["name"],
     entities=schema.ENTITIES,
     operations=schema.OPERATIONS,
-    store=Store(schema.SEED),
+    # Durable store: records + idempotency keys in SQLite inside the lifecycle
+    # dataDir. Seeded only when this boot CREATED the database file.
+    store=SqliteStore(str(DATA_DIR / "db.sqlite"), schema.SEED),
     token=_agent_token(),
     # Modules are declared in the manifest and are what describe's root level
     # lists; every entity and operation names one.

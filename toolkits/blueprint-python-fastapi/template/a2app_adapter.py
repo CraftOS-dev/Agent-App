@@ -4,6 +4,9 @@ A dependency-free port of the A2App served surface: identity, describe, whoami,
 context, guarded records CRUD, declared operations (with approval for
 destructive ops), and the app->agent task/event plane. It enforces the fixed
 validation chain: origin -> credential -> scope -> guard -> backend -> read-back.
+Records persist in SQLite (stdlib ``sqlite3`` -- see ``SqliteStore``), so the
+stack stays dependency-free while the live database is a real on-disk file
+inside the toolkit's declared lifecycle dataDir.
 
 The pure validation rules below MUST match `@a2app/rules` so a FastAPI app and a
 Node app reject identical payloads identically — verified by the conformance
@@ -14,8 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
+import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -457,6 +463,57 @@ class _RateLimiter:
 
 # ------------------------------------------------------------------- store
 
+# The single-clause filter grammar this backend implements -- `field = "value"`,
+# `field != "value"`, or `field ~ "value"` (contains), optionally wrapped in one
+# pair of parentheses. Enough for label->id resolution; a richer backend exposes
+# its own query language. Anything outside it is REFUSED, never ignored: a
+# store that accepts `filter` and returns unfiltered rows answers 200 with the
+# wrong records, which turns every label lookup into a false multi-match.
+# Parity: the react-node blueprint's matchFilter in server.mjs.
+_FILTER_RE = re.compile(
+    r"""^\s*\(?\s*([A-Za-z_]\w*)\s*(=|!=|~)\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s"'()]+))\s*\)?\s*$"""
+)
+
+
+class UnsupportedFilter(Exception):
+    """Raised when a `filter` expression falls outside the grammar above."""
+
+    def __init__(self, expression: str):
+        super().__init__(f"filter expression is not supported by this backend: {expression}")
+        self.expression = expression
+
+
+def _filter_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _match_filter(expr: str) -> Callable[[dict], bool]:
+    m = _FILTER_RE.match(expr)
+    if m is None:
+        raise UnsupportedFilter(expr)
+    field, op, quoted, single_quoted, bare = m.groups()
+    # Only the double-quoted form carries escapes; unescape exactly what the
+    # escaping side wrote (backslash-x -> x).
+    if quoted is not None:
+        value = re.sub(r"\\(.)", r"\1", quoted)
+    else:
+        value = single_quoted if single_quoted is not None else (bare or "")
+
+    def predicate(record: dict) -> bool:
+        current = _filter_str(record.get(field))
+        if op == "=":
+            return current == value
+        if op == "!=":
+            return current != value
+        return value in current
+
+    return predicate
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -473,11 +530,17 @@ def _coerce(field: dict, value: Any) -> Any:
 
 class Store:
     """In-memory record store plus adapter-owned state (tasks, events,
-    idempotency keys, approvals, audit). A real deployment swaps this for a
-    database; the served surface and the rules are unchanged."""
+    idempotency keys, approvals, audit). The blueprint's live store is
+    ``SqliteStore`` below (same interface, records + idempotency keys durable);
+    this base class is the disposable variant for tests and tooling."""
 
     def __init__(self, seed: Optional[dict] = None):
         self.seed = seed or {}
+        # A fresh in-memory store is always empty, so it always takes the seed.
+        # SqliteStore sets this False when the database file already existed:
+        # re-seeding an existing database on every boot would resurrect a seed
+        # record the user deleted.
+        self.wants_seed = True
         self.rows: dict[str, dict[str, dict]] = {}
         self.tasks: dict[str, dict] = {}
         self.events: list[dict] = []
@@ -489,8 +552,16 @@ class Store:
         self._event_seq = 0
 
     # records ---------------------------------------------------------------
+    def _all_records(self, entity: str) -> list[dict]:
+        """Every record of one entity — the single hook a durable subclass
+        overrides for reads; list_records keeps the shared filter/sort/page."""
+        return list(self.rows.get(entity, {}).values())
+
     def list_records(self, entity: str, query: dict) -> dict:
-        items = list(self.rows.get(entity, {}).values())
+        items = self._all_records(entity)
+        flt = query.get("filter")
+        if flt:
+            items = [r for r in items if _match_filter(flt)(r)]
         sort = query.get("sort")
         if sort:
             desc = sort.startswith("-")
@@ -572,6 +643,104 @@ class Store:
         self.tasks[task["id"]] = task
 
 
+class SqliteStore(Store):
+    """The blueprint's live store: records + idempotency keys in SQLite
+    (stdlib ``sqlite3`` -- still dependency-free).
+
+    Records are JSON rows in one table keyed (entity, id): the schema stays
+    declarative and additive (a new field simply appears in the JSON) while the
+    DATABASE is a real on-disk file inside the toolkit's declared lifecycle
+    dataDir -- which is what backup/restore/promote protect. WAL keeps a reader
+    and a writer from blocking each other.
+
+    Idempotency keys persist because a restart is exactly when a retried POST
+    arrives -- an in-memory table would return a duplicate record instead of
+    the 409 the protocol promises. The task/event plane, approvals, grants and
+    audit stay in memory: they are runtime queues and session state, not
+    records.
+
+    Writes are durable when the call returns -- there is no separate persist()
+    step. A dict read from this store is a COPY: mutate it, then put_record()
+    it back, or the change never happened.
+    """
+
+    def __init__(self, path: str, seed: Optional[dict] = None):
+        super().__init__(seed)
+        full = os.path.abspath(path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        fresh = not os.path.exists(full)
+        # uvicorn may service requests off the event-loop thread; one connection
+        # guarded by one lock keeps this correct without a pool.
+        self._lock = threading.Lock()
+        self._db = sqlite3.connect(full, check_same_thread=False)
+        with self._lock:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS records ("
+                "entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, "
+                "PRIMARY KEY (entity, id))"
+            )
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS idem ("
+                "entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, "
+                "PRIMARY KEY (entity, key))"
+            )
+            self._db.commit()
+        self.wants_seed = fresh
+
+    def close(self) -> None:
+        """Release the database file (the last connection closing checkpoints
+        the WAL into the main file)."""
+        self._db.close()
+
+    # records ---------------------------------------------------------------
+    def _all_records(self, entity: str) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT data FROM records WHERE entity = ?", (entity,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_record(self, entity: str, rec_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM records WHERE entity = ? AND id = ?", (entity, rec_id)
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def put_record(self, entity: str, rec: dict) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO records (entity, id, data) VALUES (?, ?, ?) "
+                "ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data",
+                (entity, rec["id"], json.dumps(rec)),
+            )
+            self._db.commit()
+
+    def delete_record(self, entity: str, rec_id: str) -> bool:
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM records WHERE entity = ? AND id = ?", (entity, rec_id)
+            )
+            self._db.commit()
+        return cursor.rowcount > 0
+
+    # idempotency -----------------------------------------------------------
+    def idem_get(self, entity: str, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT rec_id FROM idem WHERE entity = ? AND key = ?", (entity, key)
+            ).fetchone()
+        return None if row is None else row[0]
+
+    def idem_put(self, entity: str, key: str, rec_id: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO idem (entity, key, rec_id) VALUES (?, ?, ?) "
+                "ON CONFLICT (entity, key) DO UPDATE SET rec_id = excluded.rec_id",
+                (entity, key, rec_id),
+            )
+            self._db.commit()
+
+
 # ----------------------------------------------------------------- adapter
 
 def _approval_key(name: str, args: dict) -> str:
@@ -622,10 +791,14 @@ class Adapter:
             "token": token, "credentialId": "cred_local", "agentName": "local",
             "principal": "owner", "scopes": ["*"],
         })
-        # Seed records (materialize server-managed read-only fields).
-        for name, records in store.seed.items():
-            for raw in records:
-                store.put_record(name, self._materialize(name, raw))
+        # Seed records (materialize server-managed read-only fields) — but only
+        # into a store that is genuinely fresh. A durable store that already
+        # holds a database refuses the seed: re-seeding on every boot would
+        # resurrect seed records the user deleted.
+        if store.wants_seed:
+            for name, records in store.seed.items():
+                for raw in records:
+                    store.put_record(name, self._materialize(name, raw))
 
     def _model_problems(self) -> list[str]:
         """Everything wrong with the app part's module/operation declarations.
@@ -990,6 +1163,12 @@ class Adapter:
             return None
         return self._err(429, ERROR_CODES["RATE_LIMITED"], f"Rate limit exceeded ({decision['limit']} per window). Slow down and retry.", retryAfterSeconds=decision["retryAfterSeconds"])
 
+    def _is_same_origin(self, headers: dict) -> bool:
+        """True when the request carries one of the app's OWN origins — the
+        trusted browser-UI path `_authorize` also honours."""
+        origin = headers.get("origin")
+        return origin is not None and origin in self.allowed_origins
+
     # -- dispatch -----------------------------------------------------------
     def _access_for(self, headers: dict) -> dict:
         """What this caller may do, for rendering access on a describe level.
@@ -1218,7 +1397,12 @@ class Adapter:
                 if not rec:
                     return self._err(404, "record_not_found", f'No {entity} record "{rec_id}".')
                 return 200, rec
-            return 200, self.store.list_records(entity, query)
+            try:
+                return 200, self.store.list_records(entity, query)
+            except UnsupportedFilter as e:
+                # Refuse, never ignore: unfiltered rows under a filter would be
+                # a 200 with the wrong records (see the grammar's comment).
+                return self._err(400, "invalid_filter", str(e))
 
         ctx, reply = self._authorize(headers, f"data:{entity}:write", True)
         if reply:
@@ -1587,10 +1771,66 @@ def _selftest() -> int:
         [{"entity": "invoices", "field": "projects", "ids": ["inv_1"]}],
     )
 
+    # 5. Filter grammar: filtered reads filter, and anything outside the
+    #    grammar is refused, never ignored.
+    flt_store = Store()
+    flt_store.put_record("tasks", {"id": "a", "title": "Ship it", "status": "todo"})
+    flt_store.put_record("tasks", {"id": "b", "title": "Other work", "status": "done"})
+    check(
+        "filter: equality",
+        [r["id"] for r in flt_store.list_records("tasks", {"filter": 'status = "todo"'})["items"]],
+        ["a"],
+    )
+    check(
+        "filter: negation",
+        [r["id"] for r in flt_store.list_records("tasks", {"filter": 'status != "todo"'})["items"]],
+        ["b"],
+    )
+    check(
+        "filter: contains",
+        [r["id"] for r in flt_store.list_records("tasks", {"filter": 'title ~ "Ship"'})["items"]],
+        ["a"],
+    )
+    try:
+        flt_store.list_records("tasks", {"filter": 'status = "todo" && title ~ "x"'})
+        failures.append("an unsupported filter expression was silently accepted")
+    except UnsupportedFilter:
+        pass
+
+    # 6. SQLite store: durable records + idempotency keys, and seed-once
+    #    semantics across a restart (reopening the same file).
+    import shutil
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="a2app-selftest-")
+    try:
+        db_path = os.path.join(tmp, "data", "db.sqlite")
+        first = SqliteStore(db_path)
+        check("a fresh database file wants the seed", first.wants_seed, True)
+        first.put_record("tasks", {"id": "t1", "title": "persisted", "status": "todo"})
+        first.idem_put("tasks", "key-1", "t1")
+        check("sqlite get returns what was put", first.get_record("tasks", "t1")["title"], "persisted")
+        check(
+            "sqlite list flows through the shared filter/sort/page",
+            [r["id"] for r in first.list_records("tasks", {"filter": 'status = "todo"'})["items"]],
+            ["t1"],
+        )
+        first.close()
+
+        second = SqliteStore(db_path)
+        check("an existing database refuses the seed", second.wants_seed, False)
+        check("records survive a restart", second.get_record("tasks", "t1")["title"], "persisted")
+        check("idempotency keys survive a restart", second.idem_get("tasks", "key-1"), "t1")
+        check("delete removes the row", second.delete_record("tasks", "t1"), True)
+        check("a second delete reports not-found", second.delete_record("tasks", "t1"), False)
+        second.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     if failures:
         print("a2app_adapter selftest FAILED:\n  - " + "\n  - ".join(failures))
         return 1
-    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes)")
+    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store)")
     return 0
 
 

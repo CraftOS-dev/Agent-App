@@ -1,6 +1,6 @@
 {
   "id": "blueprint-react-node",
-  "description": "Runnable Agent App blueprint: Node (built-in http) backend + a vanilla SPA View + a JSON-file store, with the A2App adapter mounted as embedded middleware (@a2app/adapter-core). NOT part of the framework.",
+  "description": "Runnable Agent App blueprint: React (Vite) View + Hono server + SQLite store, with the A2App adapter mounted as embedded middleware (@a2app/adapter-core). NOT part of the framework.",
   "template": "template",
   "adapterVersionFrom": "server.mjs",
   "systemPaths": [

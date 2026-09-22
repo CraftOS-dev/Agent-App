@@ -55,16 +55,20 @@ OPERATIONS = [
 
 # Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
 # these for a declared operation; a destructive op is gated by approval first.
+# `store` is the live SQLite-backed store — read with store.get_record /
+# store.list_records, write with store.put_record / store.delete_record.
+# Writes are durable when the call returns. A record read from the store is a
+# COPY: mutate it, then put_record() it back, or the change never happened.
 def _count_tasks(args, ctx, store):
-    return {"count": len(store.rows.get("tasks", {}))}
+    return {"count": store.list_records("tasks", {})["totalItems"]}
 
 
 def _complete_task(args, ctx, store):
-    task = store.rows.get("tasks", {}).get(args.get("task"))
+    task = store.get_record("tasks", args.get("task"))
     if task is None:
         return {"ok": False, "reason": "no such task"}
     task["status"] = "done"
-    store.persist()
+    store.put_record("tasks", task)
     return {"ok": True, "task": task["id"], "status": task["status"]}
 
 

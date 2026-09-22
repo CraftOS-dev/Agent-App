@@ -1,7 +1,7 @@
 /**
  * lifecycle.promote — apply a code change to the live database.
  *
- * For a schema-in-code JSON store there is no destructive migration chain:
+ * For a schema-in-code SQLite store there is no destructive migration chain:
  * changes are additive (a new field simply defaults to absent, an existing
  * record stays valid). By the time this runs, the framework has ALREADY taken
  * the mandatory pre-promote backup. This step therefore:
@@ -11,14 +11,15 @@
  *      being removed from the schema — so promote can never silently orphan data.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import Database from "better-sqlite3";
 import { schema } from "../a2app.schema.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
-const LIVE = join(ROOT, "data", "db.json");
+const LIVE = join(ROOT, "data", "db.sqlite");
 
 // 1. The app must build.
 execFileSync(process.execPath, ["--check", join(ROOT, "server.mjs")], { stdio: "ignore" });
@@ -28,10 +29,12 @@ if (!existsSync(LIVE)) {
   process.exit(0);
 }
 
-// 2. Live must still parse.
-let db;
+// 2. Live must still open and read.
+let held;
 try {
-  db = JSON.parse(readFileSync(LIVE, "utf8"));
+  const db = new Database(LIVE, { readonly: true });
+  held = db.prepare("SELECT entity, COUNT(*) AS n FROM records GROUP BY entity").all();
+  db.close();
 } catch (err) {
   process.stderr.write(`live database is unreadable (${err.message}) — refusing to promote\n`);
   process.exit(1);
@@ -40,7 +43,7 @@ try {
 // 3. Refuse to orphan data: an entity that holds live records must still exist
 //    in the new schema (removing it is a destructive migration).
 const entities = new Set(Object.keys(schema.entities));
-const orphaned = Object.keys(db).filter((e) => Object.keys(db[e] ?? {}).length > 0 && !entities.has(e));
+const orphaned = held.filter((row) => row.n > 0 && !entities.has(row.entity)).map((row) => row.entity);
 if (orphaned.length > 0) {
   process.stderr.write(
     `refusing to promote: live data exists for entit${orphaned.length === 1 ? "y" : "ies"} removed ` +
@@ -50,7 +53,7 @@ if (orphaned.length > 0) {
   process.exit(1);
 }
 
-const liveEntities = Object.keys(db).filter((e) => Object.keys(db[e] ?? {}).length > 0);
+const liveEntities = held.filter((row) => row.n > 0).map((row) => row.entity);
 process.stdout.write(
   `live database compatible with the new schema (${entities.size} declared; ` +
     `live data in: ${liveEntities.join(", ") || "none"})\n`,

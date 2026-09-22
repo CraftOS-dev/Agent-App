@@ -1,15 +1,22 @@
 /**
  * The Agent App server (SYSTEM-OWNED — hash-locked in the ownership canon).
  *
- * A single Node process on the built-in `http` module. It mounts the A2App
- * adapter (`@a2app/adapter-core`) as embedded middleware and serves the static
- * View from `public/`; records live in a JSON file (`a2app.data.json`). The
- * agent evolves the app by editing `a2app.schema.mjs` (Model + operations) and
- * `public/` (View) — never this file. Because describe and `schemaVersion` are
- * derived from the live schema, an agent always sees the true model.
+ * A single Node process: a Hono app served by `@hono/node-server`, with the
+ * A2App adapter (`@a2app/adapter-core`) mounted as embedded middleware and the
+ * built React View (`dist/`, produced by `vite build`) served behind it.
+ * Records live in SQLite (`data/db.sqlite`, via better-sqlite3). The agent
+ * evolves the app by editing `a2app.schema.mjs` (Model + operations) and
+ * `src/` (the React View) — never this file. Because describe and
+ * `schemaVersion` are derived from the live schema, an agent always sees the
+ * true model.
  */
-import { createA2App, createA2AppServer, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createA2App, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
+import { serve } from "@hono/node-server";
+import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import Database from "better-sqlite3";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -25,9 +32,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 //   A2APP_ENV       "live" or "dev" — decides how the static View is served.
 const ENV = process.env.A2APP_ENV ?? "live";
 const DATA_DIR = process.env.A2APP_DATA_DIR ? resolve(process.env.A2APP_DATA_DIR) : join(HERE, "data");
-const DATA_FILE = join(DATA_DIR, "db.json");
+const DB_FILE = join(DATA_DIR, "db.sqlite");
 const TOKEN_FILE = join(HERE, ".agent-token");
-const PUBLIC_DIR = join(HERE, "public");
+// The React View is served BUILT: `vite build` (the pipeline `build` step)
+// compiles `index.html` + `src/` into `dist/`. Source is never served.
+const DIST_DIR = join(HERE, "dist");
 
 const manifest = JSON.parse(readFileSync(join(HERE, "manifest.json"), "utf8"));
 // The CLI reaches a running app at manifest.port; bind the same port so the two
@@ -61,29 +70,56 @@ function materialize(fields, body) {
   return rec;
 }
 
-function seedDb() {
-  const db = {};
-  for (const [entity, def] of Object.entries(schema.entities)) {
-    db[entity] = {};
-    for (const seed of def.seed ?? []) {
-      const rec = materialize(def.fields, seed);
-      db[entity][rec.id] = rec;
+// One generic table maps every entity onto SQLite: rows are the protocol's
+// JSON records, keyed (entity, id). The schema stays declarative and additive
+// (a new field simply appears in the JSON), while the DATABASE is a real
+// on-disk SQLite file inside the toolkit's declared lifecycle dataDir — which
+// is what backup/restore/promote protect. WAL keeps a reader (the View) and a
+// writer (the agent) from blocking each other.
+mkdirSync(DATA_DIR, { recursive: true });
+const freshDb = !existsSync(DB_FILE);
+const sqlite = new Database(DB_FILE);
+sqlite.pragma("journal_mode = WAL");
+sqlite.exec(
+  "CREATE TABLE IF NOT EXISTS records (entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (entity, id))",
+);
+
+const stmt = {
+  list: sqlite.prepare("SELECT data FROM records WHERE entity = ?"),
+  get: sqlite.prepare("SELECT data FROM records WHERE entity = ? AND id = ?"),
+  put: sqlite.prepare(
+    "INSERT INTO records (entity, id, data) VALUES (?, ?, ?) ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data",
+  ),
+  del: sqlite.prepare("DELETE FROM records WHERE entity = ? AND id = ?"),
+};
+
+/** The store operation runners receive: entity-level reads and writes over the
+ *  SQLite table. Writes are durable when the call returns — there is no
+ *  separate persist() step on this stack. */
+const store = {
+  list: (entity) => stmt.list.all(entity).map((row) => JSON.parse(row.data)),
+  get: (entity, id) => {
+    const row = stmt.get.get(entity, id);
+    return row === undefined ? null : JSON.parse(row.data);
+  },
+  put: (entity, rec) => {
+    stmt.put.run(entity, rec.id, JSON.stringify(rec));
+    return rec;
+  },
+  remove: (entity, id) => stmt.del.run(entity, id).changes > 0,
+};
+
+// Seed exactly once, when this boot CREATED the database file — first live
+// boot. (`dev` prepares its own freshly seeded database via
+// scripts/dev-prepare.mjs before the server starts.)
+if (freshDb) {
+  const seedAll = sqlite.transaction(() => {
+    for (const [entity, def] of Object.entries(schema.entities)) {
+      for (const seed of def.seed ?? []) store.put(entity, materialize(def.fields, seed));
     }
-  }
-  return db;
+  });
+  seedAll();
 }
-
-const db = existsSync(DATA_FILE) ? JSON.parse(readFileSync(DATA_FILE, "utf8")) : seedDb();
-
-/** Persist the whole store atomically (temp file + rename). Operation runners
- *  call this synchronously, so it must complete before they return. */
-function persist() {
-  mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = DATA_FILE + ".tmp";
-  writeFileSync(tmp, JSON.stringify(db, null, 2) + "\n");
-  renameSync(tmp, DATA_FILE);
-}
-if (!existsSync(DATA_FILE)) persist();
 
 /* --------------------------------------------------------------- binding */
 
@@ -121,7 +157,7 @@ function matchFilter(expr) {
   };
 }
 
-/** The back face: maps the JSON store onto protocol types. The served surface
+/** The back face: maps the SQLite store onto protocol types. The served surface
  *  and the pure rules are shared verbatim from `@a2app/adapter-core`. */
 const binding = {
   appId: manifest.id,
@@ -140,7 +176,7 @@ const binding = {
   },
 
   listRecords(entity, query) {
-    let items = Object.values(db[entity] ?? {});
+    let items = store.list(entity);
     if (query.filter) items = items.filter(matchFilter(query.filter));
     if (query.sort) {
       const desc = query.sort.startsWith("-");
@@ -155,19 +191,16 @@ const binding = {
   },
 
   getRecord(entity, id) {
-    return db[entity]?.[id] ?? null;
+    return store.get(entity, id);
   },
 
   createRecord(entity, body) {
     const def = schema.entities[entity];
-    const rec = materialize(def.fields, body);
-    (db[entity] ??= {})[rec.id] = rec;
-    persist();
-    return rec;
+    return store.put(entity, materialize(def.fields, body));
   },
 
   updateRecord(entity, id, body) {
-    const rec = db[entity]?.[id];
+    const rec = store.get(entity, id);
     if (!rec) return null;
     for (const f of schema.entities[entity].fields) {
       if (f.readOnly || !(f.name in body)) continue;
@@ -175,21 +208,17 @@ const binding = {
       if (v === null || v === "") delete rec[f.name];
       else rec[f.name] = coerce(f, v);
     }
-    persist();
-    return rec;
+    return store.put(entity, rec);
   },
 
   deleteRecord(entity, id) {
-    if (!db[entity]?.[id]) return false;
-    delete db[entity][id];
-    persist();
-    return true;
+    return store.remove(entity, id);
   },
 
   runOperation(name, args, ctx) {
     const runner = schema.operationRunners?.[name];
     if (!runner) throw new Error(`no runner for operation "${name}"`);
-    return runner(args, ctx, { db, persist });
+    return runner(args, ctx, { store });
   },
 };
 
@@ -206,14 +235,15 @@ if (existsSync(TOKEN_FILE)) {
 /* ------------------------------------------------------------ static View */
 
 /**
- * The View, served from disk with real cache validators.
+ * The View, served BUILT and with real cache validators.
  *
  * "Live loads code at boot": in the live environment the View is served from a
- * SNAPSHOT of `public/` taken at this boot (`.a2app/public`), matching how the
- * rest of the code is fixed at process start. Without it, an agent's
- * mid-iteration edit to `public/` would reach live users on their next refresh
- * — before any gate or verify has seen it. The dev instance serves the tree
- * directly: edit → refresh is the point of dev.
+ * SNAPSHOT of `dist/` taken at this boot (`.a2app/public`), matching how the
+ * rest of the code is fixed at process start. Without it, a rebuild mid-
+ * iteration would reach live users on their next refresh — before any gate or
+ * verify has seen it. The dev instance serves `dist/` directly (rebuild →
+ * refresh); for tight View iteration `npm run dev:ui` runs Vite's dev server
+ * with `/api` proxied here.
  *
  * `createStaticView` is the framework's static handler, not a per-app one: it
  * answers every asset with `ETag`, `Last-Modified` and `Cache-Control: no-cache`
@@ -223,8 +253,8 @@ if (existsSync(TOKEN_FILE)) {
  *
  * `view.version()` fingerprints the bytes it serves. That is published below as
  * identity's `appVersion`, and it is the ONLY signal that moves for a View-only
- * change — `schemaVersion` covers entities and operations, so a new control, a
- * CSS tweak or reworded copy leaves it byte-identical. `a2app.schema.mjs` is
+ * change — `schemaVersion` covers entities and operations, so a new component,
+ * a CSS tweak or reworded copy leaves it byte-identical. `a2app.schema.mjs` is
  * folded in as well: an operation's description is not in `schemaVersion` either,
  * yet it changes what the app tells an agent.
  */
@@ -241,24 +271,32 @@ function copyDir(src, dest) {
   }
 }
 
-let servedPublicDir = PUBLIC_DIR;
-if (ENV === "live" && existsSync(PUBLIC_DIR)) {
+if (!existsSync(DIST_DIR)) {
+  // Refuse to serve an app with no View rather than 404-ing every human who
+  // opens it: the build step is part of the pipeline, so a missing dist/ means
+  // the pipeline has not run, not that this app is API-only.
+  process.stderr.write("dist/ not found — the View is not built. Run the pipeline build (npm run build) first.\n");
+  process.exit(1);
+}
+
+let servedPublicDir = DIST_DIR;
+if (ENV === "live") {
   const snapshot = join(HERE, ".a2app", "public");
   rmSync(snapshot, { recursive: true, force: true });
-  copyDir(PUBLIC_DIR, snapshot);
+  copyDir(DIST_DIR, snapshot);
   servedPublicDir = snapshot;
 }
 
 const view = createStaticView(servedPublicDir, {
-  // The update watcher lives at the project root, not inside `public/`: it is
-  // system-owned, and `public/` is the agent's to rewrite entirely.
+  // The update watcher lives at the project root, not inside the View build: it
+  // is system-owned, and the View is the agent's to rewrite entirely.
   aliases: { "/_a2app/update.js": join(HERE, "a2app-update.js") },
   fingerprintPaths: [join(HERE, "a2app.schema.mjs")],
   // An author who wants to move the marker by hand can bump manifest.appVersion.
   versionSalt: manifest.appVersion ?? "",
 });
 
-const app = createA2App(binding, {
+const a2app = createA2App(binding, {
   credentials: [{ token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
   // Re-derived per request, so it stays true for a server whose files changed
   // under it — the same "derive, do not declare" rule schemaVersion follows.
@@ -286,31 +324,84 @@ function logLine(level, evt, fields = {}) {
   process.stdout.write(JSON.stringify({ ts: new Date().toISOString(), level, evt, ...fields }) + "\n");
 }
 
-let nextRequestId = 0;
+/* ------------------------------------------------------------- Hono app */
+
+// Route ownership, in order: (1) the A2App adapter answers every path it owns
+// (identity, describe, records, operations, tasks/events) and declines the
+// rest; (2) anything else falls through to the static View. The adapter is
+// mounted as middleware — embedded-middleware form — so the app keeps Hono for
+// its own routes without ever standing in front of the protocol.
+const hono = new Hono();
+
+// A protocol write is tiny; anything larger is a mistake or an attack, and
+// buffering it whole would let a hostile client OOM the app. Same cap and
+// envelope as @a2app/adapter-core's own Node transport (http.ts).
+const MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024;
+hono.use(
+  "*",
+  bodyLimit({
+    maxSize: MAX_REQUEST_BODY_BYTES,
+    onError: (c) =>
+      c.json(
+        {
+          a2app: true,
+          ok: false,
+          code: "payload_too_large",
+          message: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES}-byte limit.`,
+          limitBytes: MAX_REQUEST_BODY_BYTES,
+        },
+        413,
+        { connection: "close" },
+      ),
+  }),
+);
+
+/** Adapt a Hono request into the framework-agnostic A2AppRequest the adapter
+ *  routes: method, path, query, lower-cased headers, parsed JSON body. A body
+ *  that is not JSON is handed to the guard as `__unparsed__` so it is rejected
+ *  by the adapter's own rules rather than 500-ing here. */
+async function toA2AppRequest(c) {
+  const url = new URL(c.req.url);
+  const query = {};
+  for (const [k, v] of url.searchParams) query[k] = v;
+  const headers = {};
+  for (const [k, v] of c.req.raw.headers) headers[k.toLowerCase()] = v;
+  const req = { method: c.req.method.toUpperCase(), path: url.pathname, query, headers };
+  if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT") {
+    const text = await c.req.text();
+    if (text.trim() !== "") {
+      try {
+        req.body = JSON.parse(text);
+      } catch {
+        req.body = { __unparsed__: text };
+      }
+    }
+  }
+  return req;
+}
+
+hono.use("*", async (c, next) => {
+  let reply;
+  try {
+    reply = await a2app.handle(await toA2AppRequest(c));
+  } catch (e) {
+    // Fail open internally: an adapter bug never 500s the whole app silently —
+    // it answers with a machine-readable adapter error.
+    return c.json({ a2app: true, ok: false, code: "adapter_error", message: String(e?.message ?? e) }, 500);
+  }
+  if (reply === null) return next(); // not the adapter's route — the View's
+  return c.json(reply.json, reply.status, reply.headers ?? {});
+});
+
+// Any path the adapter does not own is the View's. `view.handler` (the
+// framework's system-owned static handler) speaks Node req/res, which
+// @hono/node-server exposes as the environment bindings.
+hono.all("*", (c) => {
+  view.handler(c.env.incoming, c.env.outgoing);
+  return RESPONSE_ALREADY_SENT;
+});
 
 /* ---------------------------------------------------------------- listen */
-
-// Any path the adapter does not own falls through to the View. `view.handler`
-// (the framework's system-owned static handler) answers each asset with ETag,
-// Last-Modified and Cache-Control: no-cache and honours conditional requests,
-// so cache correctness is not this file's to re-solve.
-const server = createA2AppServer(app, view.handler);
-
-// Observe (never handle) every request for the log: id, method, path, status,
-// duration. Paths only — query strings can carry filters over user data.
-server.on("request", (req, res) => {
-  const id = ++nextRequestId;
-  const started = Date.now();
-  res.on("finish", () => {
-    logLine(res.statusCode >= 500 ? "error" : "info", "http", {
-      id,
-      method: req.method,
-      path: (req.url ?? "/").split("?")[0],
-      status: res.statusCode,
-      ms: Date.now() - started,
-    });
-  });
-});
 
 // Fail fast and loudly: a structured last line beats a silent wedge, and the
 // launch contract's supervisor is what restarts the process, not the process.
@@ -323,12 +414,29 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
-// Bind loopback explicitly. `listen(PORT)` alone binds every interface, so the
-// app was reachable from the network while its own log line said localhost --
-// and a same-origin request is trusted as the owner without a credential, which
-// made a scaffolded Agent App remotely writable by anyone who could reach the
-// port. Exposing it must be a deliberate act, hence the env var.
+// Bind loopback explicitly. Binding every interface would make the app
+// reachable from the network while its own log line said localhost — and a
+// same-origin request is trusted as the owner without a credential, which
+// would make a scaffolded Agent App remotely writable by anyone who could
+// reach the port. Exposing it must be a deliberate act, hence the env var.
 const HOST = process.env.A2APP_HOST ?? "127.0.0.1";
-server.listen(PORT, HOST, () => {
+const server = serve({ fetch: hono.fetch, port: PORT, hostname: HOST }, () => {
   logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://${HOST}:${PORT}` });
+});
+
+// Observe (never handle) every request for the log: id, method, path, status,
+// duration. Paths only — query strings can carry filters over user data.
+let nextRequestId = 0;
+server.on("request", (req, res) => {
+  const id = ++nextRequestId;
+  const started = Date.now();
+  res.on("finish", () => {
+    logLine(res.statusCode >= 500 ? "error" : "info", "http", {
+      id,
+      method: req.method,
+      path: (req.url ?? "/").split("?")[0],
+      status: res.statusCode,
+      ms: Date.now() - started,
+    });
+  });
 });

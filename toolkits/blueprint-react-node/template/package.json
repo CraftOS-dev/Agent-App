@@ -3,12 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "An Agent App scaffolded from blueprint-react-node.",
+  "description": "An Agent App scaffolded from blueprint-react-node: React (Vite) View + Hono server + SQLite store.",
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@a2app/adapter-core": "^0.1.0"
+    "@a2app/adapter-core": "^0.1.0",
+    "@hono/node-server": "^2.1.1",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
   },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "build": "vite build",
+    "dev:ui": "vite"
   }
 }

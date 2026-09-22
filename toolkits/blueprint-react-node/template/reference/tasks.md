@@ -11,7 +11,7 @@ appends here citing the entry date.
 - [x] T-4 (F-PLA-5, Q4): delete behind the app's confirm dialog, naming the task
 - [x] T-5 (F-PLA-6, Q5): loading skeletons, per-filter empty states, error banner with retry
 - [x] T-6 (F-AGT-1..3): operations clear-done / count-tasks / complete-task declared and implemented
-- [x] T-7 (Q2, Q6, Q8): token system, ui.css/ui.js widgets, motion presets, dialog focus flow, live-region toasts
+- [x] T-7 (Q2, Q6, Q8): token system, ui.css + shared React components (Icon/toast/dialog), motion presets, dialog focus flow, live-region toasts
 - [x] T-8 (Q9): 480 px breakpoint — form wrap, due-badge hide, 44 px touch targets
 - [x] T-9 (Q11, Q15): stored-response updates, stale-response guard, fetch timeouts + GET retry, ETag revalidation
 - [x] T-10 (Q17): JSON-line logging (boot/http/crash) with request ids

@@ -1,9 +1,10 @@
 # Blueprint reference — python-fastapi
 
-A FastAPI backend whose A2App adapter is a dependency-free, in-process Python
-port of the served surface (identity, describe, guarded records CRUD, operations
-with approval, tasks/events). The pure rules match `@a2app/rules` byte-for-byte
-on rejections — the conformance suite is the oracle.
+A FastAPI backend + a SQLite store, whose A2App adapter is a dependency-free,
+in-process Python port of the served surface (identity, describe, guarded
+records CRUD, operations with approval, tasks/events). Records persist in
+SQLite via the stdlib `sqlite3` module. The pure rules match `@a2app/rules`
+byte-for-byte on rejections — the conformance suite is the oracle.
 
 Where the `creator`/`modify` skill says "per your stack", the answer is here. If
 this file and the source disagree, the source wins.
@@ -38,8 +39,9 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `requirements.txt` | build | Python dependencies. Add your HTTP client (e.g. `httpx`) here when you call external APIs. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `main.py` | SYSTEM (hash-locked) | FastAPI wiring: reads the HTTP request under a size cap and hands it to `adapter.dispatch()`; serves `/api/**` and `/.well-known/a2app.json` only. Never edit. |
-| `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events) + the pure rules (guard, predicates, fingerprint) + `--selftest`. Never edit. |
-| `data/` | runtime | the live store (git-ignored, created on first boot). Never commit. |
+| `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
+| `scripts/promote_apply.py` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup; refuses to orphan an entity that still holds data. Leave it alone. |
+| `data/` | runtime | the live SQLite database (`db.sqlite`, git-ignored, created on first boot). Never edit by hand; never commit. |
 
 SYSTEM files are hashed in `.a2app/system-hashes.json`; the gate fails the build
 if one changes.
@@ -51,9 +53,10 @@ if one changes.
 - **`schema.py` is the single source of truth for the model.** You never
   hand-write `describe` — the adapter derives it (and `schemaVersion`) from
   `ENTITIES`/`OPERATIONS`. Change the schema, and every A2App screen updates.
-- **The model is declarative and additive.** There are no migration files on this
-  stack. Add a field to `ENTITIES` and it is simply available. Do not look for a
-  `migrations/` directory.
+- **The model is declarative and additive.** Records are JSON rows in one
+  SQLite table keyed (entity, id); there are no migration files on this stack.
+  Add a field to `ENTITIES` and it is simply available; existing rows keep
+  their stored values. Do not look for a `migrations/` directory.
 
 ## Schema — entities & fields
 
@@ -82,8 +85,10 @@ SEED = {"<entity>": [{"id": "…", "title": "…", "created": "2026-01-01T00:00:
 (server-managed), `max`, and `dayKey: True` for a whole-day text field advertised
 as `YYYY-MM-DD`.
 
-**Seeding:** `SEED` is applied when the store is built fresh. Seeded data
-survives a fresh build; runtime test data does not.
+**Seeding:** `SEED` is applied only when a boot CREATES the database file
+(first live boot; every `dev` boot, since dev runs against a fresh per-boot
+data directory). An existing database is never re-seeded — that would
+resurrect seed records the user deleted.
 
 ## Operations — anything beyond plain CRUD
 
@@ -104,19 +109,22 @@ OPERATIONS = [
 ]
 
 def _complete_task(args, ctx, store):
-    task = store.rows.get("tasks", {}).get(args.get("task"))
+    task = store.get_record("tasks", args.get("task"))
     if task is None:
         return {"ok": False, "reason": "no such task"}
     task["status"] = "done"
-    store.persist()
+    store.put_record("tasks", task)
     return {"ok": True, "task": task["id"], "status": task["status"]}
 
 OPERATION_RUNNERS = {"count-tasks": _count_tasks, "complete-task": _complete_task}
 ```
 
-- **Runner signature:** `(args, ctx, store) -> json-able dict`. `store.rows` is
-  the live data (`store.rows["<entity>"][id]`); call `store.persist()` after any
-  mutation.
+- **Runner signature:** `(args, ctx, store) -> json-able dict`. `store` is the
+  live SQLite-backed store — read with `store.get_record(entity, id)` /
+  `store.list_records(entity, query)`, write with `store.put_record(entity,
+  record)` / `store.delete_record(entity, id)`. Writes are durable when the
+  call returns. A record read from the store is a COPY: mutate it, then
+  `put_record()` it back, or the change never happened.
 - **`params` is REQUIRED and typed** (same vocabulary as fields); use `{}` for
   none. The record screen renders it as the signature — args described only in
   prose can neither be shown nor checked.
@@ -136,7 +144,7 @@ The adapter serves the A2App records REST under `/api/`, dispatched from
 
 | Call | Meaning |
 |---|---|
-| `GET /api/collections/<entity>/records?filter=…&sort=…&page=…&perPage=…` | list |
+| `GET /api/collections/<entity>/records?filter=…&sort=…&page=…&perPage=…` | list (single-clause filter: `field = "v"` · `field != "v"` · `field ~ "v"`; anything richer is refused `invalid_filter`, never ignored) |
 | `POST /api/collections/<entity>/records` (JSON body) | create (guard validates the raw body) |
 | `PATCH /api/collections/<entity>/records/<id>` | update |
 | `DELETE /api/collections/<entity>/records/<id>` | delete |
@@ -169,28 +177,33 @@ server by hand. (The start command reads `PORT` from the environment rather than
 interpolating `${PORT}` in the shell, so it is portable to cmd.exe on Windows.)
 
 ```bash
-agent-app <dir> dev        # boot the candidate on a hidden port; the store is in-memory, so every boot is a fresh seed
+agent-app <dir> dev        # boot the candidate on a hidden port: fresh per-boot SQLite store re-seeded from empty, prints the dev URL
 agent-app <dir> validate   # framework files → build → python syntax + adapter self-test → operations resolve → ownership canon → describe budget (on dev)
 agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
+agent-app <dir> promote    # requires the gate pass; backup, scripts/promote_apply.py, destroys the dev instance
 ```
 
-**Stack limitation — no persistence, no promote.** This blueprint's `Store` is
-in-memory: records vanish at process exit, `lifecycle.dataDir` is never
-written, and the toolkit declares no `lifecycle.promote` — so `promote`,
-`backup` and `restore` refuse on this stack. Record it in the spec as a known
-limitation; an app that needs durable data belongs on a persistent blueprint.
+**Environments (one tree, redirected inputs).** `main.py` reads `PORT` and
+`A2APP_DATA_DIR` from the framework. The dev instance runs against a
+disposable per-boot SQLite database (a fresh directory means a fresh file
+means a fresh seed); the LIVE database lives in `data/db.sqlite` — what
+`backup`, `restore` and the mandatory pre-promote backup protect.
 
 Toolkit gate steps (from `a2app.toolkit.json`): **"python syntax + adapter
-self-test"** (`python -m py_compile … && python a2app_adapter.py --selftest`) and
-**"operations resolve"**. `lifecycle.dataDir` is `data/`.
+self-test"** (`python -m py_compile … && python a2app_adapter.py --selftest` —
+the selftest covers the rules parity AND the SQLite store: durability across a
+reopen, seed-once, idempotency keys, the filter grammar) and **"operations
+resolve"**. `lifecycle.dataDir` is `data/`; `lifecycle.promote` is
+`python scripts/promote_apply.py`.
 
 ## Footguns for this stack
 
 - **Two files, one truth.** Every operation lives in BOTH `schema.OPERATIONS` and
   `operations.json`, agreeing on name/module/params/flags. The gate fails a
   mismatch.
-- **`store.persist()` or it never happened.** A runner that mutates `store.rows`
-  without persisting returns success while storing nothing.
+- **`put_record()` or it never happened.** A record read from the store is a
+  copy; a runner that mutates it without `store.put_record()` returns success
+  while storing nothing.
 - **Schema is declarative; the UI seam is closed.** Evolve the model by editing
   `ENTITIES` — there is no `migrations/` directory to look for. `main.py` serves
   only the API, so this stack cannot present a browser UI; build one on

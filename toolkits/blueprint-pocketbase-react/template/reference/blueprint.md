@@ -17,8 +17,8 @@ the app actually does:
   add under `pb/pb_migrations/` (a migration is a `.js` file PocketBase runs at
   boot to create or alter collections — see **Schema** below);
 - **custom operations** — new hook files under `pb/pb_hooks/` (see **Operations**);
-- **the View** — a React app in `pb/pb_public/`, with components and design tokens
-  you supply.
+- **the View** — the React (Vite) starter app in `ui/`, compiled by the pipeline
+  build into `pb/pb_public/`, which PocketBase serves (see **The View**).
 
 A freshly scaffolded app has its modules declared but no collections, so it stores
 nothing until you add your first migration file under `pb/pb_migrations/`.
@@ -34,7 +34,10 @@ nothing until you add your first migration file under `pb/pb_migrations/`.
 | `reference/requirements.md` | **YOURS** | the binding spec — Part A (SRS) + Part B (tech spec + Quality Conformance). |
 | `reference/tasks.md` | **YOURS** | the build ledger — one task per feature/quality item, ticked as you complete it. |
 | `reference/blueprint.md` | reference | this file — the stack map. |
-| `.gitignore` | **YOURS** | ignores `pb/pb_data`, credentials, the binary. Extend as needed. |
+| `.gitignore` | **YOURS** | ignores `pb/pb_data`, credentials, the binary, and the built View (`pb/pb_public/`). Extend as needed. |
+| `ui/index.html` · `ui/src/**` | **YOURS** | the React View source: App, shared pieces (Icon, `useToast`, `useConfirm`, `api`, formatting). Compiled into `pb/pb_public/` by the pipeline build. |
+| `ui/public/tokens.css` · `ui/public/ui.css` | **YOURS** | the kit design-token sheet + component styles, copied through the build verbatim. Re-point token values; keep the names stable. |
+| `ui/vite.config.js` · `ui/package.json` | build | the View build: React plugin, output to `../pb/pb_public`, dev-server proxy to the running app. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
 | `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote). Never edit. |
 | `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter hook REGISTRATIONS — thin one-liner handlers that `require()` the impl module (PocketBase runs each handler isolated from file scope). Never edit. |
@@ -48,7 +51,7 @@ nothing until you add your first migration file under `pb/pb_migrations/`.
 | `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary, **pinned to v0.26.6** (the adapter targets the 0.26 JSVM API). You download it (see pipeline `install`); nothing runs without it. `pb-serve.mjs` picks the right name per platform and refuses to launch a non‑0.26.x build. Git-ignored. |
 | `pb/pb_migrations/*.js` | **YOURS** | collection (entity) definitions as PocketBase JS migrations. You write these — none ship, so a fresh app has zero collections. |
 | `pb/pb_hooks/<your-op>.pb.js` | **YOURS** | custom operation implementations — a new hook file per op with a `routerAdd(...)` route. Never touch `_a2app*`. |
-| `pb/pb_public/**` | **YOURS** | the React View; PocketBase serves it statically. You build it and bring your own component set and design tokens. |
+| `pb/pb_public/**` | build output | the COMPILED React View (`npm --prefix ui run build`); PocketBase serves it statically. Git-ignored; edit `ui/src/`, never this. |
 | `pb/pb_data/` | runtime | the live database (git-ignored, created on first boot). Never edit by hand; never commit. |
 
 SYSTEM files are hashed in `.a2app/system-hashes.json`; the gate fails the build
@@ -122,14 +125,20 @@ Declaration fields (same contract as every stack):
 > is available when it should be and blocked (with a sensible reason) when it
 > should not.
 
-## The View — `pb/pb_public/`
+## The View — `ui/` (React, compiled into `pb/pb_public/`)
 
-PocketBase serves static files from `pb/pb_public/` — that is where your React
-View goes; no system-owned file is involved and no build seam needs wiring. **No
-component kit or design tokens ship with this blueprint** — bring your own React
-setup and adopt a single design system (tokens for colour/spacing/type, light +
-dark, WCAG AA) to meet the Quality Standard (`../QUALITY.md`). Build the View
-against PocketBase's records API / JS SDK:
+A React (Vite) starter View ships in `ui/`: the same to-do screens as the
+react-node blueprint — states (loading/empty/error/list), toasts, an in-app
+confirm dialog, keyboard shortcut — built on the kit's design tokens
+(`ui/public/tokens.css`, light + dark, WCAG AA). The pipeline build compiles it
+into `pb/pb_public/`, which PocketBase serves statically; no system-owned file
+is involved.
+
+The starter reads the `tasks` collection. A fresh scaffold has NO collections,
+so it renders its error state until your first migration creates one — add the
+collection (see **Schema**) or repoint `ui/src/App.jsx` at your own entities.
+For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
+`/api` proxied to the running app. The View talks to PocketBase's records API:
 
 - `GET/POST/PATCH/DELETE /api/collections/<entity>/records` — the same records
   the agent operates. Same-origin browser writes are fine; the guard validates
@@ -158,12 +167,13 @@ code. Do not invent an unsupported mechanism.
 
 `manifest.json`'s `pipeline`:
 
-- `install` prints a reminder to **download PocketBase v0.26.6 into `./pb`** — do
+- `install` = `npm --prefix ui install`, then a reminder to **download PocketBase v0.26.6 into `./pb`** — do
   this before serving, or `start` has nothing to run. The adapter targets the 0.26
   JSVM API (`onRecordCreateRequest`/`e.next()`, `$app.find*`, `collection.fields`,
   `e.requestInfo().body`), so **only 0.26.x is supported** — the launcher asserts
   the binary's version and refuses anything else.
-- `build` = `node --check pb/pb_hooks/_a2app.pb.js` (syntax only).
+- `build` = `npm --prefix ui run build` (compiles the React View into
+  `pb/pb_public/`), then `node --check pb/pb_hooks/_a2app.pb.js`.
 - `start` = `node pb-serve.mjs` — the launcher runs `pocketbase serve` bound to the
   environment's `PORT`. It is cross-platform on purpose: the raw `pb/pocketbase
   serve --http 127.0.0.1:${PORT} ...` form is not, because cmd.exe neither expands
@@ -210,5 +220,9 @@ pop its admin-installer page.
   for real (see Operations above).
 - **Empty-DB first paint.** The View must render loading/empty/error states
   against a database with no records; the verifier fails any first-paint error.
+  The starter View shows its error state until the `tasks` collection exists.
+- **The View is served built.** Editing `ui/src/` changes nothing a browser sees
+  until `npm --prefix ui run build` regenerates `pb/pb_public/` (live also needs
+  promote + serve — it serves a boot-time snapshot).
 - **Goja, not Node.** Hook handlers `require()` their modules locally and cannot
   close over file-scope state.

@@ -1,11 +1,11 @@
 # React-Node Agent App
 
 ## Plan
-A to-do app on a Node (built-in `http`) backend with a JSON-file store and a
-vanilla SPA View. The A2App adapter (`@a2app/adapter-core`) is mounted as embedded
-middleware in `server.mjs`. You evolve the app by editing `a2app.schema.mjs` (the
-Model + operations) and `public/` (the View) — never `server.mjs` (system-owned,
-hash-locked).
+A to-do app on a Hono server with a SQLite store and a React (Vite) View. The
+A2App adapter (`@a2app/adapter-core`) is mounted as embedded middleware in
+`server.mjs`. You evolve the app by editing `a2app.schema.mjs` (the Model +
+operations) and `src/` + `index.html` (the View) — never `server.mjs`
+(system-owned, hash-locked).
 
 ## Modules
 Modules are the organizing unit: every entity and every operation belongs to
@@ -27,33 +27,38 @@ exactly one, and describe's root screen lists them. They are declared in
 ## Conventions
 - The adapter is the only agent surface; the View writes same-origin through the
   records API (trusted by the origin rule), the agent writes through A2App.
-- **The design system lives in `public/tokens.css`** (two tiers: primitives →
-  semantic). Components consume ONLY semantic tokens; theming re-points the
-  semantic tier and never edits a component. Never hardcode a colour, size, or
+- **The design system lives in `public/tokens.css`** (foundation → semantic
+  bridge). Components consume ONLY semantic tokens; theming re-points the
+  foundation and never edits a component. Never hardcode a colour, size, or
   duration where a token exists.
-- **Widgets live in `public/ui.css` + `public/ui.js`** (buttons, fields, status
-  pills, toasts, the confirm dialog, the icon set, formatting helpers). Screens
-  compose them — one implementation per widget, no per-screen copies, no native
-  browser dialogs. New icons join the set in `ui.js`.
+- **Shared pieces live in `src/`** — `Icon.jsx` (the icon set), `toast.jsx`
+  (`useToast`), `ConfirmDialog.jsx` (`useConfirm` — never `window.confirm`),
+  `format.js`, `api.js` (the one fetch wrapper). Screens compose them — one
+  implementation per widget, no per-screen copies, no native browser dialogs.
+  Component styles live in `public/ui.css`.
 - **Every screen renders all of its states**: loading skeletons (sized so
   arriving content does not shift the layout), a designed empty state with the
   action that fills it, an error state with a retry path, disabled/pending
   controls while a write is in flight, and success read back from what the
   server stored.
-- KEEP the update watcher when you rewrite the View. `index.html` loads
-  `<script type="module" src="/_a2app/update.js"></script>`; it is served by
-  `server.mjs` from a system-owned file. Without it, a tab someone left open goes
-  on running the JavaScript it already downloaded after you promote a change, and
-  nothing tells them. It offers a reload and never takes one — reloading a page
-  with half-typed input in it destroys work, which is worse than the stale tab.
+- KEEP the update watcher when you rewrite the View. `src/updater.js` imports
+  `/_a2app/update.js` at runtime (served by `server.mjs` from a system-owned
+  file; it cannot be bundled). Without it, a tab someone left open goes on
+  running the JavaScript it already downloaded after you promote a change, and
+  nothing tells them. It reloads only when the page holds nothing unsaved —
+  reloading a page with half-typed input destroys work, which is worse than the
+  stale tab.
 - `schemaVersion` is NOT a signal that the UI changed. It fingerprints entities
-  and operations only, so a new control, a CSS change, or reworded copy leaves it
-  identical. Identity's `appVersion` is the marker that moves for those.
+  and operations only, so a new component, a CSS change, or reworded copy leaves
+  it identical. Identity's `appVersion` is the marker that moves for those.
 - To add an entity: add it to `schema.entities` in `a2app.schema.mjs`; describe and
   `schemaVersion` update automatically. Keep `operations.json` in sync with the
   schema's `operations`.
-- Migrations are additive; the JSON store keeps existing records across schema
+- Migrations are additive; the SQLite store keeps existing records across schema
   additions. Never remove a field that holds data without a migration plan.
+- The View is served BUILT (`npm run build` → `dist/`). A View edit is invisible
+  until the next build; `npm run dev:ui` runs Vite's dev server (with `/api`
+  proxied to the running app) for tight iteration.
 - The server logs one JSON line per event (`evt: boot | http | crash`) to the
   log `agent-app serve` captures; keep record contents and secrets out of it.
 

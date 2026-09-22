@@ -73,24 +73,24 @@ export const schema = {
     },
   ],
 
+  // Runner signature: (args, ctx, { store }) => jsonable result. `store` is the
+  // SQLite-backed record store — list(entity) · get(entity, id) · put(entity,
+  // record) · remove(entity, id). Writes are durable when the call returns;
+  // there is no separate persist() step on this stack.
   operationRunners: {
-    "clear-done": (_args, _ctx, { db, persist }) => {
+    "clear-done": (_args, _ctx, { store }) => {
       let removed = 0;
-      for (const [id, rec] of Object.entries(db.tasks ?? {})) {
-        if (rec.status === "done") {
-          delete db.tasks[id];
-          removed++;
-        }
+      for (const rec of store.list("tasks")) {
+        if (rec.status === "done" && store.remove("tasks", rec.id)) removed++;
       }
-      persist();
       return { removed };
     },
-    "count-tasks": (_args, _ctx, { db }) => ({ count: Object.keys(db.tasks ?? {}).length }),
-    "complete-task": (args, _ctx, { db, persist }) => {
-      const task = db.tasks?.[args?.task];
+    "count-tasks": (_args, _ctx, { store }) => ({ count: store.list("tasks").length }),
+    "complete-task": (args, _ctx, { store }) => {
+      const task = store.get("tasks", args?.task);
       if (!task) return { ok: false, reason: "no such task" };
       task.status = "done";
-      persist();
+      store.put("tasks", task);
       return { ok: true, task: task.id, status: task.status };
     },
   },

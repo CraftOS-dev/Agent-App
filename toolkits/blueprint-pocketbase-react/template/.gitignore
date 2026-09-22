@@ -21,3 +21,6 @@ pb/pocketbase.exe
 .a2app/backups/
 
 node_modules/
+
+# The built View (vite build output of ui/) — rebuilt by the pipeline, never committed.
+pb/pb_public/

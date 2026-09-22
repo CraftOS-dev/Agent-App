@@ -12,7 +12,8 @@
  * exists after promote succeeds.
  */
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { CheckResult, SuiteResult } from "./runner.js";
@@ -100,7 +101,31 @@ export async function runSafeEvolveClass(
   }
   const appId = (JSON.parse(readFileSync(join(appDir, "manifest.json"), "utf8")) as { id: string }).id;
   const devJson = join(appDir, ".a2app", "dev.json");
-  const liveDb = join(appDir, "data", "db.json");
+  // The blueprint's store is SQLite (data/db.sqlite). The update/restore rounds
+  // below need a real live database to exist, so they build one through the
+  // app's OWN better-sqlite3 (resolved from the app's node_modules — the
+  // harness carries no database dependency of its own).
+  const liveDb = join(appDir, "data", "db.sqlite");
+  const appRequire = createRequire(join(appDir, "package.json"));
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const AppDatabase = appRequire("better-sqlite3") as new (path: string) => {
+    exec(sql: string): void;
+    prepare(sql: string): { run(...args: unknown[]): unknown };
+    close(): void;
+  };
+  const writeLiveRow = (id: string, title: string): void => {
+    mkdirSync(join(appDir, "data"), { recursive: true });
+    const db = new AppDatabase(liveDb);
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS records (entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (entity, id))",
+    );
+    db.prepare("INSERT OR REPLACE INTO records (entity, id, data) VALUES (?, ?, ?)").run(
+      "tasks",
+      id,
+      JSON.stringify({ id, title }),
+    );
+    db.close(); // last connection closing checkpoints the WAL into the main file
+  };
 
   // ── promote with no gate pass must refuse ────────────────────────────────
   {
@@ -123,7 +148,7 @@ export async function runSafeEvolveClass(
       devPort = rec.port;
       if (rec.healthy !== true) failures.push("dev record not marked healthy");
       if ((await identify(rec.port)) !== appId) failures.push(`hidden port ${rec.port} does not answer as the app`);
-      const devDb = join(rec.bootDir, "data", "db.json");
+      const devDb = join(rec.bootDir, "data", "db.sqlite");
       if (!existsSync(devDb)) failures.push("dev boot dir holds no fresh database");
     }
     if (existsSync(liveDb)) failures.push("dev boot created a LIVE database — live data must be untouched");
@@ -135,10 +160,19 @@ export async function runSafeEvolveClass(
     const failures: string[] = [];
     const res = await run(operateEntry, [appDir, "data", "tasks", "create", "--title", "conformance probe"]);
     if (res.exit !== 0) failures.push(`routed create exit ${res.exit}: ${res.out.trim().slice(0, 200)}`);
-    const rec = JSON.parse(readFileSync(devJson, "utf8")) as { bootDir: string };
-    const devDb = join(rec.bootDir, "data", "db.json");
-    if (!existsSync(devDb) || !readFileSync(devDb, "utf8").includes("conformance probe")) {
-      failures.push("test record did not land in the dev database");
+    if (!existsSync(devJson)) {
+      failures.push("no dev record — cannot check where the write landed");
+    } else {
+      const rec = JSON.parse(readFileSync(devJson, "utf8")) as { bootDir: string };
+      const devDb = join(rec.bootDir, "data", "db.sqlite");
+      if (!existsSync(devDb)) failures.push("dev boot dir holds no database after a routed write");
+      // The record must be readable back through the routed path. (The raw
+      // SQLite bytes may still sit in the WAL sidecar while the dev server
+      // holds the connection, so a byte-grep of db.sqlite would be flaky.)
+      const listed = await run(operateEntry, [appDir, "data", "tasks", "list"]);
+      if (listed.exit !== 0 || !listed.out.includes("conformance probe")) {
+        failures.push("routed read does not see the test record on the dev instance");
+      }
     }
     if (existsSync(liveDb)) failures.push("test record reached the live data directory (threat B2)");
     check("operate commands target the dev instance while it is up (test data never reaches live)", failures);
@@ -179,12 +213,11 @@ export async function runSafeEvolveClass(
   // ── update round: live DB exists → mandatory pre-promote backup ──────────
   {
     const failures: string[] = [];
-    mkdirSync(join(appDir, "data"), { recursive: true });
-    writeFileSync(liveDb, JSON.stringify({ tasks: {} }, null, 2) + "\n");
-    const liveBytes = readFileSync(liveDb, "utf8");
+    writeLiveRow("rec_live", "pre-existing live row");
+    const liveBytes = readFileSync(liveDb, "latin1");
     const dev = await run(frameworkEntry, [appDir, "dev"]);
     if (dev.exit !== 0) failures.push(`dev exit ${dev.exit}`);
-    if (readFileSync(liveDb, "utf8") !== liveBytes) failures.push("dev boot modified the live database");
+    if (readFileSync(liveDb, "latin1") !== liveBytes) failures.push("dev boot modified the live database");
     const validated = await run(frameworkEntry, [appDir, "validate"]);
     if (validated.exit !== 0) failures.push(`validate exit ${validated.exit}`);
     const res = await run(frameworkEntry, [appDir, "promote"]);
@@ -201,11 +234,11 @@ export async function runSafeEvolveClass(
     const backedUp = await run(frameworkEntry, [appDir, "backup"]);
     if (backedUp.exit !== 0) failures.push(`backup exit ${backedUp.exit}`);
     const backupIdMatch = /"backup": "([^"]+)"/.exec(backedUp.out);
-    writeFileSync(liveDb, JSON.stringify({ tasks: { rec_x: { id: "rec_x", title: "post-backup write" } } }, null, 2) + "\n");
+    writeLiveRow("rec_x", "post-backup write");
     const res = await run(frameworkEntry, [appDir, "restore", ...(backupIdMatch ? [backupIdMatch[1] as string] : [])]);
     if (res.exit !== 0) failures.push(`restore exit ${res.exit}: ${res.out.trim().slice(0, 300)}`);
     if (!/pre-restore snapshot/.test(res.out)) failures.push("restore did not report the capture-first snapshot");
-    if (readFileSync(liveDb, "utf8").includes("post-backup write")) failures.push("restore did not bring the backup's bytes back");
+    if (readFileSync(liveDb, "latin1").includes("post-backup write")) failures.push("restore did not bring the backup's bytes back");
     check("restore captures current state first and restores the named backup", failures);
   }
 

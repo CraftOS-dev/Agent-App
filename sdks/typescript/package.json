@@ -1,6 +1,6 @@
 {
   "name": "@a2app/sdk",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.0",
   "description": "TypeScript client SDK for the A2App protocol — identity, describe, guarded writes, operations, tasks/events, whoami/context",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "sdks/typescript" },

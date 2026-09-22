@@ -1,6 +1,6 @@
 {
  "name": "@a2app/rules",
- "version": "0.1.0",
+ "version": "0.1.0-alpha.0",
  "description": "A2App pure validation rules — the stack-agnostic guard core shared verbatim by every adapter",
  "license": "MIT",
  "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "adapters/rules" },

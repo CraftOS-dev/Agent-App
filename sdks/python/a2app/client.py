@@ -213,8 +213,16 @@ class A2AppClient:
     def get_task(self, task_id: str) -> A2AppResponse:
         return self.request("GET", f"/api/_a2app/tasks/{task_id}")
 
-    def claim_task(self, task_id: str, credential_id: str) -> A2AppResponse:
-        return self.request("POST", f"/api/_a2app/tasks/{task_id}/claim", {"agent": credential_id})
+    def claim_task(self, task_id: str, credential_id: Optional[str] = None) -> A2AppResponse:
+        """Claim a task.
+
+        `credential_id` is optional because it can only ever name the caller's
+        own credential — the app refuses a claim naming any other one
+        (`principal_mismatch`) and records the true caller either way. Omitting
+        it means "claim as me", which is the only thing it could have meant.
+        """
+        body: Dict[str, Any] = {} if credential_id is None else {"agent": credential_id}
+        return self.request("POST", f"/api/_a2app/tasks/{task_id}/claim", body)
 
     def progress_task(self, task_id: str, step: Optional[str] = None, percent: Optional[int] = None) -> A2AppResponse:
         body: Dict[str, Any] = {}

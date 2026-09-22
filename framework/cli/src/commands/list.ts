@@ -41,7 +41,13 @@ export async function run(args: string[]): Promise<number> {
     // row — an abandoned candidate that only lived in `.a2app/dev.json` was
     // invisible here, which is exactly how it stayed abandoned.
     const dev = app.dev === null ? "" : app.dev.answering ? `  dev:${app.dev.port}` : "  dev:stale";
-    log.raw(`${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}${dev}`);
+    // A running bridge means this app can start agent runs on this machine.
+    // That is a standing capability, not a detail of one command, so it belongs
+    // where someone looks to see what their apps are doing.
+    const bridge = app.bridge === null ? "" : `  bridge:${app.bridge.harness}/${app.bridge.mode}`;
+    log.raw(
+      `${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}${dev}${bridge}`,
+    );
   }
   if (apps.some((a) => a.status === "unreachable")) {
     log.warn("▲ unreachable: another process holds that app's port — stop it, or give the app a different port.");
@@ -54,6 +60,12 @@ export async function run(args: string[]): Promise<number> {
   }
   if (apps.some((a) => a.dev !== null && !a.dev.answering)) {
     log.info("dev:stale — a recorded dev instance is no longer answering; `agent-app <app> stop --dev` clears it.");
+  }
+  if (apps.some((a) => a.bridge !== null)) {
+    log.info(
+      "bridge:<harness>/<route> — that app's queue is being watched and can start agent runs here. " +
+        "`agent-app <app> bridge` for detail · `agent-app <app> bridge stop` to end it.",
+    );
   }
   return 0;
 }

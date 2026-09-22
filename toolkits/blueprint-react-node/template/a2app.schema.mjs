@@ -71,7 +71,26 @@ export const schema = {
       appliesWhen: { field: "status", ne: "done" },
       params: { task: { type: "ref", entity: "tasks", required: true } },
     },
+    {
+      name: "request-triage",
+      description: "Ask an agent to work out what this task actually needs.",
+      destructive: false,
+      module: "planning",
+      entity: "tasks",
+      appliesWhen: { field: "status", ne: "done" },
+      params: { task: { type: "ref", entity: "tasks", required: true } },
+    },
   ],
+
+  // The event types this app may emit (the app→agent direction). Declaring a
+  // type is what lets `trigger` fire it — an undeclared type is refused — so
+  // this list is the fixed set of things the app can ever ask an agent to react
+  // to, decided here by its author rather than at the moment of firing.
+  //
+  // Leave it empty until a feature genuinely needs agent judgment. Plain events
+  // want plain code; a task is for work a person would otherwise have to think
+  // about.
+  events: [{ type: "task.needs_triage" }],
 
   operationRunners: {
     "clear-done": (_args, _ctx, { db, persist }) => {
@@ -92,6 +111,24 @@ export const schema = {
       task.status = "done";
       persist();
       return { ok: true, task: task.id, status: task.status };
+    },
+    // The app→agent direction, in full. `trigger` emits a DECLARED event and,
+    // because a capability is named, enqueues a task on the app's own queue.
+    // From there an agent takes it — either because a harness is polling
+    // (`a2app <app> tasks next --wait`) or because `agent-app <app> bridge` is
+    // running and triggers one.
+    //
+    // Send IDS, not prose. The agent re-reads the record itself, so what goes
+    // in the payload is what it needs to find the work — never instructions,
+    // and never a copy of the data, which would be stale by the time it is
+    // read. Nothing here can widen what the agent may do: the payload is data
+    // on the other side, and the capability names the kind of work, not a
+    // command to run.
+    "request-triage": (args, _ctx, { db, trigger }) => {
+      const task = db.tasks?.[args?.task];
+      if (!task) return { ok: false, reason: "no such task" };
+      const { taskId } = trigger("task.needs_triage", { task: task.id }, "triage");
+      return { ok: true, task: task.id, queued: taskId };
     },
   },
 };

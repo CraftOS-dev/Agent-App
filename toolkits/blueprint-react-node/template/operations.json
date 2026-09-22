@@ -33,6 +33,24 @@
           "required": true
         }
       }
+    },
+    {
+      "name": "request-triage",
+      "description": "Ask an agent to work out what this task actually needs.",
+      "destructive": false,
+      "module": "planning",
+      "entity": "tasks",
+      "appliesWhen": {
+        "field": "status",
+        "ne": "done"
+      },
+      "params": {
+        "task": {
+          "type": "ref",
+          "entity": "tasks",
+          "required": true
+        }
+      }
     }
   ]
 }

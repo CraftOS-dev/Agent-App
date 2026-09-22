@@ -104,7 +104,17 @@ function breakIfStale(file: string, expected: Holder | null): boolean {
     }
     return false;
   }
-  rmSync(captured, { recursive: true, force: true });
+  // The stale lock is already gone as far as every other process is concerned —
+  // the rename is what released it. Deleting the captured copy is tidying, so a
+  // Windows sharing error here must not become the caller's error: failing a
+  // `serve` or a `bridge start` over a leftover temp file would turn a
+  // successful recovery into a reported failure. A survivor is inert and
+  // gitignored, and the next break overwrites nothing (each name is unique).
+  try {
+    rmSync(captured, { recursive: true, force: true });
+  } catch {
+    /* left behind; harmless, and never load-bearing */
+  }
   return true;
 }
 

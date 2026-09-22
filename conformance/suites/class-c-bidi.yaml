@@ -77,3 +77,23 @@ checks:
     expect:
       status: 404
       match: { code: task_not_found }
+
+  # --- the listen primitive -------------------------------------------------
+  # `tasks next` is how a harness that cannot be triggered from outside still
+  # takes work: it waits for a claimable task, claims it, prints it, exits. The
+  # two checks below pin its whole contract, and the second is the one that is
+  # easy to get wrong.
+  - name: tasks next takes the next claimable task and claims it
+    cli: { args: ["<APPDIR>", "tasks", "next", "--capability", "handoff", "--wait", "2000"] }
+    expect:
+      exit: 0
+      match: { claimed: true, task.request.capability: handoff, task.status: working }
+
+  - name: an idle queue is exit 0 with no task, never an error
+    # A listen loop is idle almost all the time. Reporting "nothing to do" as a
+    # failure would make it indistinguishable from "the app is down" (exit 3),
+    # which is the one that needs a human.
+    cli: { args: ["<APPDIR>", "tasks", "next", "--capability", "handoff", "--wait", "300"] }
+    expect:
+      exit: 0
+      match: { task: null, claimed: false }

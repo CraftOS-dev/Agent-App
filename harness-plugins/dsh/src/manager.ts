@@ -8,10 +8,11 @@
  *   - `/agent-app/api`  is the JSON action API (apps/build/serve/stop/remove/send),
  *     guarded by a per-page token minted into each page load.
  *
- * Build and chat drive a per-app dsh session: `ctx.agents.create` starts the
- * agent on a chosen session id, `agent.followup` delivers each message, and
- * `session.deriveMessages()` reads the transcript back. Lifecycle actions shell
- * the framework CLIs (`serve` / `stop` / `remove`).
+ * Build and chat drive a per-app dsh session: `ctx.agents.create` (or `.resume`
+ * for a session that already exists) starts the agent on a chosen session id,
+ * `agent.followup` delivers each message, and `session.deriveMessages()` reads
+ * the transcript back. Lifecycle actions shell the framework CLIs
+ * (`serve` / `stop` / `remove`).
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -53,9 +54,31 @@ interface DshAgentHandle {
   agent: DshAgent;
   dispose(): void;
 }
+/** Model route every new agent is created with. */
+interface DshDefaultModel {
+  currentSelection(): { provider: string; model: string };
+}
+/** The agent-preset roster. A preset composes an agent's persona and tool rows. */
+interface DshAgentPresets {
+  resolve(id?: string): Promise<{ id: string }>;
+  standingKeyFor(id?: string): Promise<unknown>;
+  mount(agentCtx: unknown, id?: string): Promise<unknown>;
+}
+interface DshAgentOptions {
+  sessionId: string;
+  meta?: { cwd?: string; agentPreset?: string };
+  agentOptions?: { provider: string; model: string };
+  setup?: (agentCtx: unknown) => Promise<void>;
+}
+interface DshAgentResumeOptions {
+  resumeSessionId: string;
+  agentOptions?: { provider: string; model: string };
+  setup?: (agentCtx: unknown) => Promise<void>;
+}
 interface DshAgents {
   get(sessionId: string): DshAgent | undefined;
-  create(opts: { sessionId: string; meta?: { cwd?: string } }): Promise<DshAgentHandle>;
+  create(opts: DshAgentOptions): Promise<DshAgentHandle>;
+  resume(opts: DshAgentResumeOptions): Promise<DshAgentHandle>;
 }
 interface DshSession {
   deriveMessages(): unknown[];
@@ -96,13 +119,80 @@ export function registerManager(ctx: ManagerHost): () => void {
 
   const userMessage = (text: string): unknown => createUserMessage({ content: [{ type: "text", text }], source: { kind: "user" } });
 
-  /** Deliver a message into an app's session, starting the agent if needed. */
+  /**
+   * Deliver a message into an app's session, starting the agent if needed.
+   *
+   * Creating the agent needs three things the naive
+   * `create({ sessionId, meta: { cwd } })` call omits, and each is load-bearing:
+   *
+   *   - `agentOptions`. The built-in `{{model}}` prompt variable is
+   *     `context.agent.options.model` (agent-loop), so an agent created with no
+   *     model makes system-prompt assembly throw `prompt variable "{{model}}"
+   *     has no value for this assembly (section "deployment:persona-prefix")`
+   *     and the turn never starts. The default selection is what every ordinary
+   *     session path supplies.
+   *   - the agent preset, mounted through `setup`. A preset is what composes an
+   *     agent's persona and its tool rows, so without it the session has no
+   *     tools to run the framework CLI the kickoff prompt asks for.
+   *   - `resume` when the session already exists: `sessions.prepare` throws on a
+   *     known id, so a later process (or a retry after a failed first turn) must
+   *     adopt the persisted session rather than create it again.
+   *
+   * This mirrors dsh's own programmatic path (webhook/src/session.ts).
+   */
   async function deliver(sessionId: string, cwd: string, text: string): Promise<void> {
     const agents = ctx.get<DshAgents>("agents");
     if (!agents) throw new Error("dsh agents runtime unavailable");
     const existing = agents.get(sessionId);
     if (existing) { existing.followup(userMessage(text)); return; }
-    const handle = await agents.create({ sessionId, meta: { cwd } });
+
+    const selection = ctx.get<DshDefaultModel>("agentDefaultModel")?.currentSelection();
+    const agentOptions = selection === undefined ? undefined : { provider: selection.provider, model: selection.model };
+
+    // The default preset. A profile with no roster yields none, and a roster
+    // that fails to resolve must not make the manager unusable — the model
+    // selection alone is what stops the prompt assembly from throwing.
+    const presets = ctx.get<DshAgentPresets>("agentPresets");
+    let presetId: string | undefined;
+    if (presets !== undefined) {
+      try {
+        const resolved = await presets.resolve();
+        await presets.standingKeyFor(resolved.id);
+        presetId = resolved.id;
+      } catch {
+        presetId = undefined;
+      }
+    }
+    const mounted = presetId;
+    const setup = presets === undefined || mounted === undefined
+      ? undefined
+      : async (agentCtx: unknown): Promise<void> => { await presets.mount(agentCtx, mounted); };
+
+    const stored = ctx.get<DshSessions>("sessions")?.get(sessionId) !== undefined;
+    const resume = (): Promise<DshAgentHandle> => agents.resume({
+      resumeSessionId: sessionId,
+      ...(agentOptions === undefined ? {} : { agentOptions }),
+      ...(setup === undefined ? {} : { setup }),
+    });
+    let handle: DshAgentHandle;
+    if (stored) {
+      handle = await resume();
+    } else {
+      try {
+        handle = await agents.create({
+          sessionId,
+          ...(agentOptions === undefined ? {} : { agentOptions }),
+          meta: { cwd, ...(mounted === undefined ? {} : { agentPreset: mounted }) },
+          ...(setup === undefined ? {} : { setup }),
+        });
+      } catch (error) {
+        // The store may not have the persisted session loaded yet, so the check
+        // above misses it and `sessions.prepare` throws "already exists". The
+        // right answer is to adopt that session, not to fail the build.
+        if (!/already exists/.test(String((error as Error)?.message ?? error))) throw error;
+        handle = await resume();
+      }
+    }
     handles.set(sessionId, handle);
     handle.agent.followup(userMessage(text));
   }

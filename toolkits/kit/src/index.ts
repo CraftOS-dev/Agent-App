@@ -48,113 +48,253 @@ export class BrowserDataClient {
 }
 
 /**
- * The kit design tokens as a CSS string an app can inline or serve.
+ * The kit design tokens as a CSS string an app can inline or serve — the shared
+ * visual foundation every toolkit draws on.
  *
- * A two-tier system: Tier-1 primitives (raw palette) → Tier-2 semantic aliases.
- * Components consume ONLY Tier-2, so a theme is a re-point of Tier-2 and never
- * a component edit. Both schemes (light, and dark via `prefers-color-scheme` or
- * an explicit `data-theme="dark"` on the root) resolve every semantic token on
- * their own — contrast pairs hold WCAG AA in each.
+ * The warm-neutral `--agent-app-*` system. It layers: (1) base globals (app
+ * font, selection, themed scrollbars); (2) the `--agent-app-*` FOUNDATION —
+ * brand primitives with `color-mix`-derived surfaces plus named `[data-style]`
+ * packs; (3) a SEMANTIC + STRUCTURAL BRIDGE that re-points app-facing tokens
+ * (`--bg-*`, `--text-*`, state tones, and the spacing/type/radius/elevation
+ * scales) onto the foundation. Components read ONLY the bridge/foundation
+ * tokens, so a theme is a re-point of the foundation (or a `[data-style]`
+ * switch) — never a component edit. Light, dark (via `prefers-color-scheme` or
+ * an explicit `data-theme="dark"`), and every pack resolve on their own.
  *
- * The blueprints vendor this same sheet as `public/tokens.css`; the two are kept
- * in lockstep (this constant is the source of truth for the token *names* —
- * an app themes by re-pointing values, never by renaming).
+ * The blueprints vendor this SAME sheet as `public/tokens.css`; the two are kept
+ * in lockstep (this constant is the source of truth for the token *names* — an
+ * app themes by re-pointing values or picking a pack, never by renaming).
  */
-export const DESIGN_TOKENS_CSS = `/* Agent App kit design tokens — two tiers: primitives, then semantic aliases.
-   Components consume ONLY the semantic tier. Theme = re-point the semantic tier. */
-:root {
-  /* Tier 1: primitives */
-  --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
-  --slate-400:#94a3b8; --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155;
-  --slate-800:#1e293b; --slate-900:#0f172a;
-  --indigo-50:#eef2ff; --indigo-200:#c7d2fe; --indigo-300:#a5b4fc; --indigo-400:#818cf8;
-  --indigo-500:#6366f1; --indigo-600:#4f46e5; --indigo-700:#4338ca;
-  --green-50:#f0fdf4; --green-400:#4ade80; --green-500:#22c55e; --green-600:#16a34a; --green-700:#15803d; --green-100:#dcfce7;
-  --amber-50:#fffbeb; --amber-400:#fbbf24; --amber-500:#f59e0b; --amber-700:#b45309; --amber-100:#fef3c7;
-  --red-50:#fef2f2; --red-400:#f87171; --red-500:#ef4444; --red-600:#dc2626; --red-700:#b91c1c; --red-100:#fee2e2;
-  --blue-50:#eff6ff; --blue-400:#60a5fa; --blue-500:#3b82f6; --blue-600:#2563eb; --blue-700:#1d4ed8; --blue-100:#dbeafe;
+export const DESIGN_TOKENS_CSS = `/* ============================================================================
+   Agent App design tokens — shared visual foundation (AGENT-OWNED to re-point,
+   ships in lockstep with @a2app/kit's DESIGN_TOKENS_CSS — keep this body identical).
 
-  /* Tier 2: semantic (light) */
-  --bg-canvas:var(--slate-100); --bg-surface:#ffffff; --bg-raised:#ffffff;
-  --bg-sunken:var(--slate-50); --bg-hover:var(--slate-100); --bg-active:var(--slate-200);
-  --bg-selected:var(--indigo-50);
-  --text-primary:var(--slate-900); --text-secondary:var(--slate-600);
-  --text-tertiary:var(--slate-500); --text-disabled:var(--slate-400);
-  --text-on-accent:#ffffff;
-  --border-subtle:var(--slate-200); --border-default:var(--slate-300); --border-strong:var(--slate-400);
-  --accent-solid:var(--indigo-600); --accent-hover:var(--indigo-700); --accent-text:var(--indigo-700);
-  --accent-bg:var(--indigo-50); --accent-border:var(--indigo-200); --focus-ring:var(--indigo-500);
-  --success-solid:var(--green-600); --success-text:var(--green-700); --success-bg:var(--green-50); --success-border:var(--green-100);
-  --warning-solid:var(--amber-500); --warning-text:var(--amber-700); --warning-bg:var(--amber-50); --warning-border:var(--amber-100);
-  --danger-solid:var(--red-600);   --danger-text:var(--red-700);   --danger-bg:var(--red-50);   --danger-border:var(--red-100);
-  --info-solid:var(--blue-600);    --info-text:var(--blue-700);    --info-bg:var(--blue-50);    --info-border:var(--blue-100);
-  --neutral-text:var(--slate-600); --neutral-bg:var(--slate-100);  --neutral-border:var(--slate-200);
+   The kit's warm-neutral --agent-app-* system. Components and app CSS read ONLY
+   semantic tokens, never hardcoded colors, so light/dark AND every [data-style]
+   pack keep working with no per-component edits. Three layers:
+
+     1. BASE globals  — app font smoothing, selection color, themed scrollbars.
+     2. --agent-app-* FOUNDATION — brand identity: light + dark primitives,
+        color-mix-derived surfaces, and the named style packs.
+     3. SEMANTIC + STRUCTURAL BRIDGE — surfaces, state tones, and the
+        spacing/type/radius/elevation/motion scales, all re-pointed onto the
+        foundation so a theme is a re-point (or a [data-style] switch), never a
+        component edit.
+
+   Theme by re-pointing the FOUNDATION or selecting a [data-style]; never
+   hardcode a color in a component.
+   ============================================================================ */
+
+/* 1. BASE globals ---------------------------------------------------------- */
+::selection { background-color: color-mix(in srgb, var(--agent-app-accent) 26%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: var(--agent-app-border) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--agent-app-border); border-radius: 9999px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--agent-app-muted); }
+
+/* 2. --agent-app-* FOUNDATION --------------------------------------------- */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* Primitives (light) */
+  --agent-app-bg: #f6f5f2;
+  --agent-app-surface: #ffffff;
+  --agent-app-text: #1f1e1b;
+  --agent-app-muted: #6f6d67;
+  --agent-app-border: #e7e5e0;
+  --agent-app-accent: #ff4f18;
+  --agent-app-accent-contrast: #ffffff;
+
+  /* Shape + type */
+  --agent-app-radius: 0.5rem;
+  --agent-app-font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  /* Derived: declared once, resolved per element so they track theme + pack. */
+  --agent-app-fg: var(--agent-app-text);
+  --agent-app-surface-2: color-mix(in srgb, var(--agent-app-surface), var(--agent-app-text) 4%);
+  --agent-app-hover: color-mix(in srgb, var(--agent-app-surface), var(--agent-app-text) 7%);
+  --agent-app-selected: color-mix(in srgb, var(--agent-app-surface), var(--agent-app-accent) 12%);
+  --agent-app-ring: var(--agent-app-accent);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --agent-app-bg: #191919;
+  --agent-app-surface: #202020;
+  --agent-app-text: #e6e6e4;
+  --agent-app-muted: #9b9a97;
+  --agent-app-border: #2e2d2b;
+  --agent-app-accent: #ff4f18;
+  --agent-app-accent-contrast: #ffffff;
+}
+
+/* Standalone dark: with no host bridge to set data-theme, follow the OS scheme
+   unless the app has explicitly opted into light. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --agent-app-bg: #191919;
+    --agent-app-surface: #202020;
+    --agent-app-text: #e6e6e4;
+    --agent-app-muted: #9b9a97;
+    --agent-app-border: #2e2d2b;
+  }
+}
+
+/* ---- Style packs ([data-style]; brand default 'craftbot' == base) -------- */
+:root[data-style='normal'] { --agent-app-accent: #2563eb; }
+:root[data-style='normal'][data-theme='dark'] { --agent-app-accent: #3b82f6; }
+
+:root[data-style='ocean'] { --agent-app-accent: #0284c7; --agent-app-bg: #f0f7fb; --agent-app-border: #d3e5ef; }
+:root[data-style='ocean'][data-theme='dark'] { --agent-app-accent: #38bdf8; --agent-app-bg: #0b1b26; --agent-app-surface: #102635; --agent-app-border: #1e3a4d; }
+
+:root[data-style='forest'] { --agent-app-accent: #16a34a; --agent-app-bg: #f2f8f2; --agent-app-border: #d6e7d6; }
+:root[data-style='forest'][data-theme='dark'] { --agent-app-accent: #4ade80; --agent-app-bg: #0e1a12; --agent-app-surface: #14261a; --agent-app-border: #22402c; }
+
+:root[data-style='pastel'] { --agent-app-accent: #a855f7; --agent-app-bg: #faf7fd; --agent-app-surface: #fffdfa; --agent-app-border: #eadff5; }
+:root[data-style='pastel'][data-theme='dark'] { --agent-app-accent: #c084fc; --agent-app-bg: #1a1420; --agent-app-surface: #251c2e; --agent-app-border: #3a2d47; }
+
+:root[data-style='glass'] { --agent-app-bg: #eef1f8; --agent-app-surface: rgba(255, 255, 255, 0.72); --agent-app-border: rgba(120, 130, 160, 0.25); --agent-app-accent: #6366f1; }
+:root[data-style='glass'][data-theme='dark'] { --agent-app-bg: #10131c; --agent-app-surface: rgba(30, 36, 54, 0.72); --agent-app-border: rgba(140, 150, 190, 0.22); --agent-app-accent: #818cf8; }
+
+:root[data-style='classic'] { --agent-app-bg: #f5f2ea; --agent-app-surface: #fffdf7; --agent-app-border: #ddd6c5; --agent-app-accent: #b8860b; --agent-app-radius: 0.25rem; }
+:root[data-style='classic'][data-theme='dark'] { --agent-app-bg: #1c1a14; --agent-app-surface: #26231b; --agent-app-border: #3d3828; --agent-app-accent: #d4a017; }
+
+:root[data-style='velvet'] { --agent-app-bg: #f8f2f6; --agent-app-surface: #fffbfe; --agent-app-border: #e8d8e4; --agent-app-accent: #9d174d; }
+:root[data-style='velvet'][data-theme='dark'] { --agent-app-bg: #1c1018; --agent-app-surface: #281826; --agent-app-border: #43263c; --agent-app-accent: #ec4899; }
+
+:root[data-style='ink'] { --agent-app-bg: #ffffff; --agent-app-surface: #ffffff; --agent-app-border: #111111; --agent-app-accent: #111111; --agent-app-accent-contrast: #ffffff; --agent-app-radius: 0; }
+:root[data-style='ink'][data-theme='dark'] { --agent-app-bg: #0a0a0a; --agent-app-surface: #0a0a0a; --agent-app-border: #f5f5f5; --agent-app-accent: #f5f5f5; --agent-app-accent-contrast: #0a0a0a; }
+
+:root[data-style='acid'] { --agent-app-bg: #fafff2; --agent-app-surface: #ffffff; --agent-app-border: #d9f99d; --agent-app-accent: #65a30d; }
+:root[data-style='acid'][data-theme='dark'] { --agent-app-bg: #131a0c; --agent-app-surface: #1b2513; --agent-app-border: #365314; --agent-app-accent: #a3e635; --agent-app-accent-contrast: #1a2e05; }
+
+:root[data-style='blueprint'] { --agent-app-bg: #eef4fb; --agent-app-surface: #ffffff; --agent-app-border: #93c5fd; --agent-app-accent: #1d4ed8; --agent-app-radius: 0.125rem; }
+:root[data-style='blueprint'][data-theme='dark'] { --agent-app-bg: #0b1526; --agent-app-surface: #102039; --agent-app-border: #1e40af; --agent-app-accent: #60a5fa; }
+
+:root[data-style='modern'] { --agent-app-bg: #f4f5fa; --agent-app-surface: #ffffff; --agent-app-border: #e2e4f0; --agent-app-accent: #6366f1; --agent-app-radius: 0.75rem; }
+:root[data-style='modern'][data-theme='dark'] { --agent-app-bg: #12141d; --agent-app-surface: #1a1d2a; --agent-app-border: #2a2e42; --agent-app-accent: #7c8aff; }
+
+:root[data-style='brutalist'] { --agent-app-bg: #ffffff; --agent-app-surface: #ffffff; --agent-app-text: #0a0a0a; --agent-app-border: #0a0a0a; --agent-app-accent: #7c3aed; --agent-app-radius: 0; }
+:root[data-style='brutalist'][data-theme='dark'] { --agent-app-bg: #0a0a0a; --agent-app-surface: #0a0a0a; --agent-app-text: #fafafa; --agent-app-border: #fafafa; --agent-app-accent: #a78bfa; --agent-app-accent-contrast: #0a0a0a; }
+
+:root[data-style='drafting'] { --agent-app-bg: #e9ede4; --agent-app-surface: #e9ede4; --agent-app-text: #2e3528; --agent-app-muted: #5b6552; --agent-app-border: #2e3528; --agent-app-accent: #3a4232; --agent-app-radius: 0.25rem; }
+:root[data-style='drafting'][data-theme='dark'] { --agent-app-bg: #232920; --agent-app-surface: #232920; --agent-app-text: #dde3d6; --agent-app-muted: #9aa590; --agent-app-border: #c8d0c0; --agent-app-accent: #aab5a0; --agent-app-accent-contrast: #232920; }
+
+:root[data-style='clay'] { --agent-app-bg: #e4e6ec; --agent-app-surface: #e4e6ec; --agent-app-text: #3a3f4c; --agent-app-border: #c9cdd8; --agent-app-accent: #5b7cfa; --agent-app-radius: 0.875rem; }
+:root[data-style='clay'][data-theme='dark'] { --agent-app-bg: #23262e; --agent-app-surface: #23262e; --agent-app-text: #d5d8e0; --agent-app-border: #343947; --agent-app-accent: #7c96ff; }
+
+:root[data-style='atelier'] { --agent-app-bg: #edeff2; --agent-app-surface: #f8f9fb; --agent-app-text: #1c1e22; --agent-app-border: #d8dbe1; --agent-app-accent: #17181b; --agent-app-accent-contrast: #f8f9fb; --agent-app-radius: 0.375rem; }
+:root[data-style='atelier'][data-theme='dark'] { --agent-app-bg: #17181b; --agent-app-surface: #202227; --agent-app-text: #e8e9ec; --agent-app-border: #33363d; --agent-app-accent: #f2f2f4; --agent-app-accent-contrast: #17181b; }
+
+/* 3. SEMANTIC + STRUCTURAL BRIDGE ----------------------------------------- */
+:root {
+  /* type */
+  --font-sans: var(--agent-app-font);
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px; --fs-md: 15px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 24px;
+  --lh-tight: 1.25; --lh-normal: 1.5;
+  --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600; --fw-bold: 700;
 
   /* spacing (4px grid) */
-  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
-  --sp-8:32px; --sp-10:40px; --sp-12:48px; --sp-16:64px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  --sp-8: 32px; --sp-10: 40px; --sp-12: 48px; --sp-16: 64px;
 
-  /* radius */
-  --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:12px; --r-full:9999px;
-
-  /* typography */
-  --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --fs-xs:12px; --fs-sm:13px; --fs-base:14px; --fs-md:15px; --fs-lg:16px; --fs-xl:20px; --fs-2xl:24px;
-  --lh-tight:1.25; --lh-normal:1.5;
-  --fw-regular:400; --fw-medium:500; --fw-semibold:600; --fw-bold:700;
+  /* radius — scaled off the foundation so style packs (ink/brutalist=0,
+     clay/modern=larger) reshape the whole app */
+  --r-sm: calc(var(--agent-app-radius) * 0.5);
+  --r-md: var(--agent-app-radius);
+  --r-lg: calc(var(--agent-app-radius) * 1.25);
+  --r-xl: calc(var(--agent-app-radius) * 1.75);
+  --r-full: 9999px;
 
   /* elevation */
-  --sh-1:0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .10);
-  --sh-2:0 2px 4px rgb(16 24 40 / .06), 0 4px 8px rgb(16 24 40 / .08);
-  --sh-3:0 4px 6px rgb(16 24 40 / .05), 0 10px 20px rgb(16 24 40 / .12);
-  --sh-4:0 8px 16px rgb(16 24 40 / .10), 0 16px 32px rgb(16 24 40 / .16);
+  --sh-1: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .10);
+  --sh-2: 0 2px 4px rgb(16 24 40 / .06), 0 4px 8px rgb(16 24 40 / .08);
+  --sh-3: 0 4px 6px rgb(16 24 40 / .05), 0 10px 20px rgb(16 24 40 / .12);
+  --sh-4: 0 8px 16px rgb(16 24 40 / .10), 0 16px 32px rgb(16 24 40 / .16);
 
   /* motion */
-  --dur-fast:120ms; --dur-mid:200ms; --dur-slow:300ms;
-  --ease-out:cubic-bezier(0.16,1,0.3,1); --ease-std:cubic-bezier(0.4,0,0.2,1);
+  --dur-fast: 120ms; --dur-mid: 200ms; --dur-slow: 300ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-std: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* controls */
-  --control-h:36px; --row-h:44px;
+  --control-h: 36px; --row-h: 44px;
+
+  /* surfaces + text re-pointed onto the foundation */
+  --bg-canvas: var(--agent-app-bg);
+  --bg-surface: var(--agent-app-surface);
+  --bg-raised: var(--agent-app-surface);
+  --bg-sunken: var(--agent-app-surface-2);
+  --bg-hover: var(--agent-app-hover);
+  --bg-active: var(--agent-app-selected);
+  --bg-selected: var(--agent-app-selected);
+  --text-primary: var(--agent-app-fg);
+  --text-secondary: var(--agent-app-muted);
+  --text-tertiary: var(--agent-app-muted);
+  --text-disabled: color-mix(in srgb, var(--agent-app-muted), var(--agent-app-surface) 45%);
+  --text-on-accent: var(--agent-app-accent-contrast);
+  --border-subtle: color-mix(in srgb, var(--agent-app-border), var(--agent-app-surface) 45%);
+  --border-default: var(--agent-app-border);
+  --border-strong: color-mix(in srgb, var(--agent-app-border), var(--agent-app-text) 25%);
+  --accent-solid: var(--agent-app-accent);
+  --accent-hover: color-mix(in srgb, var(--agent-app-accent), var(--agent-app-text) 14%);
+  --accent-text: var(--agent-app-accent);
+  --accent-bg: color-mix(in srgb, var(--agent-app-accent), var(--agent-app-surface) 88%);
+  --accent-border: color-mix(in srgb, var(--agent-app-accent), var(--agent-app-surface) 68%);
+  --focus-ring: var(--agent-app-ring);
+
+  /* state tones — solid + text carry the hue; bg + border derive off the solid
+     against the current surface, so they follow theme AND every style pack */
+  --success-solid: #16a34a; --success-text: #15803d;
+  --warning-solid: #d97706; --warning-text: #b45309;
+  --danger-solid: #dc2626;  --danger-text: #b91c1c;
+  --info-solid: #2563eb;    --info-text: #1d4ed8;
+  --success-bg: color-mix(in srgb, var(--success-solid) 12%, var(--agent-app-surface));
+  --success-border: color-mix(in srgb, var(--success-solid) 28%, var(--agent-app-surface));
+  --warning-bg: color-mix(in srgb, var(--warning-solid) 12%, var(--agent-app-surface));
+  --warning-border: color-mix(in srgb, var(--warning-solid) 28%, var(--agent-app-surface));
+  --danger-bg: color-mix(in srgb, var(--danger-solid) 12%, var(--agent-app-surface));
+  --danger-border: color-mix(in srgb, var(--danger-solid) 28%, var(--agent-app-surface));
+  --info-bg: color-mix(in srgb, var(--info-solid) 12%, var(--agent-app-surface));
+  --info-border: color-mix(in srgb, var(--info-solid) 28%, var(--agent-app-surface));
+  --neutral-text: var(--agent-app-muted);
+  --neutral-bg: color-mix(in srgb, var(--agent-app-text) 6%, var(--agent-app-surface));
+  --neutral-border: var(--agent-app-border);
 }
 
-[data-theme="dark"] {
-  --bg-canvas:#0b1220; --bg-surface:#111a2b; --bg-raised:#16223a;
-  --bg-sunken:#0d1526; --bg-hover:#1a2740; --bg-active:#22314f; --bg-selected:#1e2a4a;
-  --text-primary:#eef2f8; --text-secondary:#9aa8bd; --text-tertiary:#8494ad; --text-disabled:#61708a;
-  --text-on-accent:#ffffff;
-  --border-subtle:#1e2a40; --border-default:#2a3a56; --border-strong:#3b4d6e;
-  --accent-solid:var(--indigo-500); --accent-hover:var(--indigo-400); --accent-text:var(--indigo-300);
-  --accent-bg:rgba(99,102,241,.14); --accent-border:rgba(99,102,241,.3); --focus-ring:var(--indigo-400);
-  --success-solid:var(--green-500); --success-text:var(--green-400); --success-bg:rgba(34,197,94,.12); --success-border:rgba(34,197,94,.22);
-  --warning-solid:var(--amber-500); --warning-text:var(--amber-400); --warning-bg:rgba(245,158,11,.12); --warning-border:rgba(245,158,11,.22);
-  --danger-solid:var(--red-500);    --danger-text:var(--red-400);    --danger-bg:rgba(239,68,68,.12);   --danger-border:rgba(239,68,68,.22);
-  --info-solid:var(--blue-500);     --info-text:var(--blue-400);     --info-bg:rgba(59,130,246,.12);    --info-border:rgba(59,130,246,.22);
-  --neutral-text:var(--slate-300);  --neutral-bg:rgba(148,163,184,.12); --neutral-border:rgba(148,163,184,.2);
-  --sh-1:0 1px 2px rgb(0 0 0 / .4); --sh-2:0 2px 8px rgb(0 0 0 / .45);
-  --sh-3:0 8px 20px rgb(0 0 0 / .5); --sh-4:0 16px 32px rgb(0 0 0 / .55);
+/* Dark: brighten state solids/text + deepen elevation. bg/border derive off the
+   solids above, so they update automatically. Applied for explicit dark and for
+   OS-dark when the app has not opted into light. */
+:root[data-theme='dark'] {
+  --success-solid: #22c55e; --success-text: #4ade80;
+  --warning-solid: #f59e0b; --warning-text: #fbbf24;
+  --danger-solid: #ef4444;  --danger-text: #f87171;
+  --info-solid: #3b82f6;    --info-text: #60a5fa;
+  --sh-1: 0 1px 2px rgb(0 0 0 / .4);
+  --sh-2: 0 2px 8px rgb(0 0 0 / .45);
+  --sh-3: 0 8px 20px rgb(0 0 0 / .5);
+  --sh-4: 0 16px 32px rgb(0 0 0 / .55);
 }
-
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg-canvas:#0b1220; --bg-surface:#111a2b; --bg-raised:#16223a;
-    --bg-sunken:#0d1526; --bg-hover:#1a2740; --bg-active:#22314f; --bg-selected:#1e2a4a;
-    --text-primary:#eef2f8; --text-secondary:#9aa8bd; --text-tertiary:#8494ad; --text-disabled:#61708a;
-    --text-on-accent:#ffffff;
-    --border-subtle:#1e2a40; --border-default:#2a3a56; --border-strong:#3b4d6e;
-    --accent-solid:var(--indigo-500); --accent-hover:var(--indigo-400); --accent-text:var(--indigo-300);
-    --accent-bg:rgba(99,102,241,.14); --accent-border:rgba(99,102,241,.3); --focus-ring:var(--indigo-400);
-    --success-solid:var(--green-500); --success-text:var(--green-400); --success-bg:rgba(34,197,94,.12); --success-border:rgba(34,197,94,.22);
-    --warning-solid:var(--amber-500); --warning-text:var(--amber-400); --warning-bg:rgba(245,158,11,.12); --warning-border:rgba(245,158,11,.22);
-    --danger-solid:var(--red-500);    --danger-text:var(--red-400);    --danger-bg:rgba(239,68,68,.12);   --danger-border:rgba(239,68,68,.22);
-    --info-solid:var(--blue-500);     --info-text:var(--blue-400);     --info-bg:rgba(59,130,246,.12);    --info-border:rgba(59,130,246,.22);
-    --neutral-text:var(--slate-300);  --neutral-bg:rgba(148,163,184,.12); --neutral-border:rgba(148,163,184,.2);
-    --sh-1:0 1px 2px rgb(0 0 0 / .4); --sh-2:0 2px 8px rgb(0 0 0 / .45);
-    --sh-3:0 8px 20px rgb(0 0 0 / .5); --sh-4:0 16px 32px rgb(0 0 0 / .55);
+  :root:not([data-theme='light']) {
+    --success-solid: #22c55e; --success-text: #4ade80;
+    --warning-solid: #f59e0b; --warning-text: #fbbf24;
+    --danger-solid: #ef4444;  --danger-text: #f87171;
+    --info-solid: #3b82f6;    --info-text: #60a5fa;
+    --sh-1: 0 1px 2px rgb(0 0 0 / .4);
+    --sh-2: 0 2px 8px rgb(0 0 0 / .45);
+    --sh-3: 0 8px 20px rgb(0 0 0 / .5);
+    --sh-4: 0 16px 32px rgb(0 0 0 / .55);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; }
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 `;

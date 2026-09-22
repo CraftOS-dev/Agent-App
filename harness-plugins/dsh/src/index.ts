@@ -1,18 +1,20 @@
 /**
- * Agent App Framework bundle for deepseek-harness (dsh).
+ * Agent App Framework bundle for deepseek-harness (dsh), host half.
  *
- * A real dsh Cordis plugin: `apply(ctx)` registers agent tools that build and
- * operate Agent Apps through the framework CLIs, via
- * `ctx.tools.register(defineTool(...))`. Each tool shells the real CLI through
- * the shared engine, so nothing here is simulated. `client.ts` is the optional
- * browser half that renders a launched app in an iframe.
+ * `apply(ctx)` registers the agent tools that build and operate Agent Apps
+ * through the framework CLIs, and — once dsh's `webServer` is available —
+ * mounts the "Agent Apps" manager (see ./manager.ts), a full app manager the
+ * client half shows inside the dsh UI. Everything shells the real CLIs through
+ * the shared engine, so nothing here is simulated.
  *
- * Built by the dsh toolchain, which provides `cordis` and `@deepseek-ai/dsh-tools`
- * as peer dependencies; it is not part of the framework monorepo's `tsc` build.
+ * Built by scripts/build.mjs into a self-contained bundle (engine inlined; the
+ * host-provided cordis / @deepseek-ai/* stay external), installable with
+ * `dsh plugin --profile <name> add ./harness-plugins/dsh/dist`.
  */
-import type { Context } from "cordis";
+import type { Context } from "@deepseek-ai/cordis";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { runA2App, binFor } from "@a2app/integration-starter";
+import { registerManager, type ManagerHost } from "./manager.js";
 
 /** The a2app binary (or JS entry). Override with A2APP_CLI. */
 const CLI = process.env.A2APP_CLI ?? "a2app";
@@ -38,7 +40,6 @@ function cliTool(name: string, description: string, parameters: Record<string, u
     async execute(args: Args) {
       const argv = toArgv(args ?? {});
       const r = await runA2App(binFor(argv, CLI, FRAMEWORK_CLI), argv);
-      // A guard rejection is useful data; return its message rather than throw.
       return r.stdout || r.stderr || `exit ${r.code}`;
     },
   });
@@ -49,8 +50,6 @@ export function apply(ctx: Context): void {
   const ENTITY = req("entity / collection name");
 
   // Describe is navigational: one tool taking a PATH, not a tool per operation.
-  // A tool list that grew with the app would reproduce the cost and the
-  // selection problem the walk exists to remove.
   ctx.tools.register(cliTool("agent_app_describe",
     "Describe ONE place in an Agent App. `path` is empty for the root (its modules), \"sales\" for a module, " +
       "\"sales/invoices\" for an entity, \"sales/invoices/INV-1\" for a record and the operations its state allows. " +
@@ -83,8 +82,8 @@ export function apply(ctx: Context): void {
     { dir: DIR, entity: ENTITY, id: req("record id") }, (a) => [s(a.dir), "data", s(a.entity), "delete", s(a.id)]));
 
   // No `agent_app_operations`: there is no global operation list to return. An
-  // operation is found on the screen it belongs to, and invoked at the path that
-  // identifies it.
+  // operation is found on the screen it belongs to, and invoked at the path
+  // that identifies it.
   ctx.tools.register(cliTool("agent_app_find", "Search entity, operation and module names across the app; returns their locations.",
     { dir: DIR, term: req("search term") }, (a) => [s(a.dir), "--find", s(a.term)]));
 
@@ -112,6 +111,12 @@ export function apply(ctx: Context): void {
   ctx.tools.register(cliTool("agent_app_validate", "Run the validation + security gate.",
     { dir: DIR, noBuild: { type: "boolean", description: "skip the build step" } },
     (a) => (a.noBuild ? [s(a.dir), "validate", "--no-build"] : [s(a.dir), "validate"])));
+
+  // The Agent Apps manager — mounted once dsh's web server is available. The
+  // client half points a UI slot iframe at the route this serves.
+  ctx.inject(["webServer"], (scoped: Context) => {
+    ctx.effect(() => registerManager(scoped as unknown as ManagerHost), "agent-app: manager routes");
+  });
 }
 
 export default apply;

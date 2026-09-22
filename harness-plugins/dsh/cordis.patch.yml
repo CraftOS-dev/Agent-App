@@ -1,20 +1,6 @@
-name: agent-app
-version: 0.1.0
-description: Agent App Framework for deepseek-harness (dsh) — build, evolve, and operate Agent Apps over the A2App protocol; a client module renders a launched app in its own slot.
-host: dist/index.js
-client: dist/client.js
-skills:
-  - .agents/skills
-provides:
-  tools:
-    - agent_app_describe
-    - agent_app_list
-    - agent_app_get
-    - agent_app_create
-    - agent_app_update
-    - agent_app_delete
-    - agent_app_find
-    - agent_app_run_operation
-    - agent_app_poll_tasks
-    - agent_app_build
-    - agent_app_validate
+# Profile patch layer for the Agent App Framework bundle.
+# A dsh bundle's substance is this file; the manifest points here via
+# `dsh.bundle.patch`. One insert row mounts the host plugin by its package name.
+- insert:
+    - id: agent-app
+      name: dsh-agent-app

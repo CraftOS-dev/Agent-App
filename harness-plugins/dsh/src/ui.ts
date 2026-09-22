@@ -1,0 +1,516 @@
+/**
+ * The Agent Apps manager page, served over dsh's web server and shown inside the
+ * dsh UI through a client slot iframe. One self-contained HTML document styled
+ * with dsh's own design tokens (light + dark, selected by `cfg.dark` since an
+ * iframe does not inherit the host's theme variables).
+ *
+ * Layout: a browser-style tab strip (one tab per Agent App plus a "New +" tab),
+ * a content area embedding the active app, and a resizable side panel rendering
+ * that app's dsh session. The page is same-origin with the dsh server, so its
+ * JSON calls need no CORS; DOM is built with createElement/textContent so
+ * app-provided strings never reach innerHTML.
+ */
+export interface ManagerConfig {
+  apiBase: string;
+  /** dsh web route for transcript reads (same-origin GET). */
+  homeBase: string;
+  token: string;
+  blueprints: readonly string[];
+  /** Whether the host is in dark mode (the iframe cannot read the parent theme). */
+  dark: boolean;
+  /** Bundle build stamp, shown in the footer to flag a stale installed copy. */
+  build: string;
+}
+
+export function appManagerHtml(cfg: ManagerConfig): string {
+  const cfgJson = JSON.stringify(cfg).replace(/</g, "\\u003c");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Apps</title>
+<style>
+:root{
+  color-scheme:light;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif;
+  --mono:'SF Mono','JetBrains Mono','Fira Code',Consolas,'Liberation Mono',Menlo,Courier,'PingFang SC','Microsoft YaHei';
+  --ease:cubic-bezier(0.4,0,0.2,1);
+  --shadow-lv2:0 4px 12px 0 rgba(0,0,0,.02),0 2px 8px 0 rgba(0,0,0,.04);
+  --shadow-lv3:0 0 1px 0 rgba(0,0,0,.2),0 0 4px 0 rgba(0,0,0,.02),0 12px 32px 0 rgba(0,0,0,.08);
+  /* Light (dsh design-platform.css body{}) */
+  --bg:rgb(255,255,255); --surface:rgb(255,255,255); --elevated:rgb(255,255,255); --layer:rgb(235,238,242);
+  --sidebar:rgb(249,250,251); --input-bg:rgb(255,255,255);
+  --text:rgb(15,17,21); --text-2:rgb(97,102,107); --text-3:rgb(129,133,140); --text-dim:rgb(173,178,184);
+  --border-1:rgba(0,0,0,.04); --border-2:rgba(0,0,0,.10); --border-3:rgba(0,0,0,.16);
+  --primary:rgb(15,17,21); --primary-hover:rgb(67,69,74); --primary-fg:rgb(255,255,255);
+  --accent:rgb(65,118,230); --accent-hover:rgb(103,158,254);
+  --hover:rgba(38,49,72,.06); --active:rgba(38,49,72,.10); --hover-danger:rgba(236,19,19,.05);
+  --success:rgb(34,197,94); --warn:rgb(245,158,11); --danger:rgb(236,19,19);
+}
+:root[data-dark]{
+  color-scheme:dark;
+  /* Dark (dsh body[data-ds-dark-theme]{}) */
+  --bg:rgb(21,21,23); --surface:rgb(35,35,36); --elevated:rgb(44,44,46); --layer:rgb(53,54,56);
+  --sidebar:rgb(27,27,28); --input-bg:rgb(44,44,46);
+  --text:rgb(249,250,251); --text-2:rgb(207,211,214); --text-3:rgb(173,178,184); --text-dim:rgb(67,69,74);
+  --border-1:rgba(255,255,255,.06); --border-2:rgba(255,255,255,.12); --border-3:rgba(255,255,255,.20);
+  --primary:rgb(249,250,251); --primary-hover:rgb(235,238,242); --primary-fg:rgb(15,17,21);
+  --accent:rgb(103,158,254); --accent-hover:rgb(65,118,230);
+  --hover:rgba(255,255,255,.08); --active:rgba(255,255,255,.14); --hover-danger:rgba(242,90,90,.15);
+  --success:rgb(34,197,94); --warn:rgb(245,158,11); --danger:rgb(242,90,90);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font:14px/1.6 var(--font);background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;overflow:hidden}
+::selection{background:var(--accent);color:#fff}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{font:inherit;cursor:pointer}
+
+/* ── Tab strip ── */
+.tabbar{display:flex;align-items:flex-end;gap:0;padding:6px 8px 0;background:var(--sidebar);border-bottom:1px solid var(--border-2);flex:none;overflow-x:auto;scrollbar-width:none}
+.tabbar::-webkit-scrollbar{display:none}
+.tab{position:relative;display:flex;align-items:center;gap:7px;max-width:200px;min-width:0;height:32px;padding:0 12px;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;color:var(--text-3);font-size:13px;font-weight:500;white-space:nowrap}
+.tab:not(.active):not(:hover)+.tab:not(.active):not(:hover)::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:1px;background:var(--border-2)}
+.tab:hover{color:var(--text);background:var(--hover)}
+.tab.active{background:var(--surface);border-color:var(--border-2);color:var(--text);box-shadow:0 1px 0 var(--surface)}
+.tab.offline .tab-name{opacity:0.55}
+.tab.active.offline .tab-name{opacity:0.7}
+.tab-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tab .dot{flex:none;width:6px;height:6px;border-radius:9999px}
+.dot.ok{background:var(--success);box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 15%,transparent)}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 15%,transparent)}
+.dot.off{background:var(--text-3);opacity:0.5}
+.dot.busy{background:var(--warn);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+.tab-more{flex:none;display:none;align-items:center;justify-content:center;width:18px;height:18px;border:none;border-radius:6px;background:transparent;color:var(--text-3);padding:0;line-height:1;font-size:12px}
+.tab.active .tab-more{display:inline-flex}
+.tab-more:hover{background:var(--hover);color:var(--text)}
+.tab.newtab{margin-left:auto;flex:none;color:var(--text-3);font-weight:600}
+.tab.newtab.active{color:var(--accent)}
+
+/* ── Layout ── */
+main{flex:1;display:flex;min-height:0}
+#view{flex:1;min-width:0;position:relative;background:var(--surface)}
+#frames{position:absolute;inset:0}
+#frames iframe{position:absolute;inset:0;width:100%;height:100%;border:none;background:#fff}
+.center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto}
+.center[hidden]{display:none}
+.card{width:100%;max-width:520px;border:1px solid var(--border-2);background:var(--surface);border-radius:12px;padding:24px;box-shadow:var(--shadow-lv2)}
+.card h2{margin:0 0 4px;font-size:16px;font-weight:600;color:var(--text)}
+.card .sub{font-size:13px;color:var(--text-2);margin:0 0 16px;line-height:1.5}
+.card .meta{font:12px/1.6 var(--mono);color:var(--text-3);word-break:break-all;margin:0 0 16px}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+
+/* ── Buttons ── */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;border:1px solid var(--border-2);background:transparent;color:var(--text);padding:0 14px;border-radius:18px;font-size:14px;font-weight:500}
+.btn:hover{background:var(--hover)}
+.btn:disabled{opacity:0.55;cursor:default}
+.btn.primary{border-color:transparent;background:var(--primary);color:var(--primary-fg)}
+.btn.primary:hover{background:var(--primary-hover)}
+.btn.danger{border-color:transparent;background:transparent;color:var(--danger)}
+.btn.danger:hover{background:var(--hover-danger)}
+
+/* ── Menu ── */
+#menu{position:fixed;z-index:30;min-width:180px;padding:4px;border:1px solid var(--border-2);border-radius:12px;background:var(--layer);box-shadow:var(--shadow-lv3)}
+#menu button{display:flex;width:100%;align-items:center;min-height:40px;border:none;border-radius:10px;background:transparent;color:var(--text);padding:0 10px;font-size:14px;text-align:left}
+#menu button:hover{background:var(--hover)}
+#menu button.danger{color:var(--danger)}
+#menu button.danger:hover{background:var(--hover-danger)}
+#menu hr{border:none;border-top:1px solid var(--border-1);margin:4px 2px}
+
+/* ── Form (New tab) ── */
+.form{width:100%;max-width:560px}
+.form h1{font-size:22px;font-weight:700;line-height:1.2;color:var(--text);margin:0 0 4px}
+.form .lead{font-size:13px;color:var(--text-2);margin:0 0 20px}
+label{display:block;margin:14px 0 6px;font-size:13px;font-weight:600;color:var(--text)}
+.input,select.input,textarea.input{width:100%;height:32px;padding:0 10px;border-radius:8px;color:var(--text);border:1px solid var(--border-2);background:var(--input-bg);font:inherit}
+textarea.input{height:auto;min-height:120px;padding:8px 10px;resize:vertical}
+.input::placeholder{color:var(--text-dim)}
+.input:focus-visible{outline:none;border-color:var(--accent)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form .btn.primary{width:100%;margin-top:20px}
+.err{margin-top:12px;font-size:13px;font-weight:500;color:var(--danger)}
+.buildstamp{margin:16px 0 0;font-size:11px;color:var(--text-3);opacity:0.7}
+
+/* ── Session sidebar ── */
+#resizer{flex:none;width:5px;margin:0 -2px;cursor:col-resize;background:transparent;z-index:5;touch-action:none}
+#resizer:hover,#resizer.dragging{background:color-mix(in srgb,var(--accent) 35%,transparent)}
+#resizer[hidden]{display:none}
+#side{width:380px;min-width:280px;max-width:70vw;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--border-2);background:var(--sidebar)}
+#side[hidden]{display:none}
+.side-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border-2);flex:none}
+.side-head .t{font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.side-head .s{font-size:11px;color:var(--text-3);flex:none}
+.side-close{flex:none;border:none;background:transparent;color:var(--text-3);width:22px;height:22px;border-radius:6px;padding:0;line-height:1}
+.side-close:hover{background:var(--hover);color:var(--text)}
+#log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:100%;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;max-width:88%;background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);border-radius:14px 14px 4px 14px;padding:8px 12px;color:var(--text)}
+.msg.assistant{align-self:flex-start;max-width:95%;color:var(--text)}
+.toolsline{display:flex;align-items:center;gap:6px;color:var(--text-3);font-size:11px;font-weight:500}
+.toolsline::before{content:"\\2261";font-size:13px;opacity:0.7}
+.toolrow{max-width:100%}
+.toolrow summary{cursor:pointer;color:var(--text-3);font-size:11px;font-weight:500;user-select:none}
+.toolrow summary:hover{color:var(--text)}
+.toolrow pre{font:11px/1.5 var(--mono);color:var(--text);background:var(--surface);border:1px solid var(--border-2);border-radius:6px;padding:8px 10px;margin:6px 0 0;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.log-empty{margin:auto;text-align:center;color:var(--text-3);font-size:13px}
+.composer{padding:10px 12px 12px;border-top:1px solid var(--border-2);flex:none}
+.composer-box{display:flex;align-items:flex-end;gap:8px;border:1px solid var(--border-2);background:var(--input-bg);border-radius:22px;padding:7px 7px 7px 14px;box-shadow:var(--shadow-lv2);transition:border-color .1s var(--ease)}
+.composer-box:focus-within{border-color:var(--accent)}
+/* max-height = 6 rows: 6 × (13px × 1.45) + 4px padding */
+.composer-box textarea{flex:1;min-width:0;max-height:122px;resize:none;border:none;background:transparent;color:var(--text);font:inherit;font-size:13px;line-height:1.45;padding:4px 0;outline:none}
+.composer-box textarea::placeholder{color:var(--text-dim)}
+.send{flex:none;display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9999px;border:none;background:var(--primary);color:var(--primary-fg);padding:0;transition:background .1s var(--ease)}
+.send:hover:not(:disabled){background:var(--primary-hover)}
+.send:disabled{cursor:default;background:var(--hover);color:var(--text-3)}
+.send svg{display:block}
+.spinner{width:22px;height:22px;border:2px solid var(--border-3);border-top-color:var(--accent);border-radius:9999px;animation:spin 0.8s linear infinite;margin:0 auto 14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style></head><body>
+<header class="tabbar" id="tabbar"></header>
+<main>
+  <section id="view"><div id="frames"></div><div id="panel" class="center" hidden></div></section>
+  <div id="resizer" hidden></div>
+  <aside id="side" hidden>
+    <div class="side-head"><span class="t" id="side-title"></span><span class="s">session</span><button class="side-close" id="side-close" title="Close">&#10005;</button></div>
+    <div id="log"></div>
+    <div class="composer"><div class="composer-box">
+      <textarea id="chat-in" rows="1" placeholder="Ask for a change, a task, a report&hellip;"></textarea>
+      <button class="send" id="chat-send" title="Send" disabled><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button>
+    </div></div>
+  </aside>
+</main>
+<div id="menu" hidden></div>
+<script type="application/json" id="cfg">${cfgJson}</script>
+<script>
+"use strict";
+const CFG = JSON.parse(document.getElementById("cfg").textContent);
+if (CFG.dark) document.documentElement.setAttribute("data-dark", "");
+const S = { rows: [], active: null, side: false, log: [], sending: false, busy: new Set(), confirmDelete: null };
+
+function api(path, body) {
+  const opts = { method: body ? "POST" : "GET", headers: { "x-a2app-token": CFG.token } };
+  if (body) { opts.headers["content-type"] = "application/json"; opts.body = JSON.stringify(body); }
+  return fetch(CFG.apiBase + path, opts).then((r) => r.json());
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+async function refresh() {
+  const data = await api("/apps");
+  S.rows = data.rows;
+  if (S.active === null) S.active = S.rows.length ? S.rows[0].path : "new";
+  if (S.active !== "new" && !S.rows.some((r) => r.path === S.active)) S.active = S.rows.length ? S.rows[0].path : "new";
+  render();
+}
+function activeRow() { return S.rows.find((r) => r.path === S.active) ?? null; }
+
+function dotClass(r) {
+  if (r.building) return "busy";
+  if (r.status === "running") return "ok";
+  if (r.status === "unreachable") return "warn";
+  return "off";
+}
+function renderTabs() {
+  const bar = document.getElementById("tabbar");
+  bar.replaceChildren();
+  for (const r of S.rows) {
+    const t = el("button", "tab" + (r.path === S.active ? " active" : "") + (r.status !== "running" && !r.building ? " offline" : ""));
+    t.appendChild(el("span", "dot " + dotClass(r)));
+    t.appendChild(el("span", "tab-name", r.name));
+    const more = el("button", "tab-more", "\\u22EF");
+    more.title = "App actions";
+    more.onclick = (e) => { e.stopPropagation(); openMenu(r, more); };
+    t.appendChild(more);
+    t.onclick = () => { S.active = r.path; S.confirmDelete = null; closeMenu(); render(); };
+    bar.appendChild(t);
+  }
+  const nt = el("button", "tab newtab" + (S.active === "new" ? " active" : ""), "New +");
+  nt.onclick = () => { S.active = "new"; closeMenu(); render(); };
+  bar.appendChild(nt);
+}
+
+function openMenu(r, anchor) {
+  const m = document.getElementById("menu");
+  m.replaceChildren();
+  const item = (label, cls, fn) => { const b = el("button", cls, label); b.onclick = fn; m.appendChild(b); };
+  if (r.status === "running") item("Pause", "", () => { closeMenu(); act(r, "stop"); });
+  else if (!r.building) item("Launch", "", () => { closeMenu(); act(r, "serve"); });
+  item(S.side ? "Hide session" : "Show session", "", () => { closeMenu(); toggleSide(); });
+  m.appendChild(el("hr"));
+  if (S.confirmDelete === r.path) {
+    item("Confirm delete \\u2014 removes files", "danger", () => { closeMenu(); removeApp(r); });
+  } else {
+    item("Delete\\u2026", "danger", () => { S.confirmDelete = r.path; openMenu(r, anchor); });
+  }
+  const rect = anchor.getBoundingClientRect();
+  m.hidden = false;
+  m.style.left = Math.min(rect.left, innerWidth - m.offsetWidth - 8) + "px";
+  m.style.top = rect.bottom + 6 + "px";
+}
+function closeMenu() { document.getElementById("menu").hidden = true; S.confirmDelete = null; }
+addEventListener("click", (e) => { if (!document.getElementById("menu").contains(e.target)) closeMenu(); });
+
+async function act(r, verb) {
+  S.busy.add(r.path); render();
+  try { await api("/app/" + verb, { path: r.path }); } finally { S.busy.delete(r.path); }
+  await refresh();
+}
+async function removeApp(r) {
+  S.busy.add(r.path); render();
+  try { await api("/app/remove", { path: r.path }); } finally { S.busy.delete(r.path); }
+  S.active = null;
+  await refresh();
+}
+
+const frames = new Map();
+let viewKey = "";
+function renderView() {
+  const panel = document.getElementById("panel");
+  const framesBox = document.getElementById("frames");
+  const r = activeRow();
+  const showFrame = r && r.status === "running";
+  for (const [path, f] of frames) {
+    const row = S.rows.find((x) => x.path === path);
+    if (!row || row.status !== "running") { f.remove(); frames.delete(path); }
+    else f.style.display = showFrame && path === r.path ? "block" : "none";
+  }
+  if (showFrame && !frames.has(r.path)) {
+    const f = document.createElement("iframe");
+    f.src = r.url;
+    f.title = r.name;
+    frames.set(r.path, f);
+    framesBox.appendChild(f);
+  }
+  panel.hidden = !!showFrame;
+  const key = showFrame
+    ? "frame:" + r.path
+    : S.active === "new" || !r
+      ? "new"
+      : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side].join("|");
+  if (key === viewKey) return;
+  viewKey = key;
+  if (showFrame) return;
+  panel.replaceChildren();
+  if (S.active === "new" || !r) { panel.appendChild(buildForm()); return; }
+  panel.appendChild(appPanel(r));
+}
+function appPanel(r) {
+  const c = el("div", "card");
+  const busy = S.busy.has(r.path);
+  if (r.building) {
+    c.appendChild(el("div", "spinner"));
+    c.appendChild(el("h2", null, "The agent is building \\u201C" + r.name + "\\u201D"));
+    c.appendChild(el("p", "sub", "It scaffolds, builds feature by feature, validates, walk-verifies, and serves the app. Watch it work in the session panel \\u2014 the tab goes live the moment the app is up."));
+    if (!S.side) {
+      const b = el("button", "btn", "Show session");
+      b.onclick = () => toggleSide(true);
+      c.appendChild(b);
+    }
+    return c;
+  }
+  if (r.status === "unreachable") {
+    c.appendChild(el("h2", null, r.name + " is unreachable"));
+    c.appendChild(el("p", "sub", "Port " + r.port + " is answering, but not as this app. Stop whatever holds the port, or pause and relaunch."));
+  } else if (r.buildEnded) {
+    c.appendChild(el("h2", null, "Build session ended"));
+    c.appendChild(el("p", "sub", "The agent's build run for \\u201C" + r.name + "\\u201D finished, but the app is not running. Check the session for what happened, or try launching it."));
+  } else {
+    c.appendChild(el("h2", null, r.name + " is offline"));
+    c.appendChild(el("p", "sub", "The app is registered but not serving right now."));
+  }
+  c.appendChild(el("p", "meta", r.path));
+  const row = el("div", "row");
+  const launch = el("button", "btn primary", busy ? "Launching\\u2026" : "Launch");
+  launch.disabled = busy;
+  launch.onclick = () => act(r, "serve");
+  row.appendChild(launch);
+  const sess = el("button", "btn", "Show session");
+  sess.onclick = () => toggleSide(true);
+  row.appendChild(sess);
+  c.appendChild(row);
+  return c;
+}
+
+function buildForm() {
+  const f = el("div", "form");
+  f.appendChild(el("h1", null, "Agent Apps"));
+  f.appendChild(el("p", "lead", "Describe the app; the agent builds, verifies, and serves it here."));
+  f.appendChild(el("label", null, "App name"));
+  const name = el("input", "input"); name.id = "f-name"; name.placeholder = "Acme CRM"; name.autocomplete = "off";
+  f.appendChild(name);
+  f.appendChild(el("label", null, "What should it do?"));
+  const req = el("textarea", "input"); req.id = "f-req";
+  req.placeholder = "Track contacts, companies, and deals. A pipeline board, per-contact activity log, and a weekly summary.";
+  f.appendChild(req);
+  const g = el("div", "grid2");
+  const c1 = el("div"); c1.appendChild(el("label", null, "Stack"));
+  const bp = el("select", "input"); bp.id = "f-bp";
+  for (const b of CFG.blueprints) bp.appendChild(new Option(b, b));
+  c1.appendChild(bp); g.appendChild(c1);
+  const c2 = el("div"); c2.appendChild(el("label", null, "Port (optional)"));
+  const port = el("input", "input"); port.id = "f-port"; port.type = "number"; port.placeholder = "auto"; port.autocomplete = "off";
+  c2.appendChild(port); g.appendChild(c2);
+  f.appendChild(g);
+  const go = el("button", "btn primary", "Build it");
+  go.onclick = () => submitBuild(go);
+  f.appendChild(go);
+  const err = el("div", "err"); err.id = "f-err";
+  f.appendChild(err);
+  f.appendChild(el("p", "buildstamp", "plugin build " + CFG.build));
+  return f;
+}
+async function submitBuild(btn) {
+  const v = (id) => document.getElementById(id).value.trim();
+  const err = document.getElementById("f-err");
+  const body = { name: v("f-name"), requirement: v("f-req"), blueprint: v("f-bp"), port: v("f-port") };
+  err.textContent = "";
+  if (!body.name || !body.requirement) { err.textContent = "Give the app a name and describe what it should do."; return; }
+  btn.disabled = true; btn.textContent = "Starting\\u2026";
+  const out = await api("/build", body);
+  if (!out.ok) { err.textContent = out.message; btn.disabled = false; btn.textContent = "Build it"; return; }
+  S.active = out.path;
+  await refresh();
+  toggleSide(true);
+}
+
+function toggleSide(force) {
+  S.side = force === true ? true : !S.side;
+  render();
+}
+document.getElementById("side-close").onclick = () => { S.side = false; render(); };
+async function pollLog() {
+  const row = S.side ? activeRow() : null;
+  if (!row) return;
+  const r = await fetch(CFG.homeBase + "/session?app=" + encodeURIComponent(row.path));
+  const out = await r.json();
+  if (out.ok && S.side && activeRow()?.path === row.path) { S.log = out.messages; renderLog(); }
+}
+function prettify(text) {
+  try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+}
+function nodesFor(m, i) {
+  const tools = m.tools ?? [];
+  const out = [];
+  if (m.role === "user") {
+    out.push(el("div", "msg user", m.text));
+  } else if (m.role === "assistant") {
+    if (tools.length) out.push(el("div", "toolsline", "Used " + tools.join(", ")));
+    if (m.text) out.push(el("div", "msg assistant", m.text));
+  } else {
+    const d = document.createElement("details");
+    d.className = "toolrow";
+    d.dataset.i = String(i);
+    d.appendChild(el("summary", null, tools[0] ?? (m.role === "system" ? "System" : "Tool result")));
+    d.appendChild(el("pre", null, prettify(m.text)));
+    out.push(d);
+  }
+  return out;
+}
+// The transcript is append-only: unchanged renders touch nothing, growth appends
+// only (so expanded tool rows and text selection survive), and a rare rewrite
+// rebuilds while restoring expanded rows by position.
+let logKeys = [];
+const itemKey = (m) => m.role + "\\u001f" + m.text + "\\u001f" + (m.tools ?? []).join(",");
+function resetLogView() {
+  logKeys = [];
+  document.getElementById("log").replaceChildren();
+}
+function renderLog() {
+  const log = document.getElementById("log");
+  const items = S.log.slice(-200);
+  if (!items.length) {
+    if (logKeys.length || !log.childElementCount) { logKeys = []; log.replaceChildren(el("div", "log-empty", "No session activity yet.")); }
+    return;
+  }
+  const keys = items.map(itemKey);
+  const grown = keys.length >= logKeys.length && logKeys.every((k, i) => k === keys[i]);
+  if (grown && keys.length === logKeys.length) return;
+  const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+  if (grown) {
+    if (!logKeys.length) log.replaceChildren();
+    for (let i = logKeys.length; i < items.length; i++) for (const n of nodesFor(items[i], i)) log.appendChild(n);
+  } else {
+    const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.i));
+    log.replaceChildren();
+    items.forEach((m, i) => {
+      for (const n of nodesFor(m, i)) { if (n.tagName === "DETAILS" && open.has(n.dataset.i)) n.open = true; log.appendChild(n); }
+    });
+  }
+  logKeys = keys;
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+const chatIn = document.getElementById("chat-in");
+const chatSend = document.getElementById("chat-send");
+async function sendChat() {
+  const text = chatIn.value.trim();
+  const row = activeRow();
+  if (!text || !row || S.sending) return;
+  S.sending = true;
+  chatIn.value = ""; chatIn.style.height = "auto"; chatSend.disabled = true;
+  S.log.push({ role: "user", text, tools: [] }); renderLog();
+  try { await api("/session/send", { path: row.path, name: row.name, text }); }
+  finally { S.sending = false; }
+}
+chatSend.onclick = sendChat;
+chatIn.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+chatIn.addEventListener("input", () => {
+  chatSend.disabled = !chatIn.value.trim();
+  chatIn.style.height = "auto";
+  chatIn.style.height = Math.min(chatIn.scrollHeight, 122) + "px";
+});
+
+const resizer = document.getElementById("resizer");
+const sideEl = document.getElementById("side");
+resizer.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  resizer.setPointerCapture(e.pointerId);
+  resizer.classList.add("dragging");
+  const startX = e.clientX;
+  const startW = sideEl.getBoundingClientRect().width;
+  const move = (ev) => {
+    const w = Math.min(innerWidth * 0.7, Math.max(280, startW + (startX - ev.clientX)));
+    sideEl.style.width = w + "px";
+  };
+  const up = () => {
+    resizer.classList.remove("dragging");
+    resizer.removeEventListener("pointermove", move);
+    resizer.removeEventListener("pointerup", up);
+  };
+  resizer.addEventListener("pointermove", move);
+  resizer.addEventListener("pointerup", up);
+});
+
+// The session panel is bound to the active tab, so switching tabs switches the
+// session and the New + tab shows none.
+let sidePath = null;
+function render() {
+  renderTabs();
+  renderView();
+  const row = activeRow();
+  const showSide = S.side && row != null;
+  document.getElementById("side").hidden = !showSide;
+  document.getElementById("resizer").hidden = !showSide;
+  if (showSide) {
+    document.getElementById("side-title").textContent = row.name;
+    if (sidePath !== row.path) {
+      sidePath = row.path;
+      S.log = [];
+      resetLogView();
+      pollLog().catch(() => {});
+    }
+  } else {
+    sidePath = null;
+  }
+}
+
+const quiet = (fn) => () => fn().catch(() => {});
+quiet(refresh)();
+setInterval(quiet(refresh), 4000);
+setInterval(quiet(pollLog), 2500);
+</script></body></html>`;
+}

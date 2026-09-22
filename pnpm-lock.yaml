@@ -138,10 +138,13 @@ importers:
         version: 20.19.43
 
   harness-plugins/dsh:
-    dependencies:
+    devDependencies:
       '@a2app/integration-starter':
         specifier: workspace:*
         version: link:../integration-starter
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
 
   harness-plugins/integration-starter:
     dependencies:

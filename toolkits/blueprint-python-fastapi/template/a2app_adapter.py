@@ -1212,7 +1212,7 @@ class Adapter:
         module = next((m for m in self.modules if m["name"] == module_name), None)
         if module is None:
             return self._err(404, "unknown_module", f'No module "{module_name}".',
-                             {"modules": [m["name"] for m in self.modules]})
+                             modules=[m["name"] for m in self.modules])
         if len(segments) == 1:
             return 200, self._describe_module(module, access, q.get("all") == "true")
 
@@ -1227,7 +1227,7 @@ class Adapter:
             if not access["read"](entity):
                 return self._err(403, ERROR_CODES["INSUFFICIENT_SCOPE"],
                                  f"This credential does not hold data:{entity}:read.",
-                                 {"required": f"data:{entity}:read"})
+                                 required=f"data:{entity}:read")
             return 200, self._describe_entity(module_name, entity, d, access)
 
         limited = self._rate_gate(headers, "data")
@@ -1256,7 +1256,7 @@ class Adapter:
         if not access["read"](target):
             return self._err(403, ERROR_CODES["INSUFFICIENT_SCOPE"],
                              f"This credential does not hold data:{target}:read.",
-                             {"required": f"data:{target}:read"})
+                             required=f"data:{target}:read")
         target_def = self.entity_defs.get(target)
         target_label = label_field_of(target_def["fields"]) if target_def else None
         items = []

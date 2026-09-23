@@ -1,0 +1,32 @@
+{
+  "id": "blueprint-rust-react",
+  "description": "Runnable Agent App blueprint: React (Vite) View + Rust (tiny_http) server + SQLite store, with a native Rust A2App adapter (the served surface and pure rules ported to Rust). NOT part of the framework.",
+  "template": "template",
+  "adapterVersionFrom": "src/a2app_adapter.rs",
+  "systemPaths": [
+    "manifest.json",
+    "src/main.rs",
+    "src/a2app_adapter.rs",
+    "a2app-update.js"
+  ],
+  "adapterPaths": [
+    "src/main.rs",
+    "src/a2app_adapter.rs",
+    "a2app-update.js"
+  ],
+  "gate": [
+    {
+      "name": "cargo build + adapter self-test",
+      "run": "cargo run --quiet -- --selftest"
+    },
+    {
+      "name": "operations resolve (every declared op has a runner)",
+      "run": "cargo run --quiet -- --check-ops"
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data",
+    "dev": "npm run build",
+    "promote": "cargo run --quiet -- --promote-check"
+  }
+}

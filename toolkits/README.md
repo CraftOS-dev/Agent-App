@@ -8,6 +8,9 @@ An agent can start from a blueprint or kit, but **none is required for complianc
 | [blueprint-react-node/](blueprint-react-node/) | Tier 2 — React + Hono + SQLite | React (Vite) View + Hono server + SQLite store; embedded `@a2app/adapter-core` middleware |
 | [blueprint-python-fastapi/](blueprint-python-fastapi/) | Tier 2 — FastAPI + SQLite | FastAPI + a SQLite store (stdlib `sqlite3`) + an in-process adapter (served surface + rules ported to Python) |
 | [blueprint-pocketbase-react/](blueprint-pocketbase-react/) | Tier 2 — PocketBase + React | PocketBase records + a React (Vite) View + the A2App adapter as in-process JS hooks |
+| [blueprint-go-react/](blueprint-go-react/) | Tier 2 — Go + React + SQLite | Go (net/http) server + SQLite store + React (Vite) View, with a native Go adapter port (rules + served surface) |
+| [blueprint-rust-react/](blueprint-rust-react/) | Tier 2 — Rust + React + SQLite | Rust (tiny_http) server + SQLite store + React (Vite) View, with a native Rust adapter port (rules + served surface) |
+| [blueprint-rails-vue/](blueprint-rails-vue/) | Tier 2 — Rails + Vue + SQLite | Rails server + SQLite store + Vue 3 (Vite) View, with a native Ruby adapter port (rules + served surface) |
 | [kit/](kit/) | The reference kit | browser client glue + design tokens, vendored by tier-2 blueprints and hash-registered in the canon |
 
-All four blueprints pass `scaffold → validate` in the [conformance](../conformance/) Toolkit class.
+All seven blueprints pass `scaffold → validate` in the [conformance](../conformance/) Toolkit class.

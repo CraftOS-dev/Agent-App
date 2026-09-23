@@ -1,0 +1,24 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "Rails-Vue Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modules": [
+    {
+      "name": "planning",
+      "summary": "tasks and the work in front of you"
+    }
+  ],
+  "modificationLock": false,
+  "capabilities": {
+    "integrations": []
+  },
+  "pipeline": {
+    "install": "bundle install && npm --prefix ui install",
+    "build": "npm --prefix ui run build && ruby -c lib/a2app_adapter.rb && ruby -c app/controllers/a2app_controller.rb",
+    "start": "bundle exec puma -C config/puma.rb",
+    "health": "/api/_a2app"
+  }
+}

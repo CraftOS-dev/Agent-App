@@ -1,0 +1,35 @@
+{
+  "id": "blueprint-rails-vue",
+  "description": "Runnable Agent App blueprint: Vue 3 (Vite) View + Rails server + SQLite store, with a native Ruby A2App adapter (the served surface and pure rules ported to Ruby). NOT part of the framework.",
+  "template": "template",
+  "adapterVersionFrom": "lib/a2app_adapter.rb",
+  "systemPaths": [
+    "manifest.json",
+    "config/application.rb",
+    "config/routes.rb",
+    "config/puma.rb",
+    "app/controllers/a2app_controller.rb",
+    "lib/a2app_adapter.rb",
+    "a2app-update.js"
+  ],
+  "adapterPaths": [
+    "app/controllers/a2app_controller.rb",
+    "lib/a2app_adapter.rb",
+    "a2app-update.js"
+  ],
+  "gate": [
+    {
+      "name": "ruby syntax + adapter self-test",
+      "run": "ruby -c lib/a2app_adapter.rb && ruby -c lib/a2app_schema.rb && ruby -c app/controllers/a2app_controller.rb && ruby lib/a2app_adapter.rb --selftest"
+    },
+    {
+      "name": "operations resolve (every declared op has a runner)",
+      "run": "ruby scripts/check_ops.rb"
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data",
+    "dev": "npm --prefix ui run build",
+    "promote": "bundle exec ruby scripts/promote_check.rb"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "rust-react-agent-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The React (Vite) View of an Agent App scaffolded from blueprint-rust-react — the server and adapter are Rust (see Cargo.toml).",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev:ui": "vite"
+  }
+}

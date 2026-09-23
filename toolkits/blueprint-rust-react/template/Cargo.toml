@@ -1,0 +1,18 @@
+# The Rust server + native A2App adapter. Versions are caret-compatible
+# ranges on purpose — the blueprint carries no lockfile; the scaffolded app's
+# first `cargo fetch` resolves and locks them.
+[package]
+name = "rust-react-agent-app"
+version = "0.1.0"
+edition = "2021"
+description = "An Agent App scaffolded from blueprint-rust-react: React (Vite) View + Rust (tiny_http) server + SQLite store."
+publish = false
+
+[dependencies]
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# "bundled" compiles SQLite in, so the app needs no system library — the first
+# build is slow for exactly that reason, and fast ever after.
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"

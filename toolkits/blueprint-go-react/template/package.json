@@ -1,0 +1,20 @@
+{
+  "name": "go-react-agent-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An Agent App scaffolded from blueprint-go-react: React (Vite) View + Go (net/http) server + SQLite store. npm covers the View build only; the server is Go.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev:ui": "vite"
+  }
+}

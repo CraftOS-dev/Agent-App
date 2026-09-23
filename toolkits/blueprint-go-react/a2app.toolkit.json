@@ -1,0 +1,32 @@
+{
+  "id": "blueprint-go-react",
+  "description": "Runnable Agent App blueprint: React (Vite) View + Go (net/http) server + SQLite store, with a native Go A2App adapter (the served surface and pure rules ported to Go). NOT part of the framework.",
+  "template": "template",
+  "adapterVersionFrom": "a2app_adapter.go",
+  "systemPaths": [
+    "manifest.json",
+    "main.go",
+    "a2app_adapter.go",
+    "a2app-update.js"
+  ],
+  "adapterPaths": [
+    "main.go",
+    "a2app_adapter.go",
+    "a2app-update.js"
+  ],
+  "gate": [
+    {
+      "name": "go vet + adapter self-test",
+      "run": "go vet ./... && go run . --selftest"
+    },
+    {
+      "name": "operations resolve (every declared op has a runner)",
+      "run": "go run . --check-ops"
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data",
+    "dev": "npm run build",
+    "promote": "go run . --promote-check"
+  }
+}

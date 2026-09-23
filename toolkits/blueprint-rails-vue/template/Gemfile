@@ -1,0 +1,13 @@
+# The backend's dependencies. sqlite3 is the ADAPTER's store (see
+# lib/a2app_adapter.rb, SqliteStore) — ActiveRecord is never loaded on this
+# stack, so do not add database.yml, migrations, or AR models around it.
+source "https://rubygems.org"
+
+gem "rails", "~> 8.0"
+gem "puma"
+gem "sqlite3"
+
+# Windows and JRuby have no zoneinfo directory, and ActiveSupport's railtie
+# initializes TZInfo at boot — without this the app cannot start there at all
+# (TZInfo::DataSources::ZoneinfoDirectoryNotFound). Same pin `rails new` writes.
+gem "tzinfo-data", platforms: %i[windows jruby]

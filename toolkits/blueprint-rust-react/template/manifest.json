@@ -1,0 +1,24 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "Rust-React Agent App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modules": [
+    {
+      "name": "planning",
+      "summary": "tasks and the work in front of you"
+    }
+  ],
+  "modificationLock": false,
+  "capabilities": {
+    "integrations": []
+  },
+  "pipeline": {
+    "install": "cargo fetch && npm install",
+    "build": "npm run build && cargo build --release",
+    "start": "cargo run --release --quiet",
+    "health": "/api/_a2app"
+  }
+}

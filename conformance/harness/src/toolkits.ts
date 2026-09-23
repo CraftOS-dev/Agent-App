@@ -55,6 +55,24 @@ const TOOLKITS: ToolkitSpec[] = [
     noBuild: true,
     incompleteBecause: "ships adapter hooks and a React View; collections and the binary are added by hand",
   },
+  // The native-port blueprints (Go, Rust, Ruby): runtime, model and View are
+  // complete, but each ships the requirements template unfilled — the spec is
+  // the author's to write, same stance as python-fastapi.
+  {
+    id: "blueprint-go-react",
+    noBuild: true,
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
+  },
+  {
+    id: "blueprint-rust-react",
+    noBuild: true,
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
+  },
+  {
+    id: "blueprint-rails-vue",
+    noBuild: true,
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
+  },
 ];
 
 /**

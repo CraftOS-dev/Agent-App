@@ -26,7 +26,7 @@ mkdirSync(dest, { recursive: true });
 let n = 0;
 for (const name of readdirSync(src)) {
   const dir = join(src, name);
-  if (!existsSync(join(dir, "a2app.toolkit.json"))) continue; // blueprints only, not @a2app/kit
+  if (!existsSync(join(dir, "a2app.toolkit.json"))) continue; // blueprints only, not @agent-app-toolkits/kit
   copyTree(dir, join(dest, name));
   n += 1;
   console.log(`bundled blueprint: ${name}`);

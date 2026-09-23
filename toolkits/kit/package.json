@@ -1,5 +1,5 @@
 {
-  "name": "@a2app/kit",
+  "name": "@agent-app-toolkits/kit",
   "version": "0.1.0",
   "description": "Versioned kit vendored into Agent Apps: a browser A2App data client + design tokens (ownership-hash protected, dependency-free)",
   "license": "MIT",

@@ -47,6 +47,22 @@ importers:
 
   adapters/rules: {}
 
+  apps/atlas-erp:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+    devDependencies:
+      gpt-tokenizer:
+        specifier: ^4.0.0
+        version: 4.0.0
+
+  apps/expense-tracker:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
+
   apps/playground:
     dependencies:
       '@a2app/adapter-core':
@@ -59,6 +75,18 @@ importers:
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43
+
+  apps/sky-and-time:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: file:../../adapters/adapter-core
+        version: file:adapters/adapter-core
+
+  apps/weather-forecast:
+    dependencies:
+      '@a2app/adapter-core':
+        specifier: file:../../adapters/adapter-core
+        version: file:adapters/adapter-core
 
   conformance/harness:
     dependencies:
@@ -80,7 +108,7 @@ importers:
         version: 20.19.43
       agent-app:
         specifier: workspace:*
-        version: link:../../framework/cli
+        version: link:../..
 
   framework/cli:
     dependencies:
@@ -165,6 +193,10 @@ importers:
         version: 20.19.43
 
 packages:
+
+  '@a2app/adapter-core@file:adapters/adapter-core':
+    resolution: {directory: adapters/adapter-core, type: directory}
+    engines: {node: '>=20'}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -337,6 +369,9 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  gpt-tokenizer@4.0.0:
+    resolution: {integrity: sha512-YAWIyzvuVUHEfW7tFfFAxH8qQb+Q3RU9nYOTy7skMNX5qzU6Q8jxTHZLyO56ug1vYvCR7wndzpd3jwD86/mhjQ==}
+
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
@@ -371,6 +406,10 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@a2app/adapter-core@file:adapters/adapter-core':
+    dependencies:
+      '@a2app/rules': link:adapters/rules
 
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
@@ -492,6 +531,8 @@ snapshots:
       '@esbuild/win32-arm64': 0.25.12
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
+
+  gpt-tokenizer@4.0.0: {}
 
   isexe@2.0.0: {}
 

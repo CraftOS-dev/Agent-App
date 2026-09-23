@@ -1,5 +1,5 @@
 /**
- * @a2app/kit — the versioned kit a toolkit vendors into an Agent App: shared
+ * @agent-app-toolkits/kit — the versioned kit a toolkit vendors into an Agent App: shared
  * View glue and a small browser A2App client. Vendored files are system-owned
  * (hash-locked in the ownership canon); an agent uses them but does not edit
  * them. Kept dependency-free so it drops into any stack.
@@ -67,7 +67,7 @@ export class BrowserDataClient {
  */
 export const DESIGN_TOKENS_CSS = `/* ============================================================================
    Agent App design tokens — shared visual foundation (AGENT-OWNED to re-point,
-   ships in lockstep with @a2app/kit's DESIGN_TOKENS_CSS — keep this body identical).
+   ships in lockstep with @agent-app-toolkits/kit's DESIGN_TOKENS_CSS — keep this body identical).
 
    The kit's warm-neutral --agent-app-* system. Components and app CSS read ONLY
    semantic tokens, never hardcoded colors, so light/dark AND every [data-style]

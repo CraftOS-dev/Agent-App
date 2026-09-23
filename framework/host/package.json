@@ -1,5 +1,5 @@
 {
- "name": "@a2app/host",
+ "name": "@agent-app-framework/host",
  "version": "0.1.0",
  "description": "Optional reference host: launch any stack via the manifest pipeline block, poll health, supervise (crash watchdog); receipts + false-claim gate (host obligations)",
  "license": "MIT",

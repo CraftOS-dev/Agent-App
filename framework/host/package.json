@@ -1,6 +1,6 @@
 {
- "name": "@agent-app-framework/host",
- "version": "0.1.0",
+ "name": "@craftos/agent-app-host",
+ "version": "0.1.0-alpha.0",
  "description": "Optional reference host: launch any stack via the manifest pipeline block, poll health, supervise (crash watchdog); receipts + false-claim gate (host obligations)",
  "license": "MIT",
  "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "framework/host" },

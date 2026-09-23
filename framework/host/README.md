@@ -1,4 +1,4 @@
-# @agent-app-framework/host — optional reference host
+# @craftos/agent-app-host — optional reference host
 
 A Host is optional supervisor software: **nothing here is required for framework compliance** — a bare agent plus a browser is a complete environment. This package is the reference host for users who want supervised launching and the safe-evolve machinery.
 

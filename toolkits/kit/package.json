@@ -1,6 +1,6 @@
 {
-  "name": "@agent-app-toolkits/kit",
-  "version": "0.1.0",
+  "name": "@craftos/agent-app-kit",
+  "version": "0.1.0-alpha.0",
   "description": "Versioned kit vendored into Agent Apps: a browser A2App data client + design tokens (ownership-hash protected, dependency-free)",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "toolkits/kit" },

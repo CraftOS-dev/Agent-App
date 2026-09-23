@@ -1,6 +1,6 @@
 {
  "name": "@a2app/adapter-core",
- "version": "0.1.0",
+ "version": "0.1.0-alpha.0",
  "description": "Stack-agnostic A2App served surface: identity, describe, guard+read-back, operations, tasks/events, context, whoami, IAM — driven by a pluggable backend binding",
  "license": "MIT",
  "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "adapters/adapter-core" },

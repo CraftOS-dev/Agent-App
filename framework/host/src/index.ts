@@ -1,5 +1,5 @@
 /**
- * @agent-app-framework/host — the optional reference host.
+ * @craftos/agent-app-host — the optional reference host.
  *
  * A host launches, displays, and supervises Agent Apps for a user. It is
  * OPTIONAL by design: a bare agent with a browser is a complete environment.

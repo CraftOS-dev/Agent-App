@@ -1,5 +1,5 @@
 {
-  "name": "@agent-app-toolkits/blueprint-pocketbase-react",
+  "name": "@craftos/agent-app-blueprint-pocketbase-react",
   "version": "0.1.0",
   "private": true,
   "description": "Agent App blueprint: PocketBase backend + React frontend, with an in-process A2App adapter as PocketBase JS hooks",

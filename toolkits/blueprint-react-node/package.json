@@ -1,5 +1,5 @@
 {
-  "name": "@agent-app-toolkits/blueprint-react-node",
+  "name": "@craftos/agent-app-blueprint-react-node",
   "version": "0.1.0",
   "private": true,
   "description": "Agent App blueprint: React + Hono + SQLite, with embedded A2App adapter (middleware form)",

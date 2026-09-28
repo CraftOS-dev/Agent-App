@@ -16,10 +16,13 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Use Node.js 20
+      # 22, not 20: the react-node blueprint's better-sqlite3 (13.x) requires
+      # Node >=22, and the conformance harness loads it in-process — on 20 that
+      # is a segfault, not an error.
+      - name: Use Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies
@@ -54,7 +57,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build

@@ -251,8 +251,10 @@ takes seconds to minutes. A button that fires a toast and then goes quiet
 leaves the person staring at a screen that shows no sign anything is happening.
 Store the queue task id the trigger returns on the record, and have the View
 follow it (`GET /api/_a2app/tasks/{id}`, same origin, polled at its
-`pollAfterMs` only while unfinished). Render every state, where the person
-asked:
+`pollAfterMs` only while unfinished). That read needs no credential on a
+single-user app only. On a multi-user app it answers 401, so there, have the
+agent write its progress onto the record and render that instead. Render
+every state, where the person asked:
 
 - `submitted` — waiting to be picked up, with elapsed time. After ~20 s with no
   claim, say that no agent is listening and name `agent-app <dir> bridge start`.

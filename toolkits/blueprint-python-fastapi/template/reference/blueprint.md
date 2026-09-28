@@ -190,7 +190,9 @@ or a harness polling `a2app <dir> tasks next --wait`.
 
 **Show the queued work in the View.** Keep the returned `taskId` on the record
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. Render queued → working (`progress.step`) → done or
+only while it is unfinished. That read needs no credential only on a
+single-user app. On a multi-user app it answers 401, so show what the agent
+writes to the record instead. Render queued → working (`progress.step`) → done or
 failed (`reason`, plus a way to ask again). The creator skill lists the states.
 A button that goes quiet after it queues work looks broken.
 

@@ -261,8 +261,13 @@ const t = await api(`/api/_a2app/tasks/${encodeURIComponent(record.agentTask)}`)
 // t.status · t.progress?.step · t.claim?.claimedAt · t.result?.summary · t.reason · t.pollAfterMs
 ```
 
-The read is same-origin, so the View needs no credential. A 404 means the task
-has been pruned, so drop the indicator. Don't retry it.
+On a single-user app (`authMode: "none"`) the View needs no credential for this
+read. **On a multi-user app it answers 401.** A browser sends no `Origin` on a
+same-origin GET, so the adapter treats the read as an uncredentialled program,
+and the View has no other path to the queue yet. There, show what the agent
+writes to the record instead (a status or assignee it sets on claim and on
+finish). A 404 means the task has been pruned, so drop the indicator. Don't
+retry it.
 
 ## Build, run, gate
 

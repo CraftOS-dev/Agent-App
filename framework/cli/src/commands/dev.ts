@@ -35,7 +35,6 @@
  *   3. the booted instance must answer the health URL AND identify as this
  *      app before the launch is reported up.
  */
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { verifySystemHashes } from "../lib/canon.js";
@@ -43,7 +42,7 @@ import { clearDevRecord, devJsonPath, mintDevBootDir, readDevRecord, stopDevInst
 import { dataDir, dataFingerprint, lifecycleCommand, lifecycleLock } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
 import { freeEphemeralPort, identifyApp, pollHealth } from "../lib/net.js";
-import { killTreeForce } from "../lib/proc.js";
+import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { loadProject } from "../lib/project.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
@@ -146,12 +145,10 @@ export async function run(_args: string[], app: string): Promise<number> {
     const url = `http://127.0.0.1:${port}`;
     const logPath = join(bootDir, "dev.log");
     const outFd = openSync(logPath, "a");
-    const child = spawn(pipeline.start, {
+    const child = spawnBackgroundShell(pipeline.start, {
       cwd: project.dir,
       env: { ...process.env, PORT: String(port), A2APP_DATA_DIR: devDataDir, A2APP_ENV: "dev" },
-      detached: true,
       stdio: ["ignore", outFd, outFd],
-      shell: true,
     });
     let spawnError: Error | null = null;
     child.on("error", (err) => {

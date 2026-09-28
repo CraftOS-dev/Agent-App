@@ -20,7 +20,6 @@
  * killed and its record cleared); serialized per app (a serve.lock prevents two
  * concurrent serves racing to spawn two processes).
  */
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { verifySystemHashes } from "../lib/canon.js";
@@ -32,7 +31,7 @@ import { readDevRecord } from "../lib/instance.js";
 import { dataDir } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
 import { identifyApp, pollHealth } from "../lib/net.js";
-import { killTreeForce } from "../lib/proc.js";
+import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
 
@@ -152,7 +151,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // the same three with a hidden port and a fresh directory — one code path
     // in every launcher, never a dev special case.
     const liveDataDir = dataDir(project.dir);
-    const child = spawn(pipeline.start, {
+    const child = spawnBackgroundShell(pipeline.start, {
       cwd: project.dir,
       env: {
         ...process.env,
@@ -160,9 +159,7 @@ export async function run(args: string[], app: string): Promise<number> {
         A2APP_ENV: "live",
         ...(liveDataDir !== null ? { A2APP_DATA_DIR: liveDataDir } : {}),
       },
-      detached: true,
       stdio: ["ignore", outFd, outFd],
-      shell: true,
     });
     // A spawn failure (e.g. shell not found) arrives asynchronously as 'error';
     // capture it so it becomes a clean failure, not an unhandled rejection.

@@ -22,6 +22,7 @@ export function runShell(command: string, cwd: string, opts: ShellOptions = {}):
       encoding: "utf8",
       timeout: opts.timeoutMs ?? 600_000,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
       ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
     });
     return { stdout: String(stdout ?? ""), stderr: "" };

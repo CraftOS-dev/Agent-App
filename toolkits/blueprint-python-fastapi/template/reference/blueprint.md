@@ -188,6 +188,12 @@ something — nothing is queued and no agent is handed it.
 The queue only moves when something is listening: `agent-app <dir> bridge start`,
 or a harness polling `a2app <dir> tasks next --wait`.
 
+**Show the queued work in the View.** Keep the returned `taskId` on the record
+and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
+only while it is unfinished. Render queued → working (`progress.step`) → done or
+failed (`reason`, plus a way to ask again). The creator skill lists the states.
+A button that goes quiet after it queues work looks broken.
+
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything; the app runs as `python main.py`,

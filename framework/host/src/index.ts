@@ -29,7 +29,7 @@ function terminateChild(child: ChildProcess, force = false): void {
   }
   try {
     if (process.platform === "win32") {
-      execFileSync("taskkill", ["/pid", String(pid), "/T", ...(force ? ["/F"] : [])], { stdio: "ignore" });
+      execFileSync("taskkill", ["/pid", String(pid), "/T", ...(force ? ["/F"] : [])], { stdio: "ignore", windowsHide: true });
     } else {
       const sig = force ? "SIGKILL" : "SIGTERM";
       try {
@@ -136,11 +136,11 @@ export async function launchApp(dir: string, opts: LaunchOptions = {}): Promise<
 
   if (opts.install !== false && manifest.pipeline.install) {
     log(`$ ${manifest.pipeline.install}`);
-    execSync(manifest.pipeline.install, { cwd: dir, stdio: "pipe", env, timeout: SHELL_TIMEOUT_MS });
+    execSync(manifest.pipeline.install, { cwd: dir, stdio: "pipe", env, timeout: SHELL_TIMEOUT_MS, windowsHide: true });
   }
   if (manifest.pipeline.build) {
     log(`$ ${manifest.pipeline.build}`);
-    execSync(manifest.pipeline.build, { cwd: dir, stdio: "pipe", env, timeout: SHELL_TIMEOUT_MS });
+    execSync(manifest.pipeline.build, { cwd: dir, stdio: "pipe", env, timeout: SHELL_TIMEOUT_MS, windowsHide: true });
   }
 
   log(`$ ${manifest.pipeline.start}  (PORT=${port})`);
@@ -152,6 +152,7 @@ export async function launchApp(dir: string, opts: LaunchOptions = {}): Promise<
     shell: true,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   child.stdout?.on("data", (d) => log(String(d).trimEnd()));
   child.stderr?.on("data", (d) => log(String(d).trimEnd()));

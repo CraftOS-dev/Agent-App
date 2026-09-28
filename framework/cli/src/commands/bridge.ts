@@ -152,6 +152,7 @@ async function startBackground(passthrough: string[], app: string, project: Proj
     detached: true,
     shell: false,
     stdio: ["ignore", outFd, outFd],
+    windowsHide: true,
   });
   let spawnError: Error | null = null;
   child.on("error", (err) => {

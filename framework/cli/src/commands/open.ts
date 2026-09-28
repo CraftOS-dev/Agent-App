@@ -117,7 +117,7 @@ function trySpawn(command: string, args: string[]): Promise<string | null> {
     };
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { detached: true, stdio: "ignore" });
+      child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
     } catch (err) {
       done(`${command}: ${(err as Error).message}`);
       return;

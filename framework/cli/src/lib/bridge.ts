@@ -54,7 +54,7 @@ import type { A2AppClient, Task } from "@a2app/sdk";
 import type { HarnessProfile, Route } from "./harness.js";
 import { PROMPT_PLACEHOLDER, resolveOnPath } from "./harness.js";
 import { fetchWithTimeout, pollHealth } from "./net.js";
-import { killTreeForce } from "./proc.js";
+import { killTreeForce, spawnBackgroundShell } from "./proc.js";
 import { writeFileAtomic } from "./home.js";
 import { readJsonFile } from "./json.js";
 import { log } from "./log.js";
@@ -368,6 +368,10 @@ async function deliverHeadless(
       // directory, which is a narrower grant than an env var every grandchild
       // process would also see.
       env: { ...process.env, A2APP_AGENT: `bridge:${route.command}` },
+      // The bridge runs with no console of its own, so on Windows every
+      // console-mode child would otherwise be given a fresh, visible one — a
+      // terminal popping up in front of the user for each delivered task.
+      windowsHide: true,
     });
     let out = "";
     let errOut = "";
@@ -463,7 +467,7 @@ export async function ensureGateway(
   // The gateway command comes from the machine's own config file, not from app
   // content, so a shell is appropriate here — it is the same trust level as the
   // manifest pipeline `serve` runs.
-  const child = spawn(route.start, { cwd, detached: true, shell: true, stdio: "ignore" });
+  const child = spawnBackgroundShell(route.start, { cwd, stdio: "ignore" });
   child.unref();
   const ready = await pollHealth(route.health, route.readyMs ?? 20_000);
   if (!ready) {

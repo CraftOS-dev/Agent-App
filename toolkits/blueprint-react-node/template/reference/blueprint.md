@@ -250,6 +250,20 @@ something — nothing is queued and no agent is ever handed it.
 The queue only moves when something is listening: `agent-app <dir> bridge start`,
 or a harness polling `a2app <dir> tasks next --wait`.
 
+**Show the queued work in the View.** An agent run takes seconds to minutes, so
+the control that queued it needs to show where it is (see the creator skill for
+the states to render). Keep `taskId` on the record (a `readOnly` string field
+the runner sets), then follow it from `src/`:
+
+```js
+// poll only while unfinished; stop at completed / failed / canceled
+const t = await api(`/api/_a2app/tasks/${encodeURIComponent(record.agentTask)}`);
+// t.status · t.progress?.step · t.claim?.claimedAt · t.result?.summary · t.reason · t.pollAfterMs
+```
+
+The read is same-origin, so the View needs no credential. A 404 means the task
+has been pruned, so drop the indicator. Don't retry it.
+
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything (`install` → `build` → `start`,

@@ -246,6 +246,26 @@ harness polls `a2app <dir> tasks next --wait`. Say so when you ship a feature
 that queues work, or it will look broken. `agent-app <dir> bridge` reports
 whether this machine can reach a harness at all.
 
+**The UI that queues work must show that work until it is done.** An agent run
+takes seconds to minutes. A button that fires a toast and then goes quiet
+leaves the person staring at a screen that shows no sign anything is happening.
+Store the queue task id the trigger returns on the record, and have the View
+follow it (`GET /api/_a2app/tasks/{id}`, same origin, polled at its
+`pollAfterMs` only while unfinished). Render every state, where the person
+asked:
+
+- `submitted` — waiting to be picked up, with elapsed time. After ~20 s with no
+  claim, say that no agent is listening and name `agent-app <dir> bridge start`.
+  Don't keep showing "waiting" with no end.
+- `working` / `input-required` — the agent has it: show `progress.step` (the
+  bridge and the agent both report one) and how long it has been running.
+- `completed` — done, with `result.summary` if there is one. Re-read the data
+  here, because the agent's writes are the answer.
+- `failed` / `canceled` — the `reason` in words, and a way to ask again.
+
+A badge wherever the record appears in a list ("Agent working") is what lets
+someone leave the screen and come back.
+
 ## Finish: boot the candidate, gate, then verify
 
 1. **`agent-app <dir> dev`** boots your build on a hidden port with a fresh

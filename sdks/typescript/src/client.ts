@@ -398,8 +398,15 @@ export class A2AppClient {
     return this.request("GET", `/api/_a2app/tasks/${id}`);
   }
 
-  claimTask(id: string, credentialId: string): Promise<A2AppResponse> {
-    return this.request("POST", `/api/_a2app/tasks/${id}/claim`, { agent: credentialId });
+  /**
+   * Claim a task. `credentialId` is optional because it can only ever name the
+   * caller's own credential — the app refuses a claim naming any other one
+   * (`principal_mismatch`) and records the true caller either way. Omitting it
+   * means "claim as me", which is the only thing it could have meant.
+   */
+  claimTask(id: string, credentialId?: string): Promise<A2AppResponse> {
+    const body = credentialId === undefined ? {} : { agent: credentialId };
+    return this.request("POST", `/api/_a2app/tasks/${id}/claim`, body);
   }
 
   progressTask(id: string, progress: { step?: string; percent?: number; ask?: unknown }): Promise<A2AppResponse> {

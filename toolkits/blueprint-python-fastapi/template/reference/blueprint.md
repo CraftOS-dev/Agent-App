@@ -163,11 +163,38 @@ HTTP client to `requirements.txt`.
 
 ## App→agent (tasks/events)
 
-The adapter exposes the A2App **tasks/events** surface (an app→agent queue) —
-this is the one blueprint that ships the primitive (`a2app_adapter.py` has a
-`trigger()` method). There is **no declarative trigger manifest** in v0.1: prefer
-plain code for plain events, and consult `a2app_adapter.py` directly if a feature
-genuinely needs to enqueue agent work. Do not invent a manifest format.
+**This blueprint supports them.** `a2app_adapter.py` carries the primitive:
+
+```python
+adapter.trigger("invoice.needs_review", {"invoice": rec["id"]}, capability="review")
+```
+
+`trigger(etype, payload, capability=None)` emits the event and, when a
+capability is named, puts a task on the app's queue; it returns
+`{"eventId": ..., "taskId": ...}`. Without a capability it only announces
+something — nothing is queued and no agent is handed it.
+
+- **Send ids, not prose or copies.** The agent re-reads the record itself, so a
+  copy is stale by the time it is read, and prose in a payload is an instruction
+  the app does not get to give: on the agent's side it is fenced and labelled as
+  data.
+- There is **no declarative trigger manifest**, and none is coming — what the
+  agent does is the agent's decision, which is what keeps a compromised app from
+  steering it. Do not invent a manifest format.
+- Prefer plain code for plain events. A task is for work a person would
+  otherwise have to think about, and it must be idempotent: a task can be
+  redelivered if an agent dies holding it.
+
+The queue only moves when something is listening: `agent-app <dir> bridge start`,
+or a harness polling `a2app <dir> tasks next --wait`.
+
+**Show the queued work in the View.** Keep the returned `taskId` on the record
+and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
+only while it is unfinished. That read needs no credential only on a
+single-user app. On a multi-user app it answers 401, so show what the agent
+writes to the record instead. Render queued → working (`progress.step`) → done or
+failed (`reason`, plus a way to ask again). The creator skill lists the states.
+A button that goes quiet after it queues work looks broken.
 
 ## Build, run, gate
 

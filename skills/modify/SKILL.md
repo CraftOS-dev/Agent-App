@@ -71,9 +71,11 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 - **Ownership is unchanged**: edit only your app/View code, schema migrations (NEW
   files only — never edit, rename, or delete an applied migration: the filename is
   its identity in the live DB, and a renamed one makes the app unable to boot),
-  operation implementations, non-system `operations.json`, the trigger manifest,
-  and `AGENT_APP.md`. Adding/changing an agent trigger: declare it in the trigger
-  manifest first; fires of undeclared names are refused in-app.
+  operation implementations, non-system `operations.json`, your app's declared
+  event types, and `AGENT_APP.md`. Adding an app→agent trigger: declare the event
+  type first, where your blueprint declares them — an undeclared type is refused
+  at the moment of firing, inside the operation, in front of a user. Removing one
+  is a breaking change for anything polling that capability.
 - **Schema changes are additive migrations.** The user's data is live — never
   delete it, never drop-and-recreate collections that hold data. To alter a
   collection, write a new migration that loads and updates it. (Migration API and

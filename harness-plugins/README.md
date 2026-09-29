@@ -34,3 +34,48 @@ harness capability, not a lifecycle step, so it is resolved in a fixed order:
 
 Only 3–5 are the CLI's; 1 and 2 belong to the caller. `"opened": false` is not an
 error — the app is running and the URL is valid, which is what the caller asked.
+
+## Taking work from an app
+
+The other direction, and the same shape: an app puts work on its queue, and
+getting an agent to pick it up is a harness capability, not a protocol step. It
+resolves deepest-first (`agent-app <dir> bridge` reports which rung a machine
+lands on, and `framework/cli/` documents the whole ladder):
+
+1. **An inbound endpoint** — the harness already serves an HTTP route that starts
+   a run. Deepest, and rare; most harnesses have no such API.
+2. **A headless CLI** — `claude -p`, `codex exec`, `gemini -p`, `aider --message`.
+   Universal, and the **default**: the framework ships profiles for these, so a
+   machine with one installed needs no plugin and no configuration at all.
+3. **A gateway** — a local process the framework starts and then posts to.
+4. **Polling** — the harness cannot be triggered, so it runs
+   `a2app <app> tasks next --wait 60000` in a loop of its own and takes work that
+   way. Nothing needs to reach into it.
+5. **Nothing** — bi-directional operation is not supported on that machine, and
+   the CLI says so rather than starting a service that delivers nothing.
+
+**A plugin's job here is one file.** If its harness offers rung 1 or 3 — an
+endpoint, or a gateway it can start — the plugin writes that route into
+`$A2APP_HOME/harnesses.json` (`~/.a2app/harnesses.json`) at install time, and
+every app on the machine can use it. An entry replaces a same-id built-in
+outright, so a plugin also uses this to correct a headless invocation whose flags
+have changed:
+
+```jsonc
+{ "version": 1, "harnesses": [
+  { "id": "myharness", "routes": [
+    { "mode": "inbound", "url": "http://127.0.0.1:7000/run",
+      "health": "http://127.0.0.1:7000/up", "tokenEnv": "MYHARNESS_TOKEN" },
+    { "mode": "headless", "command": "myharness", "args": ["run", "--prompt", "{prompt}"] }
+  ] }
+] }
+```
+
+Store the **name** of the variable holding a token, never the token — this file
+is hand-edited and pasted around. List every route the harness offers in any
+order; the ladder picks. A plugin that does nothing here is not broken: its users
+land on rung 2 or 4, which need no plugin code.
+
+What a plugin must **not** do is start a bridge on a user's behalf. A bridge lets
+an app start agent runs, which is a capability a person grants once, knowingly,
+for an app they chose.

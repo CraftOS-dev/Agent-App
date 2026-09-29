@@ -8,7 +8,38 @@
  * refuse to signal pid <= 1 (never signal init / a whole process group by
  * accident).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+
+/**
+ * On Windows, the shell `spawnBackgroundShell` launches runs inside this: a
+ * console-less node that starts the shell with `windowsHide`, so the shell and
+ * everything under it share ONE hidden console. It exits with the shell's code.
+ */
+const HIDDEN_SHELL =
+  "const c=require('child_process').spawn(process.argv[1],{shell:true,stdio:'inherit',windowsHide:true});" +
+  "c.on('error',e=>{console.error(e.message);process.exit(127)});" +
+  "c.on('exit',code=>process.exit(code??1))";
+
+/**
+ * Start a trusted shell command as a detached background process — the shape
+ * `serve`, `dev` and a bridge gateway all need — without putting a terminal
+ * window on the user's desktop.
+ *
+ * `windowsHide` alone is not enough for this shape. `detached` on Windows starts
+ * the shell with no console at all, so the first console program IT runs (the
+ * app's server) is given a brand-new, visible one — out of reach of any flag
+ * passed here. Starting the shell from a console-less node that passes
+ * `windowsHide` itself gives the whole tree one hidden console instead. The
+ * wrapper is the recorded pid; `taskkill /T` still reaches everything below it.
+ */
+export function spawnBackgroundShell(
+  command: string,
+  opts: { cwd: string; env?: NodeJS.ProcessEnv; stdio: StdioOptions },
+): ChildProcess {
+  const base = { cwd: opts.cwd, detached: true, stdio: opts.stdio, windowsHide: true, ...(opts.env ? { env: opts.env } : {}) };
+  if (process.platform === "win32") return spawn(process.execPath, ["-e", HIDDEN_SHELL, command], base);
+  return spawn(command, { ...base, shell: true });
+}
 
 /** Is this pid a live process? (EPERM means it exists but we may not signal it.) */
 export function isPidAlive(pid: number): boolean {
@@ -27,7 +58,7 @@ export function terminateTree(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   try {
     if (process.platform === "win32") {
-      execFileSync("taskkill", ["/pid", String(pid), "/T"], { stdio: "ignore" });
+      execFileSync("taskkill", ["/pid", String(pid), "/T"], { stdio: "ignore", windowsHide: true });
     } else {
       // Negative pid signals the whole group (serve spawns detached, so the
       // child is its own group leader); fall back to the bare pid.
@@ -48,7 +79,7 @@ export function killTreeForce(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   try {
     if (process.platform === "win32") {
-      execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     } else {
       try {
         process.kill(-pid, "SIGKILL");

@@ -24,7 +24,7 @@
     {
       "name": "operator",
       "activity": "operator",
-      "description": "Operate and diagnose a running Agent App on the user's behalf via A2App — read state, write through the guard, invoke declared operations. No code changes.",
+      "description": "Operate and diagnose a running Agent App on the user's behalf via A2App — read state, write through the guard, invoke declared operations, and take work the app queues for you. No code changes.",
       "path": "operator/SKILL.md"
     },
     {

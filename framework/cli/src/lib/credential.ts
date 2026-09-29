@@ -38,7 +38,7 @@ function restrictToOwner(file: string): void {
   const user = process.env["USERNAME"];
   if (!user) return;
   try {
-    execFileSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], { stdio: "ignore" });
+    execFileSync("icacls", [file, "/inheritance:r", "/grant:r", `${user}:F`], { stdio: "ignore", windowsHide: true });
   } catch {
     log.warn(`could not restrict permissions on ${file} — review its ACL manually`);
   }

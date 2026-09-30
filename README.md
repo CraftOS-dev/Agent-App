@@ -58,7 +58,8 @@ For a deeper, in-harness experience, install the **plugin** for your harness ins
 
 **3. Describe what you want.** Tell your harness the app you need: a CRM, a dashboard, an expense tracker, anything. It refines the requirement, builds a full application to the Agent App Building Standard, verifies it, and launches it. Your need changes? Just tell the agent to evolve the agent app.
 
-That's it. You now have custom software that both you and your agent can use.
+That's it! You now have custom software that both you and your agent can use.
+**Happy collaboration!**
 
 * * *
 
@@ -89,8 +90,6 @@ agent-app <dir> dev / promote       # safe-evolve: build on a hidden port, gate,
 agent-app <dir> bridge start        # watch the app's task queue and trigger your harness
 agent-app list                      # every app with its port and live status
 ```
-
-Both commands are machine-first: exit codes `0` success · `1` rejected · `2` usage · `3` unreachable, with machine-readable stdout.
 
 * * *
 

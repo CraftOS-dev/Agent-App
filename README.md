@@ -1,8 +1,10 @@
 <div align="center">
 
-# 🤖 Agent App
+<img src="assets/agent-app-logo.png" alt="Agent App logo" width="160">
 
-**Agent App is the application that AI agents build, evolve, and operate — a collaboration interface for humans and agents beyond chat, voice, and generative UI.**
+# Agent App
+
+**Agent App is the application that AI agents build, evolve, and operate. A collaboration space for humans and agents beyond chat, voice, and generative UI.**
 
 [![npm](https://img.shields.io/badge/npm-agent--app--framework-cb3837?logo=npm&logoColor=white)](https://www.npmjs.com/package/agent-app-framework)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,29 +14,31 @@
 
 [📦 npm](https://www.npmjs.com/package/agent-app-framework) · [📖 Spec](spec/) · [🧩 Harness plugins](harness-plugins/) · [🤝 Contribute](CONTRIBUTING.md)
 
+<img src="assets/agent-app-showcase.gif" alt="Agent Apps built with the framework">
+
 </div>
 
 * * *
 
-An **Agent App** is a complete, stateful application — its own frontend, backend, and database — that humans use **visually** and agents use **programmatically**. It removes the human developer from the loop and replaces human review with machine gates: the agent is the developer, the operator, and the maintainer, while you own the code, the data, and the features.
+An **Agent App** is a complete, stateful application. It has its own frontend, backend, and database that humans use **visually** and agents use **programmatically** using CLI-walk. The agent is the developer, the operator, and the software vendor, while you own the code, the data, and the features.
+
+<p align="center"><img src="assets/agent-app-flow.gif" alt="You use the Agent App in the browser; your agent uses it through the A2App adapter"></p>
 
 An Agent App is **tech-stack-agnostic** (any stack works, given a matching A2App adapter) and **harness-agnostic** (every agent harness can use it through a plugin or skills). This repository makes it a standard:
 
-- the **Agent App Framework** — so anyone, and any agent, can build their own Agent App;
-- the **A2App protocol** — bi-directional communication between an agent and an agentic app;
-- the **A2App adapter** — connecting an Agent App to any tech stack.
+- the **Agent App Framework**: provides tools for any agent harnesses to build their own Agent App
+- the **A2App protocol**: bi-directional communication protocol between an agent and an agentic app
+- the **A2App adapter**: connecting an Agent App to any tech stack
 
 ```
-app + A2App adapter + framework files = Agent App
+app + A2App adapter = Agent App
 ```
-
-Every Agent App follows **MVC-A**: Model, View, Controller, plus the **A**gent surface — the A2App adapter, the ONLY way an agent operates the app. Agents never scrape the View or drive its DOM to operate an app (UI driving is reserved for verification).
 
 * * *
 
 ## 🚀 Get started
 
-You talk to your agent harness; it builds and runs the app for you. Three steps:
+Three steps:
 
 **1. Install the CLI.**
 
@@ -42,7 +46,7 @@ You talk to your agent harness; it builds and runs the app for you. Three steps:
 npm i -g agent-app-framework
 ```
 
-This gives you two commands: **`agent-app`** (build, evolve, manage) and **`a2app`** (operate).
+This gives you and your AI agent two commands: **`agent-app`** (build, evolve, manage) and **`a2app`** (operate).
 
 **2. Connect it to your harness.** Install the framework **skills** into any harness — the universal route that works everywhere:
 
@@ -52,15 +56,15 @@ agent-app skills --install <your-harness-dir>
 
 For a deeper, in-harness experience, install the **plugin** for your harness instead (see [harness-plugins/](harness-plugins/) for OpenClaw, Claude Code, Hermes, dsh, and more).
 
-**3. Describe what you want.** Tell your harness the app you need — a CRM, a dashboard, an expense tracker, anything. It refines the requirement, builds a full application to the Agent App Building Standard, verifies it, and launches it. Keep talking to evolve it; changes are built and promoted safely, so your live data is never disrupted.
+**3. Describe what you want.** Tell your harness the app you need: a CRM, a dashboard, an expense tracker, anything. It refines the requirement, builds a full application to the Agent App Building Standard, verifies it, and launches it. Your need changes? Just tell the agent to evolve the agent app.
 
 That's it. You now have custom software that both you and your agent can use.
 
 * * *
 
-## 🛠️ Driving it yourself
+## 🛠️ Driving it with AI agent
 
-Everything the harness does runs through two commands, so you can drive the full loop by hand.
+Everything the harness does runs through two commands (You can drive the full loop by hand, but it is recommended to let your agent runs it).
 
 **Operate — `a2app`** is a walk: you name a place in the app and act where you land.
 
@@ -90,55 +94,20 @@ Both commands are machine-first: exit codes `0` success · `1` rejected · `2` u
 
 * * *
 
-## ✨ Two defining properties
-
-- **Tech-stack agnostic** — no fixed backend, frontend, database, or language. Any app in any stack is an Agent App when the adapter and framework files are present.
-- **Agent agnostic** — made for every harness. Context comes by *pull* (files + protocol endpoints), knowledge by *skills* (plain markdown), quality by a *CLI gate* any agent can run. No host required: a bare agent plus a browser is a complete environment.
-
-* * *
-
 ## 🧩 A2App in the protocol stack
 
-| Protocol | Answers |
+A2App is how your agent communicates with an Agent App. Agent Apps are built to include a CLI, which is the primary way an agent uses them. The agent then performs a CLI-walk to navigate and use the Agent App.
+
+<p align="center"><img src="assets/a2app-protocol.gif" alt="A2App checks every command; risky changes wait for your OK"></p>
+
+What is the difference between MCP, A2A, A2UI, and A2App? Each protocol has its own job, we listed the difference here:
+
+| Protocol | What it does |
 |---|---|
-| MCP | How do agents get tools? |
-| A2A | How do agents talk to agents? |
-| AG-UI / A2UI | How do agent runs stream into UIs / how is declarative UI generated? |
-| **A2App** | **How do agents safely operate full stateful applications?** |
-
-Three pillars: **Describe** (the app publishes its own data model, operations, and conventions — generated live so it cannot drift, answered one level at a time so cost follows the task, not the app size) · **Guard** (the app validates every write before the backend touches it; no silent 200s) · **Receipt** (what the user is told is generated from the stored record, never composed by the model). Under hard budgets: every describe response ≤ 2,000 chars at any app size, a correct write in ≤ 2 round trips, every violation reported in one response.
-
-* * *
-
-## 🔁 When the app asks the agent for work
-
-The other direction. An app can put work in its own queue — a card fell overdue, a report is due, a user pressed "ask the agent" — and A2App carries that as an **event** and a **task**. What the protocol cannot do is make an agent turn up, because *triggering* is the one part of this that depends on the harness rather than on the app. The framework supplies that part, and it picks from a ladder, deepest integration first: an inbound endpoint the harness already exposes; the harness's one-shot headless CLI (`claude -p`, `codex exec`, `gemini -p`, `aider --message`) — universal, and the default; a local gateway the framework brings up itself; or, for a harness that can only poll, a listen command the harness runs in its own loop (`a2app <app> tasks next --wait`). When none of those exists, the framework says bi-directional operation is not supported here and names what would change it, rather than starting something that delivers nothing.
-
-The app's side is one call. It declares the event types it may emit, and fires one with a capability and a few ids:
-
-```js
-trigger("invoice.needs_review", { invoice: rec.id }, "review")
-```
-
-An undeclared type is refused, so what an app can ever ask for is fixed by its author. There is no manifest of instructions to write and deliberately no way to send one: what the agent does is the agent's decision, and the payload reaches it fenced and labelled as data. Send ids — the agent re-reads the record, so a copy would be stale by the time it is read.
-
-Run the other half with `agent-app <dir> bridge start`; `agent-app <dir> bridge` first shows which rung this machine lands on. A task is claimed before it is delivered, so one task runs once no matter how many agents are watching, and every task reaches a terminal state the app can report from. See [framework/cli/](framework/cli/#bridge-the-appagent-direction).
-
-* * *
-
-## 📂 Repository layout
-
-| Directory | Contents |
-|---|---|
-| [spec/](spec/) | Versioned spec home: normative JSON Schemas (framework files + protocol payloads) |
-| [conformance/](conformance/) | Runnable suites — A2App classes A/B/C; artifact classes Agent App / Toolkit / Host |
-| [framework/](framework/) | TypeScript reference implementation: the `agent-app` + `a2app` CLIs + optional reference host |
-| [adapters/](adapters/) | A2App adapter layers: shared pure rules, starter, sidecar form |
-| [toolkits/](toolkits/) | Blueprints & kits — **NOT part of the framework** (optional accelerators) |
-| [harness-plugins/](harness-plugins/) | Per-harness plugins (plugins are Hosts in spec terms) |
-| [skills/](skills/) | Framework skills (creator, modify, importer, operator, walk-verify, connect) |
-| [sdks/](sdks/) | Protocol client SDKs (TypeScript first, Python next) |
-| [apps/](apps/) | Runnable example Agent Apps |
+| [MCP](https://modelcontextprotocol.io) | Connects AI apps to outside tools and data |
+| [A2A](https://a2a-protocol.org) | Lets AI agents talk to each other |
+| [A2UI](https://a2ui.org) | Lets agents describe interfaces that apps render natively |
+| **A2App** | **Lets agents control a large-scale app** |
 
 * * *
 

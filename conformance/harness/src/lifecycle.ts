@@ -178,6 +178,39 @@ export async function runSafeEvolveClass(
     check("operate commands target the dev instance while it is up (test data never reaches live)", failures);
   }
 
+  // ── an operation runner's trigger queues a task ──────────────────────────
+  // The only booted path through server.mjs's runner toolbox. The wrapper reads
+  // the adapter handle at call time, so a broken one passes `node --check` and
+  // every boot, and fails only here, when a runner first fires.
+  {
+    const failures: string[] = [];
+    const res = await run(operateEntry, [appDir, "planning", "tasks", "task_welcome", "request-triage"]);
+    // Drop the "answering from the DEV instance" banner so the error itself fits.
+    const said = res.out.split("\n").filter((l) => !l.startsWith("ℹ")).join(" ").trim().slice(0, 300);
+    const queued = /"queued":\s*"([^"]+)"/.exec(res.out)?.[1];
+    if (res.exit !== 0) failures.push(`request-triage exit ${res.exit}: ${said}`);
+    else if (!queued) failures.push(`request-triage did not report a queued task: ${said}`);
+    else {
+      const listed = await run(operateEntry, [appDir, "tasks"]);
+      const json = listed.out.slice(listed.out.indexOf("{"));
+      let tasks: { id: string; request?: { capability?: string; payload?: unknown } }[] = [];
+      try {
+        tasks = (JSON.parse(json) as { tasks?: typeof tasks }).tasks ?? [];
+      } catch {
+        failures.push(`tasks list is not JSON: ${listed.out.trim().slice(0, 200)}`);
+      }
+      const task = tasks.find((t) => t.id === queued);
+      if (!task) failures.push(`queued task ${queued} is not in the app's task queue`);
+      else {
+        if (task.request?.capability !== "triage") failures.push(`task capability is ${JSON.stringify(task.request?.capability)}, expected "triage"`);
+        if (JSON.stringify(task.request?.payload) !== JSON.stringify({ task: "task_welcome" })) {
+          failures.push(`task payload is ${JSON.stringify(task.request?.payload)}, expected the record's id`);
+        }
+      }
+    }
+    check("an operation runner's trigger(type, payload, capability) queues a claimable task", failures);
+  }
+
   // ── validate with dev up records a promotable pass ───────────────────────
   {
     const failures: string[] = [];

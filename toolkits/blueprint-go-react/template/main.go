@@ -379,16 +379,17 @@ func matchesEtag(header, etag string) bool {
 }
 
 func (v *staticView) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// Path before method: 405 is only for a file that exists.
+	file := v.resolveFile(r.URL.Path)
+	if file == "" {
+		writeJSON(w, 404, M{"a2app": true, "ok": false, "code": "not_found", "message": "No such route."})
+		return
+	}
+
 	method := strings.ToUpper(r.Method)
 	if method != "GET" && method != "HEAD" {
 		w.Header().Set("Allow", "GET, HEAD")
 		writeJSON(w, 405, M{"a2app": true, "ok": false, "code": "method_not_allowed", "message": "Static assets are GET-only."})
-		return
-	}
-
-	file := v.resolveFile(r.URL.Path)
-	if file == "" {
-		writeJSON(w, 404, M{"a2app": true, "ok": false, "code": "not_found", "message": "No such route."})
 		return
 	}
 

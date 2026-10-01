@@ -2540,7 +2540,7 @@ impl Adapter {
             }
         }
 
-        Self::err(404, "not_found", "No such route.")
+        Self::err(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.")
     }
 
     // -- records ------------------------------------------------------------

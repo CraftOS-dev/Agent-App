@@ -600,6 +600,23 @@ fn handle_request(
     }
 
     // ---------------------------------------------------------- static View
+    // Alias before path resolution: the watcher is served from the project
+    // root, outside the built tree, so it survives any View rewrite.
+    let file = if path == "/_a2app/update.js" {
+        if update_js.is_file() {
+            Some(update_js.to_path_buf())
+        } else {
+            None
+        }
+    } else {
+        resolve_static(served_dir, path)
+    };
+    // Path before method: 405 is only for a file that exists.
+    let file = match file {
+        Some(f) => f,
+        None => return respond_json(request, 404, &not_found_envelope()),
+    };
+
     if method != "GET" && method != "HEAD" {
         let response = tiny_http::Response::from_string(
             json!({
@@ -614,22 +631,6 @@ fn handle_request(
         let _ = request.respond(response);
         return 405;
     }
-
-    // Alias before path resolution: the watcher is served from the project
-    // root, outside the built tree, so it survives any View rewrite.
-    let file = if path == "/_a2app/update.js" {
-        if update_js.is_file() {
-            Some(update_js.to_path_buf())
-        } else {
-            None
-        }
-    } else {
-        resolve_static(served_dir, path)
-    };
-    let file = match file {
-        Some(f) => f,
-        None => return respond_json(request, 404, &not_found_envelope()),
-    };
 
     let body = match fs::read(&file) {
         Ok(b) => b,

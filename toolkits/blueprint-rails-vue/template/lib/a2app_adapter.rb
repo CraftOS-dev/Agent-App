@@ -1431,7 +1431,7 @@ module A2appAdapter
         return handle_operation(headers, m[1], body || {})
       end
 
-      err(404, "not_found", "No such route.")
+      err(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.")
     end
 
     # -- records ------------------------------------------------------------

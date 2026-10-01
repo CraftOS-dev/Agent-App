@@ -102,6 +102,8 @@ blocker_checklist.md
 # from skills/ in this repo, so tracking them would commit the same six twice
 # and let the copies drift from the source
 .claude/skills/
+# the same copy, made by the Pi package's build/prepack so the tarball carries the skills
+harness-plugins/pi/skills/
 
 # local machine setup helpers — machine-specific paths, not part of the distribution
 setup-windows.ps1

@@ -23,7 +23,7 @@ bound to a session or project.
 
 ## Getting them
 
-These ship inside the `agent-app` package (one package, two binaries: `agent-app` to build/evolve, `a2app` to operate), so `npm i -g agent-app` installs the skills too:
+These ship inside the `agent-app-framework` package (one package, two binaries: `agent-app` to build/evolve, `a2app` to operate), so `npm i -g agent-app-framework` installs the skills too:
 
 ```bash
 agent-app skills                      # list them

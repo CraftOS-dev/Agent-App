@@ -1,5 +1,5 @@
 {
-  "name": "@a2app/integration-openclaw",
+  "name": "@craftos/agent-app-openclaw",
   "version": "0.1.0",
   "private": true,
   "description": "Agent App Framework plugin for OpenClaw: agent-app CLI passthrough + Control-UI entry form + the six framework skills, driving the agent-app and a2app CLIs",

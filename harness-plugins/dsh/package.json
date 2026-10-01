@@ -1,5 +1,5 @@
 {
-  "name": "@a2app/integration-dsh",
+  "name": "@craftos/agent-app-dsh",
   "version": "0.1.0",
   "private": true,
   "description": "Agent App Framework bundle for deepseek-harness (dsh): the agent tools plus an 'Agent Apps' manager (build, embed, per-app session, lifecycle) shown in the dsh UI, driving the agent-app and a2app CLIs",

@@ -27,7 +27,7 @@ const dist = join(pluginDir, "dist");
 const lib = join(dist, "lib");
 
 /** Bundle name; also the module-loader id the client factory registers under. */
-const BUNDLE_NAME = "dsh-agent-app";
+const BUNDLE_NAME = "@craftos/agent-app-dsh";
 
 /** Host-provided browser modules (dsh's frozen platform module table). */
 const PLATFORM_MODULES = [

@@ -3,4 +3,4 @@
 # `dsh.bundle.patch`. One insert row mounts the host plugin by its package name.
 - insert:
     - id: agent-app
-      name: dsh-agent-app
+      name: '@craftos/agent-app-dsh'

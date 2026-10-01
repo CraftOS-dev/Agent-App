@@ -1,7 +1,6 @@
 {
-  "name": "@a2app/integration-pi",
+  "name": "@craftos/agent-app-pi",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Agent App Framework plugin for Pi (earendil-works/pi): the /agent-app launcher command, the six framework skills, and an extension that makes Pi reachable from `agent-app <dir> bridge`. Pi drives the agent-app and a2app CLIs with its own bash tool.",
   "license": "MIT",
@@ -9,17 +8,20 @@
   "author": { "name": "CraftOS", "url": "https://github.com/CraftOS-dev" },
   "homepage": "https://github.com/CraftOS-dev/Agent-App#readme",
   "repository": "https://github.com/CraftOS-dev/Agent-App",
-  "//pi": "A Pi package manifest (packages.md). `prompts` ships the /agent-app launcher; `skills` points at the single source of truth at the repo root (../../skills) so a git/local-path install finds them with no copy step; `extensions` registers Pi's headless route for the app→agent bridge. If your Pi rejects an out-of-root skills path, use the CLI instead — `agent-app skills --install ~/.pi/agent/skills` — which is Pi's native global skills dir. See README.",
+  "//pi": "A Pi package manifest (packages.md). `prompts` ships the /agent-app launcher; `skills` is a copy of the single source of truth at the repo root (../../skills), made by `build` and again on pack, because Pi resolves manifest paths inside the package and a published tarball holds nothing outside it; `extensions` registers Pi's headless route for the app→agent bridge. See README.",
   "pi": {
     "prompts": ["./prompts"],
-    "skills": ["../../skills"],
+    "skills": ["./skills"],
     "extensions": ["./extensions"]
   },
+  "files": ["prompts", "skills", "extensions"],
+  "publishConfig": { "access": "public" },
   "devDependencies": {
     "@types/node": "^20.19.0"
   },
   "scripts": {
-    "build": "node -e \"process.stdout.write('pi plugin: pi loads the extension as TypeScript; no build step\\n')\"",
+    "build": "node -e \"const fs=require('fs');fs.rmSync('skills',{recursive:true,force:true});fs.cpSync('../../skills','skills',{recursive:true});process.stdout.write('pi plugin: copied ../../skills into ./skills; pi loads the extension as TypeScript\\n')\"",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --experimental-strip-types test/a2app-bridge.test.mjs"
   }

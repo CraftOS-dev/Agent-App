@@ -26,14 +26,23 @@ Everything else (tabs, build, lifecycle, session panel) works under the default 
 
 OpenClaw installs a plugin by copying its folder, rejects `node_modules` symlinks that escape it, and does not install dependencies for a local-dir install — so [scripts/build.mjs](scripts/build.mjs) stages a self-contained `dist/`: the bundled entry (engine + UI inlined; only the host-provided `openclaw/plugin-sdk/*` imports stay external), a generated `package.json` declaring the entry via `openclaw.extensions`, the manifest ([openclaw.plugin.json](openclaw.plugin.json) — `id`, required `configSchema`, `commandAliases`, `cliCommands`, `skills`, startup activation), and the six skills copied from the repo-root [../../skills](../../skills).
 
+From npm (the published package is this `dist/`):
+
+```bash
+openclaw plugins install @craftos/agent-app-openclaw
+openclaw plugins enable a2app
+```
+
+From a cloned repo:
+
 ```bash
 pnpm install
 pnpm --filter @a2app/integration-starter build   # the engine the bundle inlines
-pnpm --filter @a2app/integration-openclaw build  # stages dist/
+pnpm --filter @craftos/agent-app-openclaw build  # stages dist/
 openclaw plugins install ./harness-plugins/openclaw/dist
 openclaw plugins enable a2app
 ```
 
-Requires the framework CLIs on `PATH` (v0.1: `pnpm -r build` then `npm link` in `framework/cli`; once published, `npm i -g agent-app`). Set `A2APP_CLI` (operate, default `a2app`) and `AGENT_APP_CLI` (build/evolve, default `agent-app`) to override which binaries are shelled; a value ending in `.js`/`.mjs`/`.cjs` is run with Node directly.
+Requires the framework CLIs on `PATH` (`npm i -g agent-app-framework`; from a cloned repo, `pnpm -r build` then `npm link` in `framework/cli`). Set `A2APP_CLI` (operate, default `a2app`) and `AGENT_APP_CLI` (build/evolve, default `agent-app`) to override which binaries are shelled; a value ending in `.js`/`.mjs`/`.cjs` is run with Node directly.
 
 **Windows hosts:** the CLIs are spawned via cross-spawn, so npm's `.cmd` shims work. One cmd.exe limitation remains: a shim *outside* a `node_modules/.bin` directory (npm's global prefix, where `npm link` puts it) re-expands its arguments once, so a record field value containing a cmd metacharacter (`& | ^ < >`) would be corrupted in transit. Point `A2APP_CLI`/`AGENT_APP_CLI` at the CLIs' `.js` entries to bypass shims entirely — argv then reaches the CLI literally in every case.

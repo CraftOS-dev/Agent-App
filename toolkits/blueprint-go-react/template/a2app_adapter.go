@@ -93,6 +93,16 @@ const referenceScanLimit = 10
 // Hard stop on paging, so a store that ignores `page` cannot spin forever.
 const referenceScanMaxPages = 200
 
+// A claimed task with no progress for this long is presumed abandoned and goes
+// back to the queue, so a dead agent's work is redelivered rather than lost.
+// Anything that delivers work from this queue (`agent-app <dir> bridge`)
+// heartbeats well inside it; the value matches adapter-core.
+const taskTimeout = 60 * time.Second
+
+// Redelivery is bounded: a task handed out this many times without finishing
+// fails with `redelivery_exhausted` instead of cycling forever.
+const taskMaxDeliveries = 5
+
 /* --------------------------------------------------------- shape helpers */
 
 // The small, boring accessors a dynamically-shaped model costs in Go. They
@@ -1010,6 +1020,11 @@ type Store struct {
 	grants    map[string]M
 	taskSeq   int
 	eventSeq  int
+	// The event types this app may emit, set by NewAdapter from the app's
+	// declarations. Empty means none were declared.
+	eventTypes map[string]bool
+	// occurrence key -> task id, so one occurrence makes one task
+	dedup map[string]string
 }
 
 func newStoreState(seed map[string][]M) *Store {
@@ -1017,14 +1032,16 @@ func newStoreState(seed map[string][]M) *Store {
 		seed = map[string][]M{}
 	}
 	return &Store{
-		Seed:      seed,
-		WantsSeed: true,
-		rows:      map[string]map[string]M{},
-		rowOrder:  map[string][]string{},
-		memIdem:   map[string]string{},
-		tasks:     map[string]M{},
-		approvals: map[string]bool{},
-		grants:    map[string]M{},
+		Seed:       seed,
+		WantsSeed:  true,
+		rows:       map[string]map[string]M{},
+		rowOrder:   map[string][]string{},
+		memIdem:    map[string]string{},
+		tasks:      map[string]M{},
+		approvals:  map[string]bool{},
+		grants:     map[string]M{},
+		eventTypes: map[string]bool{},
+		dedup:      map[string]string{},
 	}
 }
 
@@ -1339,19 +1356,79 @@ func (s *Store) eventsSince(cursor string) M {
 	return M{"events": fresh, "nextCursor": next}
 }
 
-func (s *Store) enqueueTask(eventID, capability string, payload M) M {
+func (s *Store) enqueueTask(eventID, capability string, payload M, dedupKey string) M {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if existing, ok := s.tasks[s.dedup[dedupKey]]; ok && dedupKey != "" {
+		return existing
+	}
 	s.taskSeq++
 	task := M{
 		"id": fmt.Sprintf("task_%d", s.taskSeq), "app": nil, "event": eventID, "status": "submitted",
 		"request": M{"capability": capability, "payload": payload}, "claim": nil,
 		"progress": M{}, "result": nil, "reason": nil, "ask": nil,
-		"createdAt": nowISO(), "updatedAt": nowISO(), "deliveries": 0,
+		"createdAt": nowISO(), "updatedAt": nowISO(), "deliveries": 1,
 	}
 	s.tasks[getStr(task, "id")] = task
 	s.taskOrder = append(s.taskOrder, getStr(task, "id"))
+	if dedupKey != "" {
+		s.dedup[dedupKey] = getStr(task, "id")
+	}
 	return task
+}
+
+// trigger emits a declared event and, when capability is non-empty, queues a
+// task for an agent. This is the app->agent seam an operation runner reaches
+// through the store it is handed. The result is {"eventId", "taskId"}; taskId
+// is nil when no capability was named, because an event alone asks no agent
+// for work. An undeclared event type is an error, and nothing is emitted.
+func (s *Store) trigger(etype string, payload M, capability string) (M, error) {
+	s.mu.Lock()
+	declared := len(s.eventTypes) == 0 || s.eventTypes[etype]
+	s.mu.Unlock()
+	if !declared {
+		return nil, fmt.Errorf("event type %q is not declared", etype)
+	}
+	ev := s.appendEvent(etype, payload)
+	var taskID any
+	if capability != "" {
+		// Dedup is keyed on the OCCURRENCE, not on the event record: the same
+		// trigger firing twice must make one task. The event id is fresh per
+		// emit, so keying on it would deduplicate nothing. The occurrence is what
+		// the app asked for (type, capability, payload), serialized with sorted
+		// keys so key order cannot tell two identical triggers apart.
+		sum := sha256.Sum256([]byte(stableJSON(M{"type": etype, "capability": capability, "payload": payload})))
+		taskID = s.enqueueTask(getStr(ev, "id"), capability, payload, "sha256:"+hex.EncodeToString(sum[:]))["id"]
+	}
+	return M{"eventId": ev["id"], "taskId": taskID}, nil
+}
+
+// sweep returns abandoned claims to the queue: a working task with no update
+// for taskTimeout goes back to submitted so another agent can take it, and
+// fails with redelivery_exhausted once it has been handed out taskMaxDeliveries
+// times. Never a silent drop.
+func (s *Store) sweep() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	for _, task := range s.tasks {
+		if getStr(task, "status") != "working" {
+			continue
+		}
+		updated, err := time.Parse("2006-01-02T15:04:05.000Z", getStr(task, "updatedAt"))
+		if err == nil && now.Sub(updated) < taskTimeout {
+			continue
+		}
+		if intOf(task["deliveries"]) >= taskMaxDeliveries {
+			task["status"] = "failed"
+			task["reason"] = "redelivery_exhausted"
+		} else {
+			task["status"] = "submitted"
+			task["claim"] = nil
+			task["deliveries"] = intOf(task["deliveries"]) + 1
+		}
+		task["updatedAt"] = nowISO()
+	}
 }
 
 func (s *Store) listTasks(status string) []M {
@@ -1411,6 +1488,9 @@ type AdapterConfig struct {
 	Modules        []M
 	AllowedOrigins []string
 	Runners        map[string]OperationRunner
+	// Events are the event types this app may emit ({"type": ...} each). A
+	// runner's store.trigger refuses a type that is not declared here.
+	Events         []M
 	AuthMode       string
 	CredentialHint string
 	Env            string
@@ -1484,6 +1564,13 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 	}
 	for _, origin := range cfg.AllowedOrigins {
 		a.allowedOrigins[origin] = true
+	}
+	// The declared event types are what keep the app->agent queue from being an
+	// open channel: store.trigger refuses a type that is not declared, so the set
+	// of things this app can ever ask an agent to react to is fixed by its author
+	// rather than by whatever a runner passes at the moment of firing.
+	for _, e := range cfg.Events {
+		cfg.Store.eventTypes[getStr(e, "type")] = true
 	}
 	cfg.Store.putGrant(M{
 		"token": cfg.Token, "credentialId": "cred_local", "agentName": "local",
@@ -2706,6 +2793,8 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		return status, errBody
 	}
 
+	a.store.sweep()
+
 	if len(rest) == 0 && method == "GET" {
 		tasks := []M{}
 		for _, t := range a.store.listTasks(query["status"]) {
@@ -2778,6 +2867,12 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		if getStr(task, "status") == "canceled" {
 			return errEnv(409, codeTaskCanceled, "Task "+taskID+" was canceled.", nil)
 		}
+		// A terminal write belongs to a live claim. Once the sweeper has returned
+		// a task to the queue, a late completion from the run that abandoned it
+		// must not close work someone else may now be doing.
+		if getStr(task, "status") != "working" && getStr(task, "status") != "input-required" {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+getStr(task, "status")+", not in progress.", nil)
+		}
 		switch getStr(body, "status") {
 		case "completed":
 			task["status"] = "completed"
@@ -2817,13 +2912,8 @@ func taskWire(t M) M {
 
 /* -- app -> agent -------------------------------------------------------------------- */
 
-func (a *Adapter) trigger(etype string, payload M, capability string) M {
-	ev := a.store.appendEvent(etype, payload)
-	var taskID any
-	if capability != "" {
-		taskID = a.store.enqueueTask(getStr(ev, "id"), capability, payload)["id"]
-	}
-	return M{"eventId": ev["id"], "taskId": taskID}
+func (a *Adapter) trigger(etype string, payload M, capability string) (M, error) {
+	return a.store.trigger(etype, payload, capability)
 }
 
 /* ------------------------------------------------------------------ self-test */

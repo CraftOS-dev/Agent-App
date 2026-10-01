@@ -73,6 +73,15 @@ REFERENCE_SCAN_LIMIT = 10
 # Hard stop on paging, so a store that ignores `page` cannot spin forever.
 REFERENCE_SCAN_MAX_PAGES = 200
 
+# A claimed task with no progress for this long is presumed abandoned and goes
+# back to the queue, so a dead agent's work is redelivered rather than lost.
+# Anything that delivers work from this queue (`agent-app <dir> bridge`)
+# heartbeats well inside it; the value matches adapter-core.
+TASK_TIMEOUT_MS = 60_000
+# Redelivery is bounded: a task handed out this many times without finishing
+# fails with `redelivery_exhausted` instead of cycling forever.
+TASK_MAX_DELIVERIES = 5
+
 # --------------------------------------------------------------- pure rules
 
 _MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -548,6 +557,11 @@ class Store:
         self.approvals: set[str] = set()
         self.audit: list[dict] = []
         self.grants: dict[str, dict] = {}
+        # The event types this app may emit, set by the Adapter from the app's
+        # declarations. Empty means none were declared.
+        self.event_types: set[str] = set()
+        # occurrence key -> task id, so one occurrence makes one task
+        self.dedup: dict[str, str] = {}
         self._task_seq = 0
         self._event_seq = 0
 
@@ -621,16 +635,70 @@ class Store:
         fresh = [e for e in self.events if e["seq"] > after]
         return {"events": fresh, "nextCursor": str(fresh[-1]["seq"]) if fresh else (cursor or "0")}
 
-    def enqueue_task(self, event_id: str, capability: str, payload: dict) -> dict:
+    def enqueue_task(self, event_id: str, capability: str, payload: dict, dedup_key: Optional[str] = None) -> dict:
+        if dedup_key is not None:
+            existing = self.tasks.get(self.dedup.get(dedup_key, ""))
+            if existing is not None:
+                return existing
         self._task_seq += 1
         task = {
             "id": f"task_{self._task_seq}", "app": None, "event": event_id, "status": "submitted",
             "request": {"capability": capability, "payload": payload}, "claim": None,
             "progress": {}, "result": None, "reason": None, "ask": None,
-            "createdAt": _now_iso(), "updatedAt": _now_iso(), "deliveries": 0,
+            "createdAt": _now_iso(), "updatedAt": _now_iso(), "deliveries": 1,
         }
         self.tasks[task["id"]] = task
+        if dedup_key is not None:
+            self.dedup[dedup_key] = task["id"]
         return task
+
+    def trigger(self, etype: str, payload: dict, capability: Optional[str] = None) -> dict:
+        """Emit a declared event and, when ``capability`` is given, queue a task
+        for an agent. This is the app->agent seam an operation runner reaches
+        through the ``store`` it is handed.
+
+        Returns ``{"eventId": ..., "taskId": ...}``; ``taskId`` is None when no
+        capability was named, because an event alone asks no agent for work.
+        """
+        if self.event_types and etype not in self.event_types:
+            raise ValueError(f'event type "{etype}" is not declared')
+        ev = self.append_event(etype, payload)
+        task_id = None
+        if capability:
+            # Dedup is keyed on the OCCURRENCE, not on the event record: the same
+            # trigger firing twice must make one task. The event id is fresh per
+            # emit, so keying on it would deduplicate nothing. The occurrence is
+            # what the app asked for (type, capability, payload), serialized with
+            # sorted keys so key order cannot tell two identical triggers apart.
+            key = "sha256:" + hashlib.sha256(
+                json.dumps({"type": etype, "capability": capability, "payload": payload}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            task_id = self.enqueue_task(ev["id"], capability, payload, key)["id"]
+        return {"eventId": ev["id"], "taskId": task_id}
+
+    def sweep(self, timeout_ms: int, max_deliveries: int) -> None:
+        """Return abandoned claims to the queue.
+
+        A ``working`` task with no update for ``timeout_ms`` goes back to
+        ``submitted`` so another agent can take it, and fails with
+        ``redelivery_exhausted`` once it has been handed out ``max_deliveries``
+        times. Never a silent drop.
+        """
+        now = datetime.now(timezone.utc)
+        for task in self.tasks.values():
+            if task["status"] != "working":
+                continue
+            updated = datetime.fromisoformat(task["updatedAt"].replace("Z", "+00:00"))
+            if (now - updated).total_seconds() * 1000 < timeout_ms:
+                continue
+            if task["deliveries"] >= max_deliveries:
+                task["status"] = "failed"
+                task["reason"] = "redelivery_exhausted"
+            else:
+                task["status"] = "submitted"
+                task["claim"] = None
+                task["deliveries"] += 1
+            task["updatedAt"] = _now_iso()
 
     def list_tasks(self, status: Optional[str]) -> list[dict]:
         return [t for t in self.tasks.values() if status is None or t["status"] == status]
@@ -760,6 +828,7 @@ class Adapter:
         modules: Optional[list[dict]] = None,
         allowed_origins: Optional[list[str]] = None,
         operation_runners: Optional[dict[str, Callable]] = None,
+        events: Optional[list[dict]] = None,
         auth_mode: str = "none",
         credential_hint: Optional[str] = None,
         env: Optional[str] = None,
@@ -781,6 +850,12 @@ class Adapter:
                 + "\n  - ".join(problems)
             )
         self.store = store
+        # The declared event types are what keep the app->agent queue from being
+        # an open channel: `trigger` refuses a type that is not declared, so the
+        # set of things this app can ever ask an agent to react to is fixed by
+        # its author rather than by whatever a runner passes at the moment of
+        # firing.
+        store.event_types = {e["type"] for e in events or []}
         self.auth_mode = auth_mode
         self.allowed_origins = set(allowed_origins or [])
         self.runners = operation_runners or {}
@@ -1551,6 +1626,8 @@ class Adapter:
         if reply:
             return reply
 
+        self.store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES)
+
         if not rest and method == "GET":
             status = query.get("status")
             return 200, {"a2app": True, "tasks": [self._task_wire(t) for t in self.store.list_tasks(status)], "pollAfterMs": 2000}
@@ -1593,6 +1670,11 @@ class Adapter:
         if action == "complete":
             if task["status"] == "canceled":
                 return self._err(409, ERROR_CODES["TASK_CANCELED"], f"Task {task_id} was canceled.")
+            # A terminal write belongs to a live claim. Once the sweeper has
+            # returned a task to the queue, a late completion from the run that
+            # abandoned it must not close work someone else may now be doing.
+            if task["status"] not in ("working", "input-required"):
+                return self._err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], f'Task {task_id} is {task["status"]}, not in progress.')
             status = body.get("status")
             if status == "completed":
                 task["status"] = "completed"
@@ -1621,11 +1703,7 @@ class Adapter:
 
     # -- app -> agent -------------------------------------------------------
     def trigger(self, etype: str, payload: dict, capability: Optional[str] = None) -> dict:
-        ev = self.store.append_event(etype, payload)
-        task_id = None
-        if capability:
-            task_id = self.store.enqueue_task(ev["id"], capability, payload)["id"]
-        return {"eventId": ev["id"], "taskId": task_id}
+        return self.store.trigger(etype, payload, capability)
 
 
 # ---------------------------------------------------------------- self-test
@@ -1827,10 +1905,60 @@ def _selftest() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # 7. The app->agent queue: declared types, one task per occurrence, and the
+    #    sweeper that returns an abandoned claim. Whatever delivers this queue to
+    #    an agent (`agent-app <dir> bridge`) relies on all three.
+    q_store = Store()
+    q = Adapter(
+        app_id="selftest", app_name="selftest",
+        entities={"tasks": {"fields": fields, "module": "planning"}}, operations=[],
+        store=q_store, token="tok_selftest", modules=[{"name": "planning"}],
+        events=[{"type": "task.needs_triage"}],
+    )
+    try:
+        q_store.trigger("task.undeclared", {"task": "t1"}, "triage")
+        failures.append("an undeclared event type was emitted")
+    except ValueError:
+        pass
+    fired = q_store.trigger("task.needs_triage", {"task": "t1"}, "triage")
+    check("a trigger with a capability queues a task", fired["taskId"] is not None, True)
+    check(
+        "the same occurrence makes one task",
+        q_store.trigger("task.needs_triage", {"task": "t1"}, "triage")["taskId"],
+        fired["taskId"],
+    )
+    check(
+        "a different occurrence makes another",
+        q_store.trigger("task.needs_triage", {"task": "t2"}, "triage")["taskId"] != fired["taskId"],
+        True,
+    )
+    check("an event with no capability queues nothing", q_store.trigger("task.needs_triage", {"task": "t3"})["taskId"], None)
+
+    agent = {"x-a2app-token": "tok_selftest"}
+    tid = fired["taskId"]
+    check("claim takes a submitted task", q.dispatch("POST", f"/api/_a2app/tasks/{tid}/claim", agent, {})[1]["status"], "working")
+    q_store.tasks[tid]["updatedAt"] = "2000-01-01T00:00:00.000Z"
+    check(
+        "the sweeper returns an abandoned claim to the queue",
+        q.dispatch("GET", f"/api/_a2app/tasks/{tid}", agent, None)[1]["status"],
+        "submitted",
+    )
+    check(
+        "a late completion from the abandoned run is refused",
+        q.dispatch("POST", f"/api/_a2app/tasks/{tid}/complete", agent, {"status": "completed"})[0],
+        409,
+    )
+    for _ in range(TASK_MAX_DELIVERIES):
+        q.dispatch("POST", f"/api/_a2app/tasks/{tid}/claim", agent, {})
+        q_store.tasks[tid]["updatedAt"] = "2000-01-01T00:00:00.000Z"
+        q.dispatch("GET", f"/api/_a2app/tasks/{tid}", agent, None)
+    swept = q_store.tasks[tid]
+    check("redelivery is bounded", (swept["status"], swept["reason"]), ("failed", "redelivery_exhausted"))
+
     if failures:
         print("a2app_adapter selftest FAILED:\n  - " + "\n  - ".join(failures))
         return 1
-    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store)")
+    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, task queue)")
     return 0
 
 

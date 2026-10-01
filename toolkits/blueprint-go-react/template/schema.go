@@ -72,6 +72,27 @@ var OPERATIONS = []M{
 		"appliesWhen": M{"field": "status", "ne": "done"},
 		"params":      M{"task": M{"type": "ref", "entity": "tasks", "required": true}},
 	},
+	{
+		"name":        "request-triage",
+		"description": "Ask an agent to work out what this task actually needs.",
+		"destructive": false,
+		"module":      "planning",
+		"entity":      "tasks",
+		"appliesWhen": M{"field": "status", "ne": "done"},
+		"params":      M{"task": M{"type": "ref", "entity": "tasks", "required": true}},
+	},
+}
+
+// The event types this app may emit (the app->agent direction). Declaring a
+// type is what lets store.trigger fire it — an undeclared type is refused — so
+// this list is the fixed set of things the app can ever ask an agent to react
+// to, decided here by its author rather than at the moment of firing.
+//
+// Leave it empty until a feature genuinely needs agent judgment. Plain events
+// want plain code; a task is for work a person would otherwise have to think
+// about.
+var EVENTS = []M{
+	{"type": "task.needs_triage"},
 }
 
 // Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
@@ -80,7 +101,8 @@ var OPERATIONS = []M{
 // store.listRecords, write with store.putRecord / store.deleteRecord.
 // Writes are durable when the call returns; there is no separate persist()
 // step. A record fetched from the store is a COPY: mutate it, then
-// putRecord() it back, or the change never happened.
+// putRecord() it back, or the change never happened. store.trigger(type,
+// payload, capability) emits a declared event (see `request-triage` below).
 var OPERATION_RUNNERS = map[string]OperationRunner{
 	"clear-done": func(_ M, _ M, store *Store) (any, error) {
 		result, err := store.listRecords("tasks", M{})
@@ -110,6 +132,28 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 		task["status"] = "done"
 		store.putRecord("tasks", task)
 		return M{"ok": true, "task": task["id"], "status": "done"}, nil
+	},
+	// The app->agent direction, in full. store.trigger emits a DECLARED event
+	// and, because a capability is named, queues a task on the app's own queue.
+	// From there an agent takes it — either because a harness is polling
+	// (`a2app <app> tasks next --wait`) or because `agent-app <app> bridge` is
+	// running and triggers one.
+	//
+	// Send IDS, not prose. The agent re-reads the record itself, so what goes in
+	// the payload is what it needs to find the work — never instructions, and
+	// never a copy of the data, which would be stale by the time it is read.
+	// Nothing here can widen what the agent may do: the payload is data on the
+	// other side, and the capability names the kind of work, not a command.
+	"request-triage": func(args M, _ M, store *Store) (any, error) {
+		task := store.getRecord("tasks", getStr(args, "task"))
+		if task == nil {
+			return M{"ok": false, "reason": "no such task"}, nil
+		}
+		fired, err := store.trigger("task.needs_triage", M{"task": task["id"]}, "triage")
+		if err != nil {
+			return nil, err
+		}
+		return M{"ok": true, "task": task["id"], "queued": fired["taskId"]}, nil
 	},
 }
 

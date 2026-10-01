@@ -18,7 +18,16 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { runA2App, binFor, buildKickoffPrompt, listKnownApps, FRAMEWORK_BLUEPRINTS, type KnownApp } from "@a2app/integration-starter";
+import {
+  runA2App,
+  binFor,
+  buildKickoffPrompt,
+  listKnownApps,
+  registerHarnessProfile,
+  FRAMEWORK_BLUEPRINTS,
+  PROMPT_PLACEHOLDER,
+  type KnownApp,
+} from "@a2app/integration-starter";
 import { appManagerHtml } from "./ui.js";
 
 /** Operate client (a2app) and build/evolve client (agent-app). `binFor` routes
@@ -88,6 +97,22 @@ export default definePluginEntry({
   description: "Build and operate full Agent Apps over the A2App protocol via the agent-app and a2app CLIs.",
   register(api) {
     const subagent = (api as unknown as { runtime: { subagent: SubagentRuntime } }).runtime.subagent;
+
+    // How `agent-app <dir> bridge` starts OpenClaw when an app queues work.
+    // `agent exec` runs one embedded turn in the app's directory, exits 0/1/2
+    // (ok/error/timeout), and runs shell tools without approval because a
+    // one-shot has no one to ask. It uses isolated temporary state, so it runs
+    // alongside the gateway this plugin lives in rather than contending for it.
+    // The framework has no built-in OpenClaw profile, so without this entry the
+    // bridge cannot see OpenClaw at all. Written once; an entry already in the
+    // file (the user's own) is kept.
+    const registration = registerHarnessProfile({
+      id: "openclaw",
+      name: "OpenClaw",
+      routes: [{ mode: "headless", command: "openclaw", args: ["agent", "exec", PROMPT_PLACEHOLDER] }],
+    });
+    if (registration.status === "registered") api.logger.info(`agent-app: ${registration.detail}`);
+    if (registration.status === "refused") api.logger.warn(`agent-app: ${registration.detail}`);
     const tokens = new Map<string, number>();
     const builds = new Map<string, BuildEntry>();
 

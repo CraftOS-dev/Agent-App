@@ -174,7 +174,11 @@ importers:
         specifier: ^0.25.0
         version: 0.25.12
 
-  harness-plugins/pi: {}
+  harness-plugins/pi:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.0
+        version: 20.19.43
 
   sdks/typescript:
     dependencies:

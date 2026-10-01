@@ -50,7 +50,26 @@ OPERATIONS = [
         "appliesWhen": {"field": "status", "ne": "done"},
         "params": {"task": {"type": "ref", "entity": "tasks", "required": True}},
     },
+    {
+        "name": "request-triage",
+        "description": "Ask an agent to work out what this task actually needs.",
+        "destructive": False,
+        "module": "planning",
+        "entity": "tasks",
+        "appliesWhen": {"field": "status", "ne": "done"},
+        "params": {"task": {"type": "ref", "entity": "tasks", "required": True}},
+    },
 ]
+
+# The event types this app may emit (the app->agent direction). Declaring a
+# type is what lets `store.trigger` fire it — an undeclared type is refused —
+# so this list is the fixed set of things the app can ever ask an agent to
+# react to, decided here by its author rather than at the moment of firing.
+#
+# Leave it empty until a feature genuinely needs agent judgment. Plain events
+# want plain code; a task is for work a person would otherwise have to think
+# about.
+EVENTS = [{"type": "task.needs_triage"}]
 
 
 # Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
@@ -59,6 +78,8 @@ OPERATIONS = [
 # store.list_records, write with store.put_record / store.delete_record.
 # Writes are durable when the call returns. A record read from the store is a
 # COPY: mutate it, then put_record() it back, or the change never happened.
+# store.trigger(type, payload, capability=None) emits a declared event (see
+# `request-triage` below).
 def _count_tasks(args, ctx, store):
     return {"count": store.list_records("tasks", {})["totalItems"]}
 
@@ -72,9 +93,29 @@ def _complete_task(args, ctx, store):
     return {"ok": True, "task": task["id"], "status": task["status"]}
 
 
+# The app->agent direction, in full. `store.trigger` emits a DECLARED event and,
+# because a capability is named, queues a task on the app's own queue. From
+# there an agent takes it — either because a harness is polling
+# (`a2app <app> tasks next --wait`) or because `agent-app <app> bridge` is
+# running and triggers one.
+#
+# Send IDS, not prose. The agent re-reads the record itself, so what goes in the
+# payload is what it needs to find the work — never instructions, and never a
+# copy of the data, which would be stale by the time it is read. Nothing here
+# can widen what the agent may do: the payload is data on the other side, and
+# the capability names the kind of work, not a command to run.
+def _request_triage(args, ctx, store):
+    task = store.get_record("tasks", args.get("task"))
+    if task is None:
+        return {"ok": False, "reason": "no such task"}
+    fired = store.trigger("task.needs_triage", {"task": task["id"]}, capability="triage")
+    return {"ok": True, "task": task["id"], "queued": fired["taskId"]}
+
+
 OPERATION_RUNNERS = {
     "count-tasks": _count_tasks,
     "complete-task": _complete_task,
+    "request-triage": _request_triage,
 }
 
 SEED = {

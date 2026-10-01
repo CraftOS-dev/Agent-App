@@ -27,7 +27,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `schema.go` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `SEED`, each entity carrying `module`/`summary`/`fields`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
+| `schema.go` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `SEED`, each entity carrying `module`/`summary`/`fields`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Byte-mirror of `OPERATIONS`. |
 | `index.html` | **YOURS** | the Vite entry: links `tokens.css`/`ui.css`, mounts `#root`, loads `src/main.jsx`. |
 | `src/main.jsx` | **YOURS** | React root: StrictMode + ToastProvider + App; imports `updater.js` to start the update watcher. |
@@ -218,13 +218,56 @@ operation return. `main.go` is system-owned, so boot-time fetches are not your
 seam — model an initial sync as a runner (e.g. a `refresh` operation) that
 fills the store when it is empty.
 
-## App→agent triggers
+## App→agent (tasks/events)
 
-**This blueprint ships no trigger manifest in v0.1.** The creator skill's
-"App→agent triggers" section does not apply here — there is no declared-trigger
-surface to fire against. Handle app events with plain code. If a feature
-genuinely needs the agent to react, say so in `requirements.md` as a known
-limitation rather than inventing an unsupported mechanism.
+**This blueprint supports them.** An operation runner reaches the queue through
+the `store` it is handed, and the event types it may fire are declared in
+`schema.go`:
+
+```go
+var EVENTS = []M{{"type": "invoice.needs_review"}} // every type a runner fires
+
+"request-review": func(args M, _ M, store *Store) (any, error) {
+	rec := store.getRecord("invoices", getStr(args, "invoice"))
+	fired, err := store.trigger("invoice.needs_review", M{"invoice": rec["id"]}, "review")
+	if err != nil {
+		return nil, err
+	}
+	return M{"ok": true, "queued": fired["taskId"]}, nil
+},
+```
+
+`store.trigger(etype, payload, capability)` emits the event and, when the
+capability is non-empty, puts a task on the app's queue; it returns
+`{"eventId", "taskId"}`. With an empty capability it only announces something
+— nothing is queued and no agent is handed it. An undeclared type is an error.
+The starter's `request-triage` operation is the worked example.
+
+- **Declare the type in `EVENTS` first.** A type that is not declared is
+  refused at the moment of firing — inside the operation, in front of a user.
+- **Firing the same occurrence twice makes one task.** The same type,
+  capability and payload return the task already queued rather than a second.
+- **Send ids, not prose or copies.** The agent re-reads the record itself, so a
+  copy is stale by the time it is read, and prose in a payload is an instruction
+  the app does not get to give: on the agent's side it is fenced and labelled as
+  data.
+- There is **no declarative trigger manifest**, and none is coming — what the
+  agent does is the agent's decision, which is what keeps a compromised app from
+  steering it. Do not invent a manifest format.
+- Prefer plain code for plain events. A task is for work a person would
+  otherwise have to think about, and it must be idempotent: a task can be
+  redelivered if an agent dies holding it.
+
+The queue only moves when something is listening: `agent-app <dir> bridge start`,
+or a harness polling `a2app <dir> tasks next --wait`.
+
+**Show the queued work in the View.** Keep the returned `taskId` on the record
+and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
+only while it is unfinished. That read needs no credential only on a
+single-user app. On a multi-user app it answers 401, so show what the agent
+writes to the record instead. Render queued → working (`progress.step`) → done or
+failed (`reason`, plus a way to ask again). The creator skill lists the states.
+A button that goes quiet after it queues work looks broken.
 
 ## Build, run, gate
 

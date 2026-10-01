@@ -29,7 +29,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `schema.py` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `SEED`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
+| `schema.py` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `SEED`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Mirror of `schema.OPERATIONS`. |
 | `AGENT_APP.md` | **YOURS** | this app's index: plan, modules, entities, operations, conventions, checklist. |
 | `reference/requirements.md` | **YOURS** | the binding spec — Part A (SRS) + Part B (tech spec + Quality Conformance). |
@@ -163,17 +163,29 @@ HTTP client to `requirements.txt`.
 
 ## App→agent (tasks/events)
 
-**This blueprint supports them.** `a2app_adapter.py` carries the primitive:
+**This blueprint supports them.** An operation runner reaches the queue through
+the `store` it is handed, and the event types it may fire are declared in
+`schema.py`:
 
 ```python
-adapter.trigger("invoice.needs_review", {"invoice": rec["id"]}, capability="review")
+EVENTS = [{"type": "invoice.needs_review"}]   # schema.py — every type a runner fires
+
+def _request_review(args, ctx, store):
+    rec = store.get_record("invoices", args.get("invoice"))
+    fired = store.trigger("invoice.needs_review", {"invoice": rec["id"]}, capability="review")
+    return {"ok": True, "queued": fired["taskId"]}
 ```
 
-`trigger(etype, payload, capability=None)` emits the event and, when a
+`store.trigger(etype, payload, capability=None)` emits the event and, when a
 capability is named, puts a task on the app's queue; it returns
 `{"eventId": ..., "taskId": ...}`. Without a capability it only announces
-something — nothing is queued and no agent is handed it.
+something — nothing is queued and no agent is handed it. The starter's
+`request-triage` operation is the worked example.
 
+- **Declare the type in `EVENTS` first.** A type that is not declared is
+  refused at the moment of firing — inside the operation, in front of a user.
+- **Firing the same occurrence twice makes one task.** The same type,
+  capability and payload return the task already queued rather than a second.
 - **Send ids, not prose or copies.** The agent re-reads the record itself, so a
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as

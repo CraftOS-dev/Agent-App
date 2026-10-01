@@ -74,6 +74,15 @@ module A2appAdapter
   # Hard stop on paging, so a store that ignores `page` cannot spin forever.
   REFERENCE_SCAN_MAX_PAGES = 200
 
+  # A claimed task with no progress for this long is presumed abandoned and
+  # goes back to the queue, so a dead agent's work is redelivered rather than
+  # lost. Anything that delivers work from this queue (`agent-app <dir>
+  # bridge`) heartbeats well inside it; the value matches adapter-core.
+  TASK_TIMEOUT_MS = 60_000
+  # Redelivery is bounded: a task handed out this many times without finishing
+  # fails with `redelivery_exhausted` instead of cycling forever.
+  TASK_MAX_DELIVERIES = 5
+
   DESCRIBE_BUDGET_CHARS = 2000
 
   DEFAULT_RATE_LIMITS = { "data" => 1200, "ops" => 300 }.freeze
@@ -525,6 +534,9 @@ module A2appAdapter
 
     attr_reader :seed, :rows, :tasks, :events
     attr_accessor :wants_seed
+    # The event types this app may emit, set by the Adapter from the app's
+    # declarations. Empty means none were declared.
+    attr_accessor :event_types
 
     def initialize(seed = nil)
       @seed = seed || {}
@@ -540,6 +552,9 @@ module A2appAdapter
       @approvals = {}
       @audit = []
       @grants = {}
+      @event_types = []
+      # occurrence key -> task id, so one occurrence makes one task
+      @dedup = {}
       @task_seq = 0
       @event_seq = 0
     end
@@ -631,16 +646,68 @@ module A2appAdapter
       { "events" => fresh, "nextCursor" => fresh.empty? ? (cursor || "0") : fresh[-1]["seq"].to_s }
     end
 
-    def enqueue_task(event_id, capability, payload)
+    def enqueue_task(event_id, capability, payload, dedup_key = nil)
+      existing = dedup_key && @tasks[@dedup[dedup_key]]
+      return existing if existing
+
       @task_seq += 1
       task = {
         "id" => "task_#{@task_seq}", "app" => nil, "event" => event_id, "status" => "submitted",
         "request" => { "capability" => capability, "payload" => payload }, "claim" => nil,
         "progress" => {}, "result" => nil, "reason" => nil, "ask" => nil,
-        "createdAt" => now_iso, "updatedAt" => now_iso, "deliveries" => 0,
+        "createdAt" => now_iso, "updatedAt" => now_iso, "deliveries" => 1,
       }
       @tasks[task["id"]] = task
+      @dedup[dedup_key] = task["id"] if dedup_key
       task
+    end
+
+    # Emit a declared event and, when `capability` is given, queue a task for
+    # an agent. This is the app->agent seam an operation runner reaches through
+    # the `store` it is handed. Returns {"eventId", "taskId"}; "taskId" is nil
+    # when no capability was named, because an event alone asks no agent for
+    # work. An undeclared event type raises, and nothing is emitted.
+    def trigger(etype, payload, capability = nil)
+      if !@event_types.empty? && !@event_types.include?(etype)
+        raise ArgumentError, "event type \"#{etype}\" is not declared"
+      end
+
+      ev = append_event(etype, payload)
+      task_id = nil
+      if capability && capability != ""
+        # Dedup is keyed on the OCCURRENCE, not on the event record: the same
+        # trigger firing twice must make one task. The event id is fresh per
+        # emit, so keying on it would deduplicate nothing. The occurrence is
+        # what the app asked for (type, capability, payload), serialized with
+        # sorted keys so key order cannot tell two identical triggers apart.
+        key = "sha256:" + Digest::SHA256.hexdigest(
+          stable_json({ "type" => etype, "capability" => capability, "payload" => payload })
+        )
+        task_id = enqueue_task(ev["id"], capability, payload, key)["id"]
+      end
+      { "eventId" => ev["id"], "taskId" => task_id }
+    end
+
+    # Return abandoned claims to the queue: a "working" task with no update for
+    # `timeout_ms` goes back to "submitted" so another agent can take it, and
+    # fails with "redelivery_exhausted" once it has been handed out
+    # `max_deliveries` times. Never a silent drop.
+    def sweep(timeout_ms, max_deliveries)
+      now = Time.now.utc
+      @tasks.each_value do |task|
+        next unless task["status"] == "working"
+        next if (now - Time.iso8601(task["updatedAt"])) * 1000 < timeout_ms
+
+        if task["deliveries"] >= max_deliveries
+          task["status"] = "failed"
+          task["reason"] = "redelivery_exhausted"
+        else
+          task["status"] = "submitted"
+          task["claim"] = nil
+          task["deliveries"] += 1
+        end
+        task["updatedAt"] = now_iso
+      end
     end
 
     def list_tasks(status)
@@ -773,7 +840,7 @@ module A2appAdapter
     attr_reader :store
 
     def initialize(app_id:, app_name:, entities:, operations:, store:, token:,
-                   modules: nil, allowed_origins: nil, operation_runners: nil,
+                   modules: nil, allowed_origins: nil, operation_runners: nil, events: nil,
                    auth_mode: "none", credential_hint: nil, env: nil, app_version: nil)
       @app_id = app_id
       @app_name = app_name
@@ -792,6 +859,11 @@ module A2appAdapter
               problems.join("\n  - ")
       end
       @store = store
+      # The declared event types are what keep the app->agent queue from being
+      # an open channel: `trigger` refuses a type that is not declared, so the
+      # set of things this app can ever ask an agent to react to is fixed by its
+      # author rather than by whatever a runner passes at the moment of firing.
+      store.event_types = (events || []).map { |e| e["type"] }
       @auth_mode = auth_mode
       @allowed_origins = (allowed_origins || []).to_h { |o| [o, true] }
       @runners = operation_runners || {}
@@ -1591,6 +1663,8 @@ module A2appAdapter
       ctx, reply = authorize(headers, nil, method != "GET")
       return reply if reply
 
+      @store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES)
+
       if rest.empty? && method == "GET"
         status = query["status"]
         return [200, { "a2app" => true,
@@ -1633,6 +1707,12 @@ module A2appAdapter
         [200, self.class.task_wire(task)]
       when "complete"
         return err(409, ERROR_CODES["TASK_CANCELED"], "Task #{task_id} was canceled.") if task["status"] == "canceled"
+        # A terminal write belongs to a live claim. Once the sweeper has returned
+        # a task to the queue, a late completion from the run that abandoned it
+        # must not close work someone else may now be doing.
+        unless %w[working input-required].include?(task["status"])
+          return err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], "Task #{task_id} is #{task["status"]}, not in progress.")
+        end
         status = body["status"]
         if status == "completed"
           task["status"] = "completed"
@@ -1665,10 +1745,7 @@ module A2appAdapter
 
     # -- app -> agent -------------------------------------------------------
     def trigger(etype, payload, capability = nil)
-      ev = @store.append_event(etype, payload)
-      task_id = nil
-      task_id = @store.enqueue_task(ev["id"], capability, payload)["id"] if capability
-      { "eventId" => ev["id"], "taskId" => task_id }
+      @store.trigger(etype, payload, capability)
     end
   end
 

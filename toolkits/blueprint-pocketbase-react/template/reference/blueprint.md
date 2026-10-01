@@ -166,9 +166,10 @@ implements the records, operations and describe surfaces, but not `tasks` /
 
 Handle app events with plain hook code. If a feature genuinely needs an agent to
 react, record it in `reference/requirements.md` as a known limitation of this
-stack rather than inventing a mechanism — the other blueprints
-(`blueprint-react-node`, `blueprint-python-fastapi`) do carry the queue, and
-choosing one of those is the honest fix.
+stack rather than inventing a mechanism — every other runtime blueprint
+(`blueprint-react-node`, `blueprint-python-fastapi`, `blueprint-go-react`,
+`blueprint-rust-react`, `blueprint-rails-vue`) carries the queue, and choosing
+one of those is the honest fix.
 
 ## Build, run, gate
 

@@ -4,10 +4,10 @@ Per-harness **plugins**: each exposes the framework in the harness's own plugin 
 
 | Directory | Harness | Language / API | What it registers |
 |---|---|---|---|
-| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 14 build+operate tools, skills, display, and `runA2App`; every plugin below uses it |
+| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 17 build+operate tools, skills, display, `runA2App`, and `registerHarnessProfile`; every plugin below uses it |
 | [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel, and a build form that starts the agent run directly) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
 | [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)` | 11 tools via `ctx.register_tool(...)` |
-| [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 11 tools via `ctx.tools.register(defineTool(...))`; a browser iframe renderer |
+| [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 14 tools via `ctx.tools.register(defineTool(...))`; a browser iframe renderer |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 11 actions in the `agent_app` action set |
 | [claude-code/](claude-code/) | Claude Code | **MCP** (stdio JSON-RPC 2.0) | 14 tools via a real MCP server; register with `claude mcp add` |
 | [../.claude-plugin/](../.claude-plugin/) | Claude Code | Plugin marketplace manifest (no code) | The `/agent-app` launcher command ([../commands/](../commands/)) + the six [../skills/](../skills/), installable with `/plugin`. No build step, so it works from a clean checkout; add the MCP server above for the tool surface |
@@ -55,8 +55,9 @@ lands on, and `framework/cli/` documents the whole ladder):
    the CLI says so rather than starting a service that delivers nothing.
 
 **A plugin's job here is one file.** If its harness offers rung 1 or 3 — an
-endpoint, or a gateway it can start — the plugin writes that route into
-`$A2APP_HOME/harnesses.json` (`~/.a2app/harnesses.json`) at install time, and
+endpoint, or a gateway it can start — or a headless CLI the framework has no
+built-in profile for, the plugin writes that route into
+`$A2APP_HOME/harnesses.json` (`~/.a2app/harnesses.json`) when it loads, and
 every app on the machine can use it. An entry replaces a same-id built-in
 outright, so a plugin also uses this to correct a headless invocation whose flags
 have changed:
@@ -73,8 +74,24 @@ have changed:
 
 Store the **name** of the variable holding a token, never the token — this file
 is hand-edited and pasted around. List every route the harness offers in any
-order; the ladder picks. A plugin that does nothing here is not broken: its users
-land on rung 2 or 4, which need no plugin code.
+order; the ladder picks. A plugin whose harness already has a built-in profile
+and nothing deeper can do nothing here; any other harness is invisible to the
+bridge until its plugin registers it.
+
+The file is the user's, so a plugin only ever **adds** its own profile, and only
+when no profile with that id exists: it never overwrites an entry (a user's edit
+survives), never touches another harness, never sets `default`, and never
+rewrites a file it cannot parse. Which harness the bridge drives stays the
+user's choice — `bridge start --harness <id>`, `A2APP_HARNESS`, or `"default"`.
+[`registerHarnessProfile`](integration-starter/src/harness.ts) implements
+exactly that. What the plugins here register:
+
+| Plugin | Profile | Route |
+|---|---|---|
+| [claude-code/](claude-code/) | `claude`, replacing the built-in | `claude -p {prompt} --permission-mode dontAsk --allowedTools "Bash(a2app *)"`. The built-in passes no permission flags, and print mode denies every Bash call that would prompt, so the agent could not run `a2app` at all |
+| [openclaw/](openclaw/) | `openclaw` | `openclaw agent exec {prompt}`: one embedded turn in the app's directory, alongside a running gateway |
+| [dsh/](dsh/) | `dsh` | `dsh --profile headless {prompt}` |
+| [pi/](pi/) | `pi` | `pi -p {prompt}`, written by a Pi extension |
 
 What a plugin must **not** do is start a bridge on a user's behalf. A bridge lets
 an app start agent runs, which is a capability a person grants once, knowingly,

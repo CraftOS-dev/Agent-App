@@ -106,6 +106,11 @@ class A2appController < ActionController::Base
         modules: manifest["modules"] || [],
         allowed_origins: ["http://localhost:#{port}", "http://127.0.0.1:#{port}"],
         operation_runners: A2appSchema::OPERATION_RUNNERS,
+        # The event types this app may emit. A runner's `store.trigger` refuses
+        # a type that is not declared here, so the set of things the app can
+        # ever ask an agent to react to is fixed by its author in
+        # lib/a2app_schema.rb.
+        events: A2appSchema::EVENTS,
         env: ENV["A2APP_ENV"],
         app_version: -> { app_version }
       )

@@ -62,6 +62,27 @@ module A2appSchema
       "appliesWhen" => { "field" => "status", "ne" => "done" },
       "params" => { "task" => { "type" => "ref", "entity" => "tasks", "required" => true } },
     },
+    {
+      "name" => "request-triage",
+      "description" => "Ask an agent to work out what this task actually needs.",
+      "destructive" => false,
+      "module" => "planning",
+      "entity" => "tasks",
+      "appliesWhen" => { "field" => "status", "ne" => "done" },
+      "params" => { "task" => { "type" => "ref", "entity" => "tasks", "required" => true } },
+    },
+  ].freeze
+
+  # The event types this app may emit (the app->agent direction). Declaring a
+  # type is what lets `store.trigger` fire it — an undeclared type is refused —
+  # so this list is the fixed set of things the app can ever ask an agent to
+  # react to, decided here by its author rather than at the moment of firing.
+  #
+  # Leave it empty until a feature genuinely needs agent judgment. Plain events
+  # want plain code; a task is for work a person would otherwise have to think
+  # about.
+  EVENTS = [
+    { "type" => "task.needs_triage" },
   ].freeze
 
   # Operation runners: (args, ctx, store) -> JSON-able result. The adapter
@@ -70,7 +91,8 @@ module A2appSchema
   # store.get_record / store.list_records, write with store.put_record /
   # store.delete_record. Writes are durable when the call returns. A record
   # read from the store is a COPY: mutate it, then put_record() it back, or
-  # the change never happened.
+  # the change never happened. store.trigger(type, payload, capability)
+  # emits a declared event (see "request-triage" below).
   OPERATION_RUNNERS = {
     "clear-done" => lambda do |_args, _ctx, store|
       removed = 0
@@ -88,6 +110,24 @@ module A2appSchema
       task["status"] = "done"
       store.put_record("tasks", task)
       { "ok" => true, "task" => task["id"], "status" => task["status"] }
+    end,
+    # The app->agent direction, in full. store.trigger emits a DECLARED event
+    # and, because a capability is named, queues a task on the app's own
+    # queue. From there an agent takes it — either because a harness is
+    # polling (`a2app <app> tasks next --wait`) or because `agent-app <app>
+    # bridge` is running and triggers one.
+    #
+    # Send IDS, not prose. The agent re-reads the record itself, so what goes
+    # in the payload is what it needs to find the work — never instructions,
+    # and never a copy of the data, which would be stale by the time it is
+    # read. Nothing here can widen what the agent may do: the payload is data
+    # on the other side, and the capability names the kind of work, not a
+    # command to run.
+    "request-triage" => lambda do |args, _ctx, store|
+      task = store.get_record("tasks", args["task"])
+      next { "ok" => false, "reason" => "no such task" } if task.nil?
+      fired = store.trigger("task.needs_triage", { "task" => task["id"] }, "triage")
+      { "ok" => true, "task" => task["id"], "queued" => fired["taskId"] }
     end,
   }.freeze
 

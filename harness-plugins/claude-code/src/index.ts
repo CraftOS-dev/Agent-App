@@ -13,7 +13,7 @@
  * AGENT_APP_CLI (build/evolve, default `agent-app`).
  */
 import { createInterface } from "node:readline";
-import { a2appTools, type HarnessTool } from "@a2app/integration-starter";
+import { a2appTools, PROMPT_PLACEHOLDER, registerHarnessProfile, type HarnessTool } from "@a2app/integration-starter";
 
 const CLI = process.env.A2APP_CLI ?? "a2app";
 // Build/evolve lives in a second binary (framework spec 5.1); the engine routes
@@ -24,6 +24,28 @@ const PROTOCOL_VERSION = "2024-11-05";
 
 const tools: HarnessTool[] = a2appTools(CLI, FRAMEWORK_CLI);
 const byName = new Map(tools.map((t) => [t.name, t]));
+
+// How `agent-app <dir> bridge` starts Claude Code when an app queues work. The
+// framework's built-in `claude -p` profile passes no permission flags, and in
+// print mode every Bash call that would prompt is denied — so the agent could
+// not run a single `a2app` command, would exit 0, and the bridge would record
+// the task as completed. This profile, under the same id, replaces the built-in:
+// `dontAsk` denies anything not listed instead of prompting, and the one listed
+// rule lets the agent operate the app through the a2app CLI and nothing else.
+// Written once; an entry already in the file (the user's own) is kept.
+const registration = registerHarnessProfile({
+  id: "claude",
+  name: "Claude Code",
+  routes: [
+    {
+      mode: "headless",
+      command: "claude",
+      args: ["-p", PROMPT_PLACEHOLDER, "--permission-mode", "dontAsk", "--allowedTools", "Bash(a2app *)"],
+    },
+  ],
+});
+// stdout carries JSON-RPC, so anything said here goes to stderr.
+if (registration.status !== "kept") process.stderr.write(`a2app: ${registration.detail}\n`);
 
 interface JsonRpc {
   jsonrpc: "2.0";

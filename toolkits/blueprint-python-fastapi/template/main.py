@@ -58,6 +58,10 @@ adapter = Adapter(
     modules=manifest.get("modules", []),
     allowed_origins=[f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"],
     operation_runners=schema.OPERATION_RUNNERS,
+    # The event types this app may emit. A runner's `store.trigger` refuses a
+    # type that is not declared here, so the set of things the app can ever ask
+    # an agent to react to is fixed by its author in `schema.py`.
+    events=schema.EVENTS,
 )
 
 app = FastAPI(title=manifest["name"])

@@ -82,6 +82,15 @@ pub const REFERENCE_SCAN_LIMIT: usize = 10;
 // Hard stop on paging, so a store that ignores `page` cannot spin forever.
 pub const REFERENCE_SCAN_MAX_PAGES: i64 = 200;
 
+// A claimed task with no progress for this long is presumed abandoned and goes
+// back to the queue, so a dead agent's work is redelivered rather than lost.
+// Anything that delivers work from this queue (`agent-app <dir> bridge`)
+// heartbeats well inside it; the value matches adapter-core.
+pub const TASK_TIMEOUT_MS: i64 = 60_000;
+// Redelivery is bounded: a task handed out this many times without finishing
+// fails with `redelivery_exhausted` instead of cycling forever.
+pub const TASK_MAX_DELIVERIES: u64 = 5;
+
 pub const DESCRIBE_BUDGET_CHARS: usize = 2000;
 
 /// One protocol reply: HTTP status plus the JSON payload.
@@ -794,6 +803,33 @@ pub fn now_iso() -> String {
     )
 }
 
+/// Milliseconds since the epoch, now.
+fn epoch_ms_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Parse what `now_iso` emits ("YYYY-MM-DDTHH:MM:SS.mmmZ") back to epoch
+/// milliseconds; None for anything else.
+fn iso_epoch_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 24
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'.'
+        || b[23] != b'Z'
+    {
+        return None;
+    }
+    let num = |from: usize, to: usize| -> Option<i64> { s.get(from..to)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, se, ms) = (num(11, 13)?, num(14, 16)?, num(17, 19)?, num(20, 23)?);
+    let days = days_from_civil(y, mo as u32, d as u32);
+    Some((days * 86_400 + h * 3600 + mi * 60 + se) * 1000 + ms)
+}
+
 // ----------------------------------------------------------------- entropy
 
 static ENTROPY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1030,6 +1066,11 @@ pub struct Store {
     grants: HashMap<String, Value>,
     task_seq: u64,
     event_seq: u64,
+    /// The event types this app may emit, set by `Adapter::new` from the app's
+    /// declarations. Empty means none were declared.
+    event_types: BTreeSet<String>,
+    /// occurrence key -> task id, so one occurrence makes one task
+    dedup: HashMap<String, String>,
 }
 
 impl Store {
@@ -1044,6 +1085,8 @@ impl Store {
             grants: HashMap::new(),
             task_seq: 0,
             event_seq: 0,
+            event_types: BTreeSet::new(),
+            dedup: HashMap::new(),
         }
     }
 
@@ -1074,6 +1117,8 @@ impl Store {
             grants: HashMap::new(),
             task_seq: 0,
             event_seq: 0,
+            event_types: BTreeSet::new(),
+            dedup: HashMap::new(),
         })
     }
 
@@ -1287,17 +1332,83 @@ impl Store {
         (fresh, next)
     }
 
-    pub fn enqueue_task(&mut self, event_id: &str, capability: &str, payload: &Value) -> Value {
+    pub fn enqueue_task(&mut self, event_id: &str, capability: &str, payload: &Value, dedup_key: Option<&str>) -> Value {
+        if let Some(existing) = dedup_key.and_then(|k| self.dedup.get(k)).and_then(|id| self.get_task(id)) {
+            return existing;
+        }
         self.task_seq += 1;
+        let id = format!("task_{}", self.task_seq);
         let task = json!({
-            "id": format!("task_{}", self.task_seq), "app": null, "event": event_id,
+            "id": id, "app": null, "event": event_id,
             "status": "submitted",
             "request": { "capability": capability, "payload": payload }, "claim": null,
             "progress": {}, "result": null, "reason": null, "ask": null,
-            "createdAt": now_iso(), "updatedAt": now_iso(), "deliveries": 0,
+            "createdAt": now_iso(), "updatedAt": now_iso(), "deliveries": 1,
         });
         self.tasks.push(task.clone());
+        if let Some(key) = dedup_key {
+            self.dedup.insert(key.to_string(), id);
+        }
         task
+    }
+
+    /// Emit a declared event and, when `capability` is given, queue a task for
+    /// an agent. This is the app->agent seam an operation runner reaches
+    /// through the `store` it is handed. Returns `{"eventId", "taskId"}`;
+    /// `taskId` is null when no capability was named, because an event alone
+    /// asks no agent for work. An undeclared event type is an error, and
+    /// nothing is emitted.
+    pub fn trigger(&mut self, etype: &str, payload: &Value, capability: Option<&str>) -> Result<Value, String> {
+        if !self.event_types.is_empty() && !self.event_types.contains(etype) {
+            return Err(format!("event type \"{etype}\" is not declared"));
+        }
+        let ev = self.append_event(etype, payload);
+        let task_id = match capability.filter(|c| !c.is_empty()) {
+            Some(cap) => {
+                // Dedup is keyed on the OCCURRENCE, not on the event record: the
+                // same trigger firing twice must make one task. The event id is
+                // fresh per emit, so keying on it would deduplicate nothing. The
+                // occurrence is what the app asked for (type, capability,
+                // payload); serde_json's sorted map makes the serialization
+                // independent of key order.
+                let canonical = stable_json(&json!({ "type": etype, "capability": cap, "payload": payload }));
+                let digest = Sha256::digest(canonical.as_bytes());
+                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                let key = format!("sha256:{hex}");
+                let task = self.enqueue_task(get_str(&ev, "id"), cap, payload, Some(key.as_str()));
+                Some(get_str(&task, "id").to_string())
+            }
+            None => None,
+        };
+        Ok(json!({ "eventId": get(&ev, "id"), "taskId": task_id }))
+    }
+
+    /// Return abandoned claims to the queue: a `working` task with no update
+    /// for `TASK_TIMEOUT_MS` goes back to `submitted` so another agent can take
+    /// it, and fails with `redelivery_exhausted` once it has been handed out
+    /// `TASK_MAX_DELIVERIES` times. Never a silent drop.
+    pub fn sweep(&mut self) {
+        let now = epoch_ms_now();
+        for task in self.tasks.iter_mut() {
+            if get_str(task, "status") != "working" {
+                continue;
+            }
+            if let Some(updated) = iso_epoch_ms(get_str(task, "updatedAt")) {
+                if now - updated < TASK_TIMEOUT_MS {
+                    continue;
+                }
+            }
+            let deliveries = get(task, "deliveries").as_u64().unwrap_or(0);
+            if deliveries >= TASK_MAX_DELIVERIES {
+                task["status"] = json!("failed");
+                task["reason"] = json!("redelivery_exhausted");
+            } else {
+                task["status"] = json!("submitted");
+                task["claim"] = Value::Null;
+                task["deliveries"] = json!(deliveries + 1);
+            }
+            task["updatedAt"] = json!(now_iso());
+        }
     }
 
     pub fn list_tasks(&self, status: Option<&str>) -> Vec<Value> {
@@ -1481,6 +1592,9 @@ pub struct AdapterConfig {
     pub modules: Value,
     pub allowed_origins: Vec<String>,
     pub runner_lookup: RunnerLookup,
+    /// The event types this app may emit (`[{"type": ...}]`). A runner's
+    /// `store.trigger` refuses a type that is not declared here.
+    pub events: Value,
     pub auth_mode: String,
     pub credential_hint: Option<String>,
     pub env: Option<String>,
@@ -1601,6 +1715,16 @@ impl Adapter {
             ));
         }
         let mut store = config.store;
+        // The declared event types are what keep the app->agent queue from
+        // being an open channel: `store.trigger` refuses a type that is not
+        // declared, so the set of things this app can ever ask an agent to react
+        // to is fixed by its author rather than by whatever a runner passes at
+        // the moment of firing.
+        store.event_types = config
+            .events
+            .as_array()
+            .map(|events| events.iter().map(|e| get_str(e, "type").to_string()).collect())
+            .unwrap_or_default();
         store.put_grant(json!({
             "token": config.token, "credentialId": "cred_local", "agentName": "local",
             "principal": "owner", "scopes": ["*"],
@@ -2712,6 +2836,8 @@ impl Adapter {
             Err(reply) => return reply,
         };
 
+        self.store.sweep();
+
         if rest.is_empty() && method == "GET" {
             let status = query.get("status").map(String::as_str);
             let tasks: Vec<Value> = self.store.list_tasks(status).iter().map(Self::task_wire).collect();
@@ -2781,6 +2907,17 @@ impl Adapter {
                 if get_str(&task, "status") == "canceled" {
                     return Self::err(409, ERR_TASK_CANCELED, &format!("Task {task_id} was canceled."));
                 }
+                // A terminal write belongs to a live claim. Once the sweeper has
+                // returned a task to the queue, a late completion from the run
+                // that abandoned it must not close work someone else may now be
+                // doing.
+                if !matches!(get_str(&task, "status"), "working" | "input-required") {
+                    return Self::err(
+                        409,
+                        ERR_TASK_NOT_CLAIMABLE,
+                        &format!("Task {task_id} is {}, not in progress.", get_str(&task, "status")),
+                    );
+                }
                 match body.get("status").and_then(Value::as_str) {
                     Some("completed") => {
                         task["status"] = json!("completed");
@@ -2820,13 +2957,8 @@ impl Adapter {
     }
 
     // -- app -> agent -------------------------------------------------------
-    pub fn trigger(&mut self, etype: &str, payload: &Value, capability: Option<&str>) -> Value {
-        let ev = self.store.append_event(etype, payload);
-        let task_id = capability.map(|cap| {
-            let task = self.store.enqueue_task(get_str(&ev, "id"), cap, payload);
-            get_str(&task, "id").to_string()
-        });
-        json!({ "eventId": get(&ev, "id"), "taskId": task_id })
+    pub fn trigger(&mut self, etype: &str, payload: &Value, capability: Option<&str>) -> Result<Value, String> {
+        self.store.trigger(etype, payload, capability)
     }
 }
 

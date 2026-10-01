@@ -595,7 +595,11 @@ func serveApp() {
 		Modules:        toMList(manifest["modules"]),
 		AllowedOrigins: []string{fmt.Sprintf("http://localhost:%d", port), fmt.Sprintf("http://127.0.0.1:%d", port)},
 		Runners:        OPERATION_RUNNERS,
-		AuthMode:       getStr(manifest, "authMode"),
+		// The event types this app may emit. A runner's store.trigger refuses a
+		// type that is not declared here, so the set of things the app can ever
+		// ask an agent to react to is fixed by its author in schema.go.
+		Events:   EVENTS,
+		AuthMode: getStr(manifest, "authMode"),
 		// Re-derived per request (behind a one-second cache), so it stays true
 		// for a server whose files changed under it — the same "derive, do not
 		// declare" rule schemaVersion follows.

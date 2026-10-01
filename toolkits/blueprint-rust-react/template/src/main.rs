@@ -484,6 +484,10 @@ fn serve() -> Result<(), String> {
         modules: manifest.get("modules").cloned().unwrap_or_else(|| json!([])),
         allowed_origins,
         runner_lookup: schema::operation_runner,
+        // The event types this app may emit. A runner's `store.trigger` refuses
+        // a type that is not declared here, so the set of things the app can
+        // ever ask an agent to react to is fixed by its author in schema.rs.
+        events: schema::events(),
         auth_mode: manifest.get("authMode").and_then(Value::as_str).unwrap_or("none").to_string(),
         credential_hint: None,
         env: Some(env),

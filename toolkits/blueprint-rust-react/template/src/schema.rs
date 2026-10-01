@@ -71,6 +71,29 @@ pub fn operations() -> Value {
             "appliesWhen": { "field": "status", "ne": "done" },
             "params": { "task": { "type": "ref", "entity": "tasks", "required": true } },
         },
+        {
+            "name": "request-triage",
+            "description": "Ask an agent to work out what this task actually needs.",
+            "destructive": false,
+            "module": "planning",
+            "entity": "tasks",
+            "appliesWhen": { "field": "status", "ne": "done" },
+            "params": { "task": { "type": "ref", "entity": "tasks", "required": true } },
+        },
+    ])
+}
+
+// The event types this app may emit (the app->agent direction). Declaring a
+// type is what lets `store.trigger` fire it — an undeclared type is refused —
+// so this list is the fixed set of things the app can ever ask an agent to
+// react to, decided here by its author rather than at the moment of firing.
+//
+// Leave it empty until a feature genuinely needs agent judgment. Plain events
+// want plain code; a task is for work a person would otherwise have to think
+// about.
+pub fn events() -> Value {
+    json!([
+        { "type": "task.needs_triage" },
     ])
 }
 
@@ -89,12 +112,14 @@ pub fn seed() -> Value {
 // `store.get_record` / `store.list_records`, write with `store.put_record` /
 // `store.delete_record`. Writes are durable when the call returns. A record
 // read from the store is a COPY: mutate it, then `put_record` it back, or the
-// change never happened.
+// change never happened. `store.trigger(type, payload, capability)` emits a
+// declared event (see `request-triage` below).
 pub fn operation_runner(name: &str) -> Option<Runner> {
     match name {
         "clear-done" => Some(run_clear_done),
         "count-tasks" => Some(run_count_tasks),
         "complete-task" => Some(run_complete_task),
+        "request-triage" => Some(run_request_triage),
         _ => None,
     }
 }
@@ -135,4 +160,24 @@ fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Va
     task["status"] = json!("done");
     store.put_record("tasks", task);
     Ok(json!({ "ok": true, "task": task_id, "status": "done" }))
+}
+
+// The app->agent direction, in full. `store.trigger` emits a DECLARED event
+// and, because a capability is named, queues a task on the app's own queue.
+// From there an agent takes it — either because a harness is polling
+// (`a2app <app> tasks next --wait`) or because `agent-app <app> bridge` is
+// running and triggers one.
+//
+// Send IDS, not prose. The agent re-reads the record itself, so what goes in
+// the payload is what it needs to find the work — never instructions, and never
+// a copy of the data, which would be stale by the time it is read. Nothing here
+// can widen what the agent may do: the payload is data on the other side, and
+// the capability names the kind of work, not a command to run.
+fn run_request_triage(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+    let task_id = args.get("task").and_then(Value::as_str).unwrap_or("");
+    if store.get_record("tasks", task_id).is_none() {
+        return Ok(json!({ "ok": false, "reason": "no such task" }));
+    }
+    let fired = store.trigger("task.needs_triage", &json!({ "task": task_id }), Some("triage"))?;
+    Ok(json!({ "ok": true, "task": task_id, "queued": fired["taskId"] }))
 }

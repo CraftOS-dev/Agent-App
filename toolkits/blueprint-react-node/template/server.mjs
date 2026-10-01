@@ -221,12 +221,12 @@ const binding = {
     // `trigger` is the app→agent seam. This file is system-owned, so without it
     // an author whose only seam is `a2app.schema.mjs` could never enqueue agent
     // work: the adapter handle that can do so lives here and nowhere they may
-    // edit. `app` is assigned further down and read at call time, which is
+    // edit. `a2app` is declared further down and read at call time, which is
     // always after boot.
     return runner(args, ctx, {
       store,
       /** Emit a declared event, and enqueue a task when `capability` is given. */
-      trigger: (type, payload, capability) => app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}) }),
+      trigger: (type, payload, capability) => a2app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}) }),
     });
   },
 };

@@ -43,6 +43,15 @@ const server = readFileSync(join(templateDir, "server.mjs"), "utf8");
 ok("server.mjs hands runners a trigger", /runner\(args, ctx, \{[\s\S]*?trigger:/.test(server));
 ok("…and declares the app's event types to the adapter", /events:\s*schema\.events/.test(server));
 
+// The wrapper reads the adapter handle at call time, so a wrong name is not a
+// syntax error and `node --check` passes it: it surfaces only when a runner
+// first fires, as "<name> is not defined". Pin the name it calls to the binding
+// `createA2App` actually returns.
+const callee = /trigger:\s*\([^)]*\)\s*=>\s*([A-Za-z_$][\w$]*)\.trigger\(/.exec(server)?.[1];
+const instance = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*createA2App\(/.exec(server)?.[1];
+ok("server.mjs creates the adapter with createA2App", Boolean(instance));
+check("…and the runner's trigger calls that same binding", callee, instance);
+
 /* ------------------------------------------- every fired type is declared */
 
 // Cheap and exact: the runners are source, and a literal first argument is how

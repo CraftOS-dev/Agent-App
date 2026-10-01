@@ -20,7 +20,10 @@ import type { CheckResult, SuiteResult } from "./runner.js";
 
 const TEST_HOME = mkdtempSync(join(tmpdir(), "a2app-conf-evolve-home-"));
 
-function run(entry: string, args: string[], cwd?: string): Promise<{ exit: number; out: string }> {
+/** `out` interleaves both streams in arrival order, for messages. `stdout`
+ *  alone is what to parse: the CLIs keep it machine-readable and put banners
+ *  and logs on stderr. */
+function run(entry: string, args: string[], cwd?: string): Promise<{ exit: number; out: string; stdout: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [entry, ...args], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -28,10 +31,14 @@ function run(entry: string, args: string[], cwd?: string): Promise<{ exit: numbe
       ...(cwd !== undefined ? { cwd } : {}),
     });
     let out = "";
-    child.stdout.on("data", (d) => (out += d));
+    let stdout = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+      stdout += d;
+    });
     child.stderr.on("data", (d) => (out += d));
-    child.on("close", (code) => resolvePromise({ exit: code ?? -1, out }));
-    child.on("error", (e) => resolvePromise({ exit: -1, out: String(e) }));
+    child.on("close", (code) => resolvePromise({ exit: code ?? -1, out, stdout }));
+    child.on("error", (e) => resolvePromise({ exit: -1, out: String(e), stdout: "" }));
   });
 }
 
@@ -176,6 +183,41 @@ export async function runSafeEvolveClass(
     }
     if (existsSync(liveDb)) failures.push("test record reached the live data directory (threat B2)");
     check("operate commands target the dev instance while it is up (test data never reaches live)", failures);
+  }
+
+  // ── an operation runner's trigger queues a task ──────────────────────────
+  // The only booted path through server.mjs's runner toolbox. The wrapper reads
+  // the adapter handle at call time, so a broken one passes `node --check` and
+  // every boot, and fails only here, when a runner first fires.
+  {
+    const failures: string[] = [];
+    const res = await run(operateEntry, [appDir, "planning", "tasks", "task_welcome", "request-triage"]);
+    // Drop the "answering from the DEV instance" banner so the error itself fits.
+    const said = res.out.split("\n").filter((l) => !l.startsWith("ℹ")).join(" ").trim().slice(0, 300);
+    const queued = /"queued":\s*"([^"]+)"/.exec(res.stdout)?.[1];
+    if (res.exit !== 0) failures.push(`request-triage exit ${res.exit}: ${said}`);
+    else if (!queued) failures.push(`request-triage did not report a queued task: ${said}`);
+    else {
+      const listed = await run(operateEntry, [appDir, "tasks"]);
+      type Task = { id: string; request?: { capability?: string; payload?: unknown } };
+      let tasks: Task[] | null = null;
+      try {
+        tasks = (JSON.parse(listed.stdout) as { tasks?: Task[] }).tasks ?? [];
+      } catch {
+        failures.push(`tasks list is not JSON (exit ${listed.exit}): ${listed.out.trim().slice(0, 200)}`);
+      }
+      // An unreadable listing says nothing about the queue, so it is not also
+      // reported as the task missing from it.
+      const task = tasks?.find((t) => t.id === queued);
+      if (tasks !== null && !task) failures.push(`queued task ${queued} is not in the app's task queue`);
+      else if (task) {
+        if (task.request?.capability !== "triage") failures.push(`task capability is ${JSON.stringify(task.request?.capability)}, expected "triage"`);
+        if (JSON.stringify(task.request?.payload) !== JSON.stringify({ task: "task_welcome" })) {
+          failures.push(`task payload is ${JSON.stringify(task.request?.payload)}, expected the record's id`);
+        }
+      }
+    }
+    check("an operation runner's trigger(type, payload, capability) queues a claimable task", failures);
   }
 
   // ── validate with dev up records a promotable pass ───────────────────────

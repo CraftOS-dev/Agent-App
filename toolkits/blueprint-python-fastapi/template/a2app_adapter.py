@@ -1401,7 +1401,7 @@ class Adapter:
                 return self._err(405, "usage", "Operations are POST-only.")
             return self._handle_operation(headers, m.group(1), body or {})
 
-        return self._err(404, "not_found", "No such route.")
+        return self._err(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.")
 
     # -- records ------------------------------------------------------------
     def _references_to(self, entity: str, rec_id: str) -> list[dict]:

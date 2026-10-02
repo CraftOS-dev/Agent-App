@@ -61,10 +61,21 @@ const REFERENCE_SCAN_MAX_PAGES = 200;
 const TASK_TIMEOUT_MS = 60_000;
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";
+/** A miss is usually a guessed route, so it names the routes that answer. */
+const UNKNOWN_ROUTE_MESSAGE =
+  "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.";
+/** Path prefixes owned exclusively by the adapter. Keep in step with the router
+ *  in `handle`. */
+const ADAPTER_NAMESPACES = ["/api/_a2app", "/api/ops", "/api/collections"];
+
+function isAdapterNamespace(path: string): boolean {
+  return ADAPTER_NAMESPACES.some((ns) => path === ns || path.startsWith(`${ns}/`));
+}
 
 export interface A2App {
-  /** Route a request. Resolves to a reply, or null if the path is not an A2App
-   *  path (the host app then handles it with its own routes). */
+  /** Route a request. Resolves to a reply, or null if the path is outside the
+   *  adapter's namespaces (the host app then handles it with its own routes). A
+   *  miss inside them is a 404 reply, never null. */
   handle(req: A2AppRequest): Promise<A2AppReply | null>;
   /** The identity document. */
   identity(): Record<string, unknown>;
@@ -1140,6 +1151,11 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       if (req.method !== "POST") return err(405, "usage", "Operations are POST-only.");
       return handleOperation(req, decodeURIComponent(op[1]!));
     }
+
+    // A miss in the adapter's own namespaces is the adapter's to answer. The rest
+    // of /api/ stays the host's: this is middleware, and a host may mount routes
+    // of its own there.
+    if (isAdapterNamespace(path)) return err(404, "not_found", UNKNOWN_ROUTE_MESSAGE);
 
     return null; // not an A2App path — the host app handles it
   }

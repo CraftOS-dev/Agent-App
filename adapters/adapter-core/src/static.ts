@@ -196,19 +196,20 @@ export function createStaticView(dir: string, options: StaticViewOptions = {}): 
   }
 
   function handler(req: IncomingMessage, res: ServerResponse): void {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const file = resolveFile(url.pathname);
+    // Path before method: 405 is only for a file that exists.
+    if (file === null) {
+      notFound(res);
+      return;
+    }
+
     const method = (req.method ?? "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD") {
       res.writeHead(405, { "content-type": "application/json", allow: "GET, HEAD" });
       res.end(
         JSON.stringify({ a2app: true, ok: false, code: "method_not_allowed", message: "Static assets are GET-only." }),
       );
-      return;
-    }
-
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const file = resolveFile(url.pathname);
-    if (file === null) {
-      notFound(res);
       return;
     }
 

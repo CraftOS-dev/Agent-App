@@ -110,10 +110,13 @@ async def _read_body(request: Request):
         return {"__unparsed__": raw.decode("utf8", "replace")}, None
 
 
-@app.api_route("/api/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+# Every standard method, so the adapter decides: a method left off this list would get
+# Starlette's own 405, outside the a2app envelope, even on a route that does not
+# exist.
+@app.api_route("/api/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def a2app_route(path: str, request: Request):
     body = None
-    if request.method in ("POST", "PATCH"):
+    if request.method in ("POST", "PUT", "PATCH"):
         body, too_large = await _read_body(request)
         if too_large is not None:
             return JSONResponse(status_code=too_large[0], content=too_large[1])

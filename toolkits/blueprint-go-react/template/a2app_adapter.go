@@ -2454,7 +2454,7 @@ func (a *Adapter) dispatch(method, path string, headers map[string]string, body 
 		return a.handleOperation(headers, m[1], body)
 	}
 
-	return errEnv(404, "not_found", "No such route.", nil)
+	return errEnv(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.", nil)
 }
 
 /* -- records ------------------------------------------------------------------ */

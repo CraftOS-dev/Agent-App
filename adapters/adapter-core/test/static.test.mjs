@@ -136,6 +136,15 @@ await check("static assets are GET-only", async () => {
   assert.equal(res.headers.get("allow"), "GET, HEAD");
 });
 
+await check("a POST to a path that names no file is a 404, not a 405", async () => {
+  // 405 means "right resource, wrong verb" — only true of a file that exists.
+  for (const path of ["/missing.html", "/sub"]) {
+    const res = await get(path, { method: "POST" });
+    assert.equal(res.status, 404, `${path} answered ${res.status}`);
+    assert.equal((await res.json()).code, "not_found");
+  }
+});
+
 /* -------------------------------------------------------------- aliases */
 
 await check("an alias serves a file from outside the View directory", async () => {

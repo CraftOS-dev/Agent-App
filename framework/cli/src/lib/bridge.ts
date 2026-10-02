@@ -343,6 +343,7 @@ async function deliverHeadless(
   cwd: string,
   timeoutMs: number,
   onHeartbeat: () => Promise<boolean>,
+  heartbeatMs: number = HEARTBEAT_MS,
 ): Promise<Delivery> {
   const started = Date.now();
   const resolved = resolveOnPath(route.command);
@@ -465,7 +466,7 @@ async function deliverHeadless(
           ms: Date.now() - started,
         });
       });
-    }, HEARTBEAT_MS);
+    }, heartbeatMs);
   });
 }
 
@@ -515,6 +516,8 @@ export interface BridgeContext {
   route: Route;
   prompt: PromptContext;
   taskTimeoutMs: number;
+  /** how often a running delivery re-asserts its claim; defaults to HEARTBEAT_MS */
+  heartbeatMs?: number;
   /** null means every capability; otherwise only these are delivered */
   capabilities: string[] | null;
   dryRun: boolean;
@@ -544,9 +547,17 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
   // should see the task move the moment it is picked up, not when it finishes.
   await ctx.client.progressTask(task.id, { step: `delivered to ${ctx.profile.id} (${ctx.route.mode})`, percent: 0 });
 
-  /** Keep the claim alive; false means the app no longer agrees it is ours. */
+  /**
+   * Keep the claim alive; false means the app no longer agrees it is ours.
+   *
+   * It carries no step. An agent that reports its own ("Writing triage notes")
+   * is telling the person watching what it is doing, and a heartbeat every 20 s
+   * that replaced it with "running in claude" made the app flip back and forth
+   * between the two. With no step sent, the step stays whatever was said last:
+   * the agent's, or "delivered to …" until it says anything.
+   */
   const heartbeat = async (): Promise<boolean> => {
-    const res = await ctx.client.progressTask(task.id, { step: `running in ${ctx.profile.id}` }).catch(() => null);
+    const res = await ctx.client.progressTask(task.id, {}).catch(() => null);
     if (res === null) return true; // a transient network blip is not a lost claim
     return res.ok;
   };
@@ -560,6 +571,7 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
         ctx.project.dir,
         ctx.route.timeoutMs ?? ctx.taskTimeoutMs,
         heartbeat,
+        ctx.heartbeatMs,
       );
       break;
     case "inbound":

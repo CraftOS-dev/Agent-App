@@ -1018,6 +1018,43 @@ if (process.platform === "win32") {
   });
 }
 
+/* ------------------------ the heartbeat keeps the claim, not the conversation */
+
+// An agent that reports its own step is telling the person watching the app
+// what it is doing. A heartbeat that overwrote it every 20 s with "running in
+// <harness>" made the app flip between the two for the whole run.
+{
+  const { deliverAndSettle } = await import(pathToFileURL(resolve(here, "..", "dist", "lib", "bridge.js")).href);
+  const dir = mkdtempSync(join(tmpdir(), "a2app-bridge-beat-"));
+  const slow = join(dir, "slow-harness.mjs");
+  writeFileSync(slow, "setTimeout(() => process.exit(0), 700);\n");
+  const progress = [];
+  const client = {
+    progressTask: async (_id, body) => (progress.push(body), { ok: true, status: 200, json: {} }),
+    getTask: async () => ({ ok: true, status: 200, json: { status: "working" } }),
+    completeTask: async () => ({ ok: true, status: 200, json: {} }),
+  };
+  await deliverAndSettle(
+    {
+      project: { dir },
+      client,
+      profile: { id: "fake", name: "Fake", routes: [] },
+      route: { mode: "headless", command: process.execPath, args: [slow, "{prompt}"] },
+      prompt: { appRef: dir, appName: "Beat", appId: "beat", closesOnExit: true, cwdIsApp: true },
+      taskTimeoutMs: 10_000,
+      heartbeatMs: 100,
+      capabilities: null,
+      dryRun: false,
+    },
+    task("tsk_beat", "summarize", {}),
+  );
+  ok("the run announced who picked it up", String(progress[0]?.step ?? "").startsWith("delivered to fake"));
+  const beats = progress.slice(1);
+  ok("the claim was kept alive while it ran", beats.length >= 2);
+  check("…by heartbeats that carry no step", beats.filter((b) => "step" in b).length, 0);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 /* ------------------- a harness that cannot be started fails the task at once */
 
 // spawn() throws synchronously for some failures (EINVAL on Windows batch

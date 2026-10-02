@@ -968,6 +968,22 @@ await withApp([], async ({ port }) => {
     { file: join(dir, "node_modules", "x", "bin", "x.exe"), prefixArgs: [] },
   );
   check("any other batch file is not a shim", shimTarget("@echo off\r\ncall other.bat %*\r\n", dir, "NODE", () => false), null);
+  // Pi's pi.cmd, verbatim: a one-line node wrapper an installer wrote by hand.
+  check(
+    "a one-line node wrapper runs its script with this node",
+    shimTarget('@ECHO off\r\nnode "%~dp0pi-launcher.js" %*\r\n', dir, "NODE", () => false),
+    { file: "NODE", prefixArgs: [join(dir, "pi-launcher.js")] },
+  );
+  check(
+    "…and may name a script below it",
+    shimTarget('@echo off\r\nsetlocal\r\nrem launcher\r\nnode.exe "%~dp0lib\\cli.js" %*\r\n', dir, "NODE", () => false)?.prefixArgs,
+    [join(dir, "lib", "cli.js")],
+  );
+  check(
+    "a wrapper that does anything else is not one",
+    shimTarget('@echo off\r\nset FOO=1\r\nnode "%~dp0pi-launcher.js" %*\r\n', dir, "NODE", () => false),
+    null,
+  );
 }
 
 if (process.platform === "win32") {

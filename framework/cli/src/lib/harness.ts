@@ -395,10 +395,15 @@ export function launchSpec(resolved: string, nodePath: string = process.execPath
 }
 
 /**
- * What an npm cmd-shim starts, or null if `text` is not one. Two shapes:
- * a node script (`"%_prog%" "%dp0%\…\cli.js" %*`, run with the shim's bundled
- * node.exe when present, else this node) and a native binary
- * (`"%dp0%\…\x.exe" %*`). Exported for tests.
+ * What a cmd shim starts, or null if `text` is not one. Three shapes:
+ * npm's node-script shim (`"%_prog%" "%dp0%\…\cli.js" %*`, run with the shim's
+ * bundled node.exe when present, else this node), npm's native-binary shim
+ * (`"%dp0%\…\x.exe" %*`), and a one-line node wrapper of the kind installers
+ * write by hand (`node "%~dp0launcher.js" %*` — Pi's `pi.cmd`). The last is
+ * matched strictly: apart from `@echo off`, blank lines, comments and
+ * setlocal/endlocal, that line must be the whole file, so nothing else the
+ * batch file does is skipped by running its target directly. Exported for
+ * tests.
  */
 export function shimTarget(
   text: string,
@@ -414,6 +419,12 @@ export function shimTarget(
   }
   const binary = /"%dp0%\\([^"]+\.exe)"\s+%\*/i.exec(text);
   if (binary) return { file: at(binary[1]!), prefixArgs: [] };
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !/^@?echo\s+off$/i.test(l) && !/^(?:rem\b|::)/i.test(l) && !/^@?(?:setlocal|endlocal)$/i.test(l));
+  const wrapper = lines.length === 1 ? /^@?"?node(?:\.exe)?"?\s+"%~dp0([^"%]+)"\s+%\*$/i.exec(lines[0]!) : null;
+  if (wrapper) return { file: nodePath, prefixArgs: [at(wrapper[1]!)] };
   return null;
 }
 

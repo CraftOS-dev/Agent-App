@@ -42,6 +42,10 @@ export const schema = {
         { name: "due", type: "string", max: 10, dayKey: true },
         { name: "notes", type: "string", max: 2000 },
         { name: "created", type: "datetime", readOnly: true },
+        // The queue task an agent is (or was last) working on for this record.
+        // The runner sets it; the View follows it, so the person can see the
+        // work they asked for until it is done.
+        { name: "agentTask", type: "string", max: 64, readOnly: true },
       ],
       seed: [
         { id: "task_welcome", title: "Welcome — edit or delete me", status: "todo", created: "2026-01-01T00:00:00.000Z" },
@@ -125,10 +129,22 @@ export const schema = {
     // read. Nothing here can widen what the agent may do: the payload is data
     // on the other side, and the capability names the kind of work, not a
     // command to run.
+    //
+    // Identical triggers dedupe to ONE task, even after it has finished, so
+    // asking again with the same payload would hand back the old failure.
+    // Naming the previous task makes each request a new occurrence. The View
+    // disables the control while a run is open, so a double click cannot
+    // queue two.
+    //
+    // The task id goes on the record so the View can show the work until it is
+    // done (src/AgentTask.jsx). The validate gate checks that it does.
     "request-triage": (args, _ctx, { store, trigger }) => {
       const task = store.get("tasks", args?.task);
       if (!task) return { ok: false, reason: "no such task" };
-      const { taskId } = trigger("task.needs_triage", { task: task.id }, "triage");
+      const payload = task.agentTask ? { task: task.id, previous: task.agentTask } : { task: task.id };
+      const { taskId } = trigger("task.needs_triage", payload, "triage");
+      task.agentTask = taskId;
+      store.put("tasks", task);
       return { ok: true, task: task.id, queued: taskId };
     },
   },

@@ -20,6 +20,10 @@ ENTITIES = {
             {"name": "due", "type": "string", "max": 10, "dayKey": True},
             {"name": "notes", "type": "string", "max": 2000},
             {"name": "created", "type": "datetime", "readOnly": True},
+            # The queue task an agent is (or was last) working on for this
+            # record. The runner sets it, so a View added later can follow it
+            # and show the work until it is done.
+            {"name": "agentTask", "type": "string", "max": 64, "readOnly": True},
         ],
     },
 }
@@ -104,11 +108,20 @@ def _complete_task(args, ctx, store):
 # copy of the data, which would be stale by the time it is read. Nothing here
 # can widen what the agent may do: the payload is data on the other side, and
 # the capability names the kind of work, not a command to run.
+#
+# Identical triggers dedupe to ONE task, even after it has finished, so asking
+# again with the same payload would hand back the old failure. Naming the
+# previous task makes each request a new occurrence.
 def _request_triage(args, ctx, store):
     task = store.get_record("tasks", args.get("task"))
     if task is None:
         return {"ok": False, "reason": "no such task"}
-    fired = store.trigger("task.needs_triage", {"task": task["id"]}, capability="triage")
+    payload = {"task": task["id"]}
+    if task.get("agentTask"):
+        payload["previous"] = task["agentTask"]
+    fired = store.trigger("task.needs_triage", payload, capability="triage")
+    task["agentTask"] = fired["taskId"]
+    store.put_record("tasks", task)
     return {"ok": True, "task": task["id"], "queued": fired["taskId"]}
 
 

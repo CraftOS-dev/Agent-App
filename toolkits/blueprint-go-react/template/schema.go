@@ -30,6 +30,10 @@ var ENTITIES = map[string]M{
 			{"name": "due", "type": "string", "max": 10, "dayKey": true},
 			{"name": "notes", "type": "string", "max": 2000},
 			{"name": "created", "type": "datetime", "readOnly": true},
+			// The queue task an agent is (or was last) working on for this
+			// record. The runner sets it; the View follows it, so the person can
+			// see the work they asked for until it is done.
+			{"name": "agentTask", "type": "string", "max": 64, "readOnly": true},
 		},
 	},
 }
@@ -144,15 +148,30 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 	// never a copy of the data, which would be stale by the time it is read.
 	// Nothing here can widen what the agent may do: the payload is data on the
 	// other side, and the capability names the kind of work, not a command.
+	//
+	// Identical triggers dedupe to ONE task, even after it has finished, so
+	// asking again with the same payload would hand back the old failure.
+	// Naming the previous task makes each request a new occurrence. The View
+	// disables the control while a run is open, so a double click cannot
+	// queue two.
+	//
+	// The task id goes on the record so the View can show the work until it is
+	// done (src/AgentTask.jsx). The validate gate checks that it does.
 	"request-triage": func(args M, _ M, store *Store) (any, error) {
 		task := store.getRecord("tasks", getStr(args, "task"))
 		if task == nil {
 			return M{"ok": false, "reason": "no such task"}, nil
 		}
-		fired, err := store.trigger("task.needs_triage", M{"task": task["id"]}, "triage")
+		payload := M{"task": task["id"]}
+		if prev := getStr(task, "agentTask"); prev != "" {
+			payload["previous"] = prev
+		}
+		fired, err := store.trigger("task.needs_triage", payload, "triage")
 		if err != nil {
 			return nil, err
 		}
+		task["agentTask"] = fired["taskId"]
+		store.putRecord("tasks", task)
 		return M{"ok": true, "task": task["id"], "queued": fired["taskId"]}, nil
 	},
 }

@@ -40,8 +40,8 @@
  * property of this computer, so they live in the framework home and are shared
  * by every app on it.
  */
-import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homePath } from "./home.js";
 import { readJsonFile } from "./json.js";
 import { fetchWithTimeout } from "./net.js";
@@ -343,6 +343,60 @@ export function resolveOnPath(command: string, env: NodeJS.ProcessEnv = process.
   return null;
 }
 
+/**
+ * How to start a resolved command without a shell.
+ *
+ * Most commands are executables and start as themselves. Windows is the
+ * exception that matters: an npm-installed CLI (`claude`, `codex`, `gemini`)
+ * is reached through a `.cmd` wrapper, and Node refuses to spawn a batch file
+ * without a shell (it throws EINVAL; CVE-2024-27980). Running it through
+ * `cmd.exe` is not an option here — the prompt carries app content, and cmd.exe
+ * would interpret it. So the wrapper is read instead of run: npm's shims say
+ * exactly which script or binary they start, and that is spawned directly,
+ * with the arguments still passed as an array.
+ *
+ * A batch file that is not an npm shim is refused with a reason, never run.
+ */
+export type LaunchSpec = { file: string; prefixArgs: string[] } | { error: string };
+
+export function launchSpec(resolved: string, nodePath: string = process.execPath): LaunchSpec {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(resolved)) return { file: resolved, prefixArgs: [] };
+  let text: string;
+  try {
+    text = readFileSync(resolved, "utf8");
+  } catch (err) {
+    return { error: `${resolved} could not be read: ${(err as Error).message}` };
+  }
+  return shimTarget(text, dirname(resolved), nodePath, existsSync) ?? {
+    error:
+      `${resolved} is a batch file, and the bridge never runs a harness through a shell (the prompt carries ` +
+      `app content). Point the route's command at the real executable instead.`,
+  };
+}
+
+/**
+ * What an npm cmd-shim starts, or null if `text` is not one. Two shapes:
+ * a node script (`"%_prog%" "%dp0%\…\cli.js" %*`, run with the shim's bundled
+ * node.exe when present, else this node) and a native binary
+ * (`"%dp0%\…\x.exe" %*`). Exported for tests.
+ */
+export function shimTarget(
+  text: string,
+  dir: string,
+  nodePath: string,
+  exists: (p: string) => boolean,
+): { file: string; prefixArgs: string[] } | null {
+  const at = (rel: string): string => join(dir, ...rel.split("\\").filter((s) => s !== ""));
+  const script = /"%_prog%"\s+"%dp0%\\([^"]+)"\s+%\*/.exec(text);
+  if (script) {
+    const bundled = join(dir, "node.exe");
+    return { file: exists(bundled) ? bundled : nodePath, prefixArgs: [at(script[1]!)] };
+  }
+  const binary = /"%dp0%\\([^"]+\.exe)"\s+%\*/i.exec(text);
+  if (binary) return { file: at(binary[1]!), prefixArgs: [] };
+  return null;
+}
+
 /* ------------------------------------------------------------- the ladder */
 
 /** One rung, and why it is or is not usable here. */
@@ -376,14 +430,19 @@ async function inspectRoute(route: Route): Promise<RungReport> {
     }
     case "headless": {
       const resolved = resolveOnPath(route.command);
-      return {
-        mode: "headless",
-        available: resolved !== null,
-        detail:
-          resolved !== null
-            ? `${route.command} → ${resolved}`
-            : `${route.command} is not on PATH — install it, or point a route at it by absolute path`,
-      };
+      if (resolved === null) {
+        return {
+          mode: "headless",
+          available: false,
+          detail: `${route.command} is not on PATH — install it, or point a route at it by absolute path`,
+        };
+      }
+      // Found is not the same as startable: a batch wrapper the bridge cannot
+      // run without a shell has to be reported here, not discovered at delivery.
+      const launch = launchSpec(resolved);
+      if ("error" in launch) return { mode: "headless", available: false, detail: launch.error };
+      const via = launch.file === resolved ? "" : ` (runs ${[launch.file, ...launch.prefixArgs].join(" ")})`;
+      return { mode: "headless", available: true, detail: `${route.command} → ${resolved}${via}` };
     }
     case "gateway": {
       const up = await probe(route.health);

@@ -52,7 +52,7 @@ import { closeSync, existsSync, openSync, readSync, rmSync, statSync } from "nod
 import { join } from "node:path";
 import type { A2AppClient, Task } from "@a2app/sdk";
 import type { HarnessProfile, Route } from "./harness.js";
-import { PROMPT_PLACEHOLDER, resolveOnPath } from "./harness.js";
+import { PROMPT_PLACEHOLDER, launchSpec, resolveOnPath } from "./harness.js";
 import { fetchWithTimeout, pollHealth } from "./net.js";
 import { killTreeForce, spawnBackgroundShell } from "./proc.js";
 import { writeFileAtomic } from "./home.js";
@@ -355,11 +355,22 @@ async function deliverHeadless(
       ms: 0,
     };
   }
+  const launch = launchSpec(resolved);
+  if ("error" in launch) {
+    return { ok: false, code: "harness_spawn_failed", completes: true, detail: launch.error, ms: 0 };
+  }
   const useStdin = route.input === "stdin";
-  const args = useStdin ? route.args : route.args.map((a) => a.split(PROMPT_PLACEHOLDER).join(prompt));
+  const args = [
+    ...launch.prefixArgs,
+    ...(useStdin ? route.args : route.args.map((a) => a.split(PROMPT_PLACEHOLDER).join(prompt))),
+  ];
 
-  return new Promise<Delivery>((resolve) => {
-    const child = spawn(resolved, args, {
+  // spawn() can throw synchronously (EINVAL, ENAMETOOLONG) before any 'error'
+  // event exists to catch it. Escaping here used to leave the task claimed
+  // with nobody running it, until the app redelivered it to exhaustion.
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(launch.file, args, {
       cwd: route.cwd !== undefined && route.cwd !== "app" ? route.cwd : cwd,
       shell: false,
       stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
@@ -373,6 +384,17 @@ async function deliverHeadless(
       // terminal popping up in front of the user for each delivered task.
       windowsHide: true,
     });
+  } catch (err) {
+    return {
+      ok: false,
+      code: "harness_spawn_failed",
+      completes: true,
+      detail: `${route.command} could not be started: ${(err as Error).message}`,
+      ms: Date.now() - started,
+    };
+  }
+
+  return new Promise<Delivery>((resolve) => {
     let out = "";
     let errOut = "";
     let settled = false;

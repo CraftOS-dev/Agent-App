@@ -935,6 +935,110 @@ await withApp([], async ({ port }) => {
   remove(dir);
 });
 
+/* --------------------- Windows: an npm .cmd shim is read, never run by cmd.exe */
+
+// npm puts every CLI it installs on Windows (claude, codex, gemini) behind a
+// .cmd wrapper. Node refuses to spawn one without a shell, and a shell would
+// interpret the prompt. So the bridge reads what the shim starts and runs that.
+{
+  const { shimTarget } = await import(pathToFileURL(resolve(here, "..", "dist", "lib", "harness.js")).href);
+  const NODE_SHIM = [
+    "@ECHO off",
+    "IF EXIST \"%dp0%\\node.exe\" (",
+    "  SET \"_prog=%dp0%\\node.exe\"",
+    ") ELSE (",
+    "  SET \"_prog=node\"",
+    ")",
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*',
+  ].join("\r\n");
+  const dir = join(tmpdir(), "npm-bin");
+  check(
+    "an npm node shim runs its script with this node",
+    shimTarget(NODE_SHIM, dir, "NODE", () => false),
+    { file: "NODE", prefixArgs: [join(dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js")] },
+  );
+  check(
+    "…or with the node.exe bundled beside it",
+    shimTarget(NODE_SHIM, dir, "NODE", () => true)?.file,
+    join(dir, "node.exe"),
+  );
+  check(
+    "an npm binary shim runs the binary",
+    shimTarget('@ECHO off\r\n"%dp0%\\node_modules\\x\\bin\\x.exe"   %*\r\n', dir, "NODE", () => false),
+    { file: join(dir, "node_modules", "x", "bin", "x.exe"), prefixArgs: [] },
+  );
+  check("any other batch file is not a shim", shimTarget("@echo off\r\ncall other.bat %*\r\n", dir, "NODE", () => false), null);
+}
+
+if (process.platform === "win32") {
+  const PAYLOAD = '" & echo PWNED > pwned.txt & | ^ %PATH% "';
+
+  await withApp([task("tsk_shim", "summarize", { title: PAYLOAD })], async ({ port, state }) => {
+    const dir = makeAppDir(port);
+    makeHarness(dir);
+    // The shape npm writes, pointing at the fake harness script.
+    const shim = join(dir, "fakeharness.cmd");
+    writeFileSync(
+      shim,
+      '@ECHO off\r\nSETLOCAL\r\nSET "_prog=node"\r\nendLocal & "%_prog%"  "%dp0%\\fake-harness.mjs" %*\r\n',
+    );
+    const home = makeHome([{ id: "fake", routes: [{ mode: "headless", command: shim, args: ["{prompt}"] }] }], "fake");
+
+    const status = firstJson((await cli(AGENT_APP, [dir, "bridge"], { A2APP_HOME: home })).stdout);
+    ok("an npm shim is reported as startable", status?.ladder?.[0]?.available === true);
+
+    const res = await cli(AGENT_APP, [dir, "bridge", "start", "--once"], { A2APP_HOME: home });
+    check("a harness behind an npm .cmd shim is delivered to", res.code, 0);
+    check("…and the task completes", state.get("tsk_shim").status, "completed");
+    const argv = existsSync(join(dir, "argv.json")) ? JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) : [];
+    check("…with the prompt still exactly one argument", argv.length, 1);
+    // The prompt renders the payload as JSON, so its quotes arrive escaped.
+    ok("…carrying cmd.exe metacharacters verbatim", String(argv[0]).includes(JSON.stringify(PAYLOAD).slice(1, -1)));
+    ok("…and no shell ran them", !existsSync(join(dir, "pwned.txt")) && !existsSync("pwned.txt"));
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await withApp([task("tsk_bat", "summarize", {})], async ({ port, state }) => {
+    const dir = makeAppDir(port);
+    const bat = join(dir, "wrapper.bat");
+    writeFileSync(bat, "@echo off\r\ncall something-else %*\r\n");
+    const home = makeHome([{ id: "fake", routes: [{ mode: "headless", command: bat, args: ["{prompt}"] }] }], "fake");
+
+    const status = firstJson((await cli(AGENT_APP, [dir, "bridge"], { A2APP_HOME: home })).stdout);
+    ok("a batch file that is not a shim is reported as not startable", status?.ladder?.[0]?.available === false);
+
+    // Refused before anything is claimed, so the task stays free for a listener
+    // that can run it, instead of sitting claimed until redelivery runs out.
+    const res = await cli(AGENT_APP, [dir, "bridge", "start", "--once"], { A2APP_HOME: home });
+    ok("the bridge refuses to start", res.code !== 0 && firstJson(res.stdout)?.supported === false);
+    check("…and never claims the task", state.get("tsk_bat").status, "submitted");
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+/* ------------------- a harness that cannot be started fails the task at once */
+
+// spawn() throws synchronously for some failures (EINVAL on Windows batch
+// files, a NUL byte in an argument everywhere), before any 'error' event
+// exists. That used to escape the delivery and leave the task claimed with
+// nobody running it.
+await withApp([task("tsk_throw", "summarize", {})], async ({ port, state }) => {
+  const dir = makeAppDir(port);
+  const harness = makeHarness(dir);
+  const home = makeHome(
+    [{ id: "fake", routes: [{ mode: "headless", command: process.execPath, args: [harness, "{prompt}", "bad\u0000arg"] }] }],
+    "fake",
+  );
+  const res = await cli(AGENT_APP, [dir, "bridge", "start", "--once"], { A2APP_HOME: home });
+  check("a harness that cannot be started fails the pass", res.code, 1);
+  check("…and the task, at once", state.get("tsk_throw").status, "failed");
+  check("…saying it could not be started", state.get("tsk_throw").reason, "harness_spawn_failed");
+  rmSync(home, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 /* -------------------------------------------------------------------- report */
 
 if (failures.length > 0) {

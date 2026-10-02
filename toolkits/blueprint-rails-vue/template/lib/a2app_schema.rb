@@ -21,6 +21,10 @@ module A2appSchema
         { "name" => "due", "type" => "string", "max" => 10, "dayKey" => true },
         { "name" => "notes", "type" => "string", "max" => 2000 },
         { "name" => "created", "type" => "datetime", "readOnly" => true },
+        # The queue task an agent is (or was last) working on for this record.
+        # The runner sets it; the View follows it, so the person can see the
+        # work they asked for until it is done.
+        { "name" => "agentTask", "type" => "string", "max" => 64, "readOnly" => true },
       ],
     },
   }.freeze
@@ -123,10 +127,24 @@ module A2appSchema
     # read. Nothing here can widen what the agent may do: the payload is data
     # on the other side, and the capability names the kind of work, not a
     # command to run.
+    #
+    # Identical triggers dedupe to ONE task, even after it has finished, so
+    # asking again with the same payload would hand back the old failure.
+    # Naming the previous task makes each request a new occurrence. The View
+    # disables the control while a run is open, so a double click cannot
+    # queue two.
+    #
+    # The task id goes on the record so the View can show the work until it
+    # is done (ui/src/components/AgentTaskPanel.vue). The validate gate checks
+    # that it does.
     "request-triage" => lambda do |args, _ctx, store|
       task = store.get_record("tasks", args["task"])
       next { "ok" => false, "reason" => "no such task" } if task.nil?
-      fired = store.trigger("task.needs_triage", { "task" => task["id"] }, "triage")
+      payload = { "task" => task["id"] }
+      payload["previous"] = task["agentTask"] if task["agentTask"].is_a?(String) && !task["agentTask"].empty?
+      fired = store.trigger("task.needs_triage", payload, "triage")
+      task["agentTask"] = fired["taskId"]
+      store.put_record("tasks", task)
       { "ok" => true, "task" => task["id"], "queued" => fired["taskId"] }
     end,
   }.freeze

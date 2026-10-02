@@ -11,7 +11,12 @@
      staleness. A CODE change it handles itself (reload when nothing is
      unsaved). A DATA change it only announces (`a2app:datachange`) — because
      only this file knows how to re-read without discarding a form someone is
-     filling in. -->
+     filling in.
+
+     Agent work: "Ask an agent" queues a triage task (the `request-triage`
+     operation). The row then shows it until it is done — a badge beside the
+     title, and the full-width AgentTaskPanel under the row with the state,
+     the elapsed time and, at the end, the agent's answer. -->
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { api } from "./api.js";
@@ -22,6 +27,9 @@ import { STATUS_LABEL, NEXT_STATUS, fmtDay, isPastDay } from "./format.js";
 import Icon from "./components/Icon.vue";
 import ToastRegion from "./components/ToastRegion.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
+import AgentTaskBadge from "./components/AgentTaskBadge.vue";
+import AgentTaskPanel from "./components/AgentTaskPanel.vue";
+import { FINISHED } from "./agentTask.js";
 
 const API = "/api/collections/tasks/records";
 const PER_PAGE = 100; // the client never renders an unbounded collection
@@ -46,6 +54,8 @@ const filter = ref("all");
 const phase = ref("loading"); // loading | ready | error
 const errorMessage = ref("");
 const busy = ref(new Set()); // record ids with a write in flight
+const asking = ref(new Set()); // record ids with an agent request in flight
+const agentOpen = ref(new Set()); // record ids whose agent run is still unfinished
 const adding = ref(false);
 const loadingMore = ref(false);
 const title = ref("");
@@ -185,6 +195,41 @@ async function advanceStatus(task) {
   }
 }
 
+/** Re-read one record and put the stored version in place. */
+async function reloadOne(id) {
+  try {
+    const stored = await api(`${API}/${encodeURIComponent(id)}`);
+    items.value = items.value.map((t) => (t.id === id ? stored : t));
+  } catch {
+    /* the list's next refresh picks it up */
+  }
+}
+
+function setIn(setRef, id, on) {
+  const next = new Set(setRef.value);
+  if (on) next.add(id);
+  else next.delete(id);
+  setRef.value = next;
+}
+
+async function askAgent(task) {
+  setIn(asking, task.id, true);
+  try {
+    const res = await api("/api/ops/request-triage", { method: "POST", body: JSON.stringify({ task: task.id }) });
+    if (res?.ok === false) throw new Error(res.reason ?? "The app refused the request.");
+    setIn(agentOpen, task.id, true);
+    await reloadOne(task.id); // the stored record carries the task id the panel follows
+  } catch (err) {
+    toast("error", `Could not ask an agent about "${task.title}". ${err.message}`);
+  } finally {
+    setIn(asking, task.id, false);
+  }
+}
+
+function onAgentStatus(task, status) {
+  setIn(agentOpen, task.id, Boolean(status) && !FINISHED.has(status));
+}
+
 async function deleteTask(task) {
   const confirmed = await confirm({
     title: "Delete this task?",
@@ -227,6 +272,9 @@ const st = (task) => task.status ?? "todo";
 const nextLabel = (task) => STATUS_LABEL[NEXT_STATUS[st(task)]].toLowerCase();
 const statusAria = (task) => `Status: ${STATUS_LABEL[st(task)]}. Mark as ${nextLabel(task)}.`;
 const deleteAria = (task) => `Delete task "${task.title}"`;
+const askAria = (task) => `Ask an agent to triage "${task.title}"`;
+// The control stays disabled while a run is open, so a double click cannot queue two.
+const agentBusy = (task) => asking.value.has(task.id) || agentOpen.value.has(task.id);
 const isOverdue = (task) => Boolean(task.due) && isPastDay(task.due) && st(task) !== "done";
 
 const count = computed(() => {
@@ -341,12 +389,34 @@ const count = computed(() => {
                 {{ STATUS_LABEL[st(task)] }}
               </button>
               <span class="title" :title="task.title">{{ task.title }}</span>
+              <AgentTaskBadge v-if="task.agentTask" :task-id="task.agentTask" />
               <span v-if="task.due" class="due" :class="{ overdue: isOverdue(task) }">
                 {{ isOverdue(task) ? `Overdue · ${fmtDay(task.due)}` : `Due ${fmtDay(task.due)}` }}
               </span>
+              <button
+                v-if="st(task) !== 'done'"
+                class="btn-icon"
+                type="button"
+                title="Ask an agent to triage this"
+                :aria-label="askAria(task)"
+                :disabled="agentBusy(task)"
+                @click="askAgent(task)"
+              >
+                <Icon name="spark" />
+              </button>
               <button class="btn-icon danger" type="button" :aria-label="deleteAria(task)" @click="deleteTask(task)">
                 <Icon name="trash" />
               </button>
+              <AgentTaskPanel
+                v-if="task.agentTask"
+                :task-id="task.agentTask"
+                :title="`Agent triage of &quot;${task.title}&quot;`"
+                :can-retry="st(task) !== 'done'"
+                :retrying="asking.has(task.id)"
+                @status="(s) => onAgentStatus(task, s)"
+                @settled="reloadOne(task.id)"
+                @retry="askAgent(task)"
+              />
             </li>
           </ul>
           <div v-if="items.length < totalItems" class="load-more">

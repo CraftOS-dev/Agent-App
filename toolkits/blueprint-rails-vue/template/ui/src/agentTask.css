@@ -1,0 +1,65 @@
+/* ============================================================================
+   Agent work (AGENT-OWNED shared piece — @a2app-kit agent-task), imported by
+   agentTask.js so the badge and panel are styled wherever they are used.
+   Work queued for an agent stays visible until it is done. The panel takes
+   the full width of its container; an agent's result is prose of any length
+   and never goes in a title cell. Consumes semantic tokens only.
+   ============================================================================ */
+.agent-badge {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  font-size: var(--fs-xs); font-weight: var(--fw-medium); white-space: nowrap;
+  padding: 2px var(--sp-2); border-radius: var(--r-full); border: 1px solid;
+}
+.agent-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: currentColor; flex: none; }
+.live .agent-dot { animation: agent-pulse 1.2s var(--ease-std) infinite; }
+@keyframes agent-pulse { 50% { opacity: .5; } }
+
+.tone-neutral { --tone-bg: var(--neutral-bg); --tone-text: var(--neutral-text); --tone-border: var(--neutral-border); }
+.tone-info    { --tone-bg: var(--info-bg);    --tone-text: var(--info-text);    --tone-border: var(--info-border); }
+.tone-warning { --tone-bg: var(--warning-bg); --tone-text: var(--warning-text); --tone-border: var(--warning-border); }
+.tone-success { --tone-bg: var(--success-bg); --tone-text: var(--success-text); --tone-border: var(--success-border); }
+.tone-danger  { --tone-bg: var(--danger-bg);  --tone-text: var(--danger-text);  --tone-border: var(--danger-border); }
+.agent-badge { background: var(--tone-bg); color: var(--tone-text); border-color: var(--tone-border); }
+
+.agent-task {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  width: 100%; min-width: 0; padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--tone-border); border-left-width: 3px; border-radius: var(--r-lg);
+  background: var(--bg-surface);
+}
+.agent-task-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; color: var(--tone-text); }
+.agent-task-state { font-size: var(--fs-sm); font-weight: var(--fw-medium); min-width: 0; overflow-wrap: anywhere; }
+.agent-task-step { font-weight: var(--fw-regular); color: var(--text-secondary); }
+.agent-task-elapsed { margin-left: auto; font-size: var(--fs-xs); color: var(--text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-task-note { margin: 0; font-size: var(--fs-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
+.agent-task-note code { font-family: var(--font-mono); font-size: var(--fs-xs); background: var(--bg-sunken); padding: 1px var(--sp-1); border-radius: var(--r-sm); }
+.agent-task-failure { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.agent-task-failure .agent-task-note { flex: 1; min-width: 12ch; color: var(--danger-text); }
+.agent-task-code { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-tertiary); }
+.agent-task-bar { height: 4px; border-radius: var(--r-full); background: var(--bg-sunken); overflow: hidden; }
+.agent-task-bar span { display: block; height: 100%; background: var(--info-solid); transition: width var(--dur-mid) var(--ease-std); }
+
+.agent-result { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-1); }
+.agent-result-text {
+  margin: 0; max-width: 72ch; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: var(--fs-base); line-height: var(--lh-normal); color: var(--text-primary);
+}
+.agent-result-text.clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-result-text a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
+.agent-result-toggle {
+  font: inherit; font-size: var(--fs-sm); color: var(--accent-text); background: none; border: 0;
+  padding: var(--sp-1) 0; cursor: pointer; min-height: 24px;
+}
+.agent-result-toggle:hover { text-decoration: underline; }
+@media (prefers-reduced-motion: reduce) {
+  .live .agent-dot { animation: none; }
+  .agent-task-bar span { transition: none; }
+}
+
+/* placement in a list row: the panel gets its own full-width line */
+.task { flex-wrap: wrap; }
+.task > .agent-task { flex-basis: 100%; margin-bottom: var(--sp-1); }
+@media (max-width: 480px) {
+  /* the panel under the row says the same thing; the title keeps the room */
+  .task .agent-badge { display: none; }
+}

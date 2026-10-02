@@ -40,8 +40,8 @@
  * property of this computer, so they live in the framework home and are shared
  * by every app on it.
  */
-import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { homePath } from "./home.js";
 import { readJsonFile } from "./json.js";
 import { fetchWithTimeout } from "./net.js";
@@ -146,7 +146,27 @@ export interface HarnessConfig {
  * runs.
  */
 export const BUILT_IN_HARNESSES: readonly HarnessProfile[] = [
-  { id: "claude", name: "Claude Code", routes: [{ mode: "headless", command: "claude", args: ["-p", PROMPT_PLACEHOLDER] }] },
+  // Headless Claude Code has nobody to approve a command, so without a grant
+  // every `a2app` call the prompt asks for is refused, and a determined agent
+  // goes looking for another way in (reading the token, editing the adapter's
+  // state file). The grant is exactly the CLI the prompt names, and file edits
+  // are denied: a delivered task is done through the app's API, not its files.
+  // The variadic tool lists come before `-p` so they cannot swallow the prompt.
+  {
+    id: "claude",
+    name: "Claude Code",
+    routes: [
+      {
+        mode: "headless",
+        command: "claude",
+        args: [
+          "--allowedTools", "Bash(a2app:*)",
+          "--disallowedTools", "Edit", "Write", "NotebookEdit",
+          "-p", PROMPT_PLACEHOLDER,
+        ],
+      },
+    ],
+  },
   { id: "codex", name: "Codex CLI", routes: [{ mode: "headless", command: "codex", args: ["exec", PROMPT_PLACEHOLDER] }] },
   { id: "gemini", name: "Gemini CLI", routes: [{ mode: "headless", command: "gemini", args: ["-p", PROMPT_PLACEHOLDER] }] },
   { id: "aider", name: "Aider", routes: [{ mode: "headless", command: "aider", args: ["--message", PROMPT_PLACEHOLDER] }] },
@@ -343,6 +363,71 @@ export function resolveOnPath(command: string, env: NodeJS.ProcessEnv = process.
   return null;
 }
 
+/**
+ * How to start a resolved command without a shell.
+ *
+ * Most commands are executables and start as themselves. Windows is the
+ * exception that matters: an npm-installed CLI (`claude`, `codex`, `gemini`)
+ * is reached through a `.cmd` wrapper, and Node refuses to spawn a batch file
+ * without a shell (it throws EINVAL; CVE-2024-27980). Running it through
+ * `cmd.exe` is not an option here — the prompt carries app content, and cmd.exe
+ * would interpret it. So the wrapper is read instead of run: npm's shims say
+ * exactly which script or binary they start, and that is spawned directly,
+ * with the arguments still passed as an array.
+ *
+ * A batch file that is not an npm shim is refused with a reason, never run.
+ */
+export type LaunchSpec = { file: string; prefixArgs: string[] } | { error: string };
+
+export function launchSpec(resolved: string, nodePath: string = process.execPath): LaunchSpec {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(resolved)) return { file: resolved, prefixArgs: [] };
+  let text: string;
+  try {
+    text = readFileSync(resolved, "utf8");
+  } catch (err) {
+    return { error: `${resolved} could not be read: ${(err as Error).message}` };
+  }
+  return shimTarget(text, dirname(resolved), nodePath, existsSync) ?? {
+    error:
+      `${resolved} is a batch file, and the bridge never runs a harness through a shell (the prompt carries ` +
+      `app content). Point the route's command at the real executable instead.`,
+  };
+}
+
+/**
+ * What a cmd shim starts, or null if `text` is not one. Three shapes:
+ * npm's node-script shim (`"%_prog%" "%dp0%\…\cli.js" %*`, run with the shim's
+ * bundled node.exe when present, else this node), npm's native-binary shim
+ * (`"%dp0%\…\x.exe" %*`), and a one-line node wrapper of the kind installers
+ * write by hand (`node "%~dp0launcher.js" %*` — Pi's `pi.cmd`). The last is
+ * matched strictly: apart from `@echo off`, blank lines, comments and
+ * setlocal/endlocal, that line must be the whole file, so nothing else the
+ * batch file does is skipped by running its target directly. Exported for
+ * tests.
+ */
+export function shimTarget(
+  text: string,
+  dir: string,
+  nodePath: string,
+  exists: (p: string) => boolean,
+): { file: string; prefixArgs: string[] } | null {
+  const at = (rel: string): string => join(dir, ...rel.split("\\").filter((s) => s !== ""));
+  const script = /"%_prog%"\s+"%dp0%\\([^"]+)"\s+%\*/.exec(text);
+  if (script) {
+    const bundled = join(dir, "node.exe");
+    return { file: exists(bundled) ? bundled : nodePath, prefixArgs: [at(script[1]!)] };
+  }
+  const binary = /"%dp0%\\([^"]+\.exe)"\s+%\*/i.exec(text);
+  if (binary) return { file: at(binary[1]!), prefixArgs: [] };
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !/^@?echo\s+off$/i.test(l) && !/^(?:rem\b|::)/i.test(l) && !/^@?(?:setlocal|endlocal)$/i.test(l));
+  const wrapper = lines.length === 1 ? /^@?"?node(?:\.exe)?"?\s+"%~dp0([^"%]+)"\s+%\*$/i.exec(lines[0]!) : null;
+  if (wrapper) return { file: nodePath, prefixArgs: [at(wrapper[1]!)] };
+  return null;
+}
+
 /* ------------------------------------------------------------- the ladder */
 
 /** One rung, and why it is or is not usable here. */
@@ -376,14 +461,19 @@ async function inspectRoute(route: Route): Promise<RungReport> {
     }
     case "headless": {
       const resolved = resolveOnPath(route.command);
-      return {
-        mode: "headless",
-        available: resolved !== null,
-        detail:
-          resolved !== null
-            ? `${route.command} → ${resolved}`
-            : `${route.command} is not on PATH — install it, or point a route at it by absolute path`,
-      };
+      if (resolved === null) {
+        return {
+          mode: "headless",
+          available: false,
+          detail: `${route.command} is not on PATH — install it, or point a route at it by absolute path`,
+        };
+      }
+      // Found is not the same as startable: a batch wrapper the bridge cannot
+      // run without a shell has to be reported here, not discovered at delivery.
+      const launch = launchSpec(resolved);
+      if ("error" in launch) return { mode: "headless", available: false, detail: launch.error };
+      const via = launch.file === resolved ? "" : ` (runs ${[launch.file, ...launch.prefixArgs].join(" ")})`;
+      return { mode: "headless", available: true, detail: `${route.command} → ${resolved}${via}` };
     }
     case "gateway": {
       const up = await probe(route.health);

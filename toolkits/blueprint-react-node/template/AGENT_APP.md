@@ -33,7 +33,8 @@ exactly one, and describe's root screen lists them. They are declared in
   duration where a token exists.
 - **Shared pieces live in `src/`** — `Icon.jsx` (the icon set), `toast.jsx`
   (`useToast`), `ConfirmDialog.jsx` (`useConfirm` — never `window.confirm`),
-  `format.js`, `api.js` (the one fetch wrapper). Screens compose them — one
+  `format.js`, `api.js` (the one fetch wrapper), `AgentTask.jsx` (work queued
+  for an agent, shown until it is done). Screens compose them — one
   implementation per widget, no per-screen copies, no native browser dialogs.
   Component styles live in `public/ui.css`.
 - **Every screen renders all of its states**: loading skeletons (sized so

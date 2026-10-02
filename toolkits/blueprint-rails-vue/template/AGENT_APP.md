@@ -34,7 +34,9 @@ exactly one, and describe's root screen lists them. They are declared in
 - **Shared pieces live in `ui/src/`** — `components/Icon.vue` (the icon set),
   `toast.js` + `components/ToastRegion.vue` (`useToast`), `confirm.js` +
   `components/ConfirmDialog.vue` (`useConfirm` — never `window.confirm`),
-  `format.js`, `api.js` (the one fetch wrapper). Screens compose them — one
+  `format.js`, `api.js` (the one fetch wrapper), `agentTask.js` +
+  `components/AgentTask{Panel,Badge}.vue` (work queued for an agent, shown
+  until it is done). Screens compose them — one
   implementation per widget, no per-screen copies, no native browser dialogs.
   Component styles live in `ui/public/ui.css`.
 - **Every screen renders all of its states**: loading skeletons (sized so

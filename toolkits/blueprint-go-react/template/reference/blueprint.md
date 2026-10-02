@@ -184,7 +184,9 @@ unbounded collection — page with `perPage`.
 **Shared pieces — `src/`** (one implementation each; import, don't rebuild):
 `<Icon name size>` · `useToast()` → `toast(kind, message)` ·
 `useConfirm()` → `[confirm, confirmElement]` (in-app dialog — never
-`window.confirm`) · `api(path, init)` · `fmtDay(dayKey)` · `isPastDay(dayKey)`.
+`window.confirm`) · `api(path, init)` · `fmtDay(dayKey)` · `isPastDay(dayKey)` ·
+`<AgentTaskPanel>` / `<AgentTaskBadge>` / `useAgentTask(id)` (`AgentTask.jsx` —
+work queued for an agent, shown until it is done; see **App→agent**).
 Component styles are plain CSS classes in `public/ui.css`.
 
 **Tokens — `public/tokens.css`:** the kit sheet — `--agent-app-*` foundation →
@@ -261,13 +263,39 @@ The starter's `request-triage` operation is the worked example.
 The queue only moves when something is listening: `agent-app <dir> bridge start`,
 or a harness polling `a2app <dir> tasks next --wait`.
 
-**Show the queued work in the View.** Keep the returned `taskId` on the record
-and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+**Show the queued work in the View — with `src/AgentTask.jsx`.** An agent run
+takes seconds to minutes, so the control that queued it has to show where it is
+until it is done. Keep the returned `taskId` on the record (a `readOnly` string
+field the runner sets, like the starter's `agentTask`), then render it:
+
+```jsx
+import { AgentTaskBadge, AgentTaskPanel } from "./AgentTask.jsx";
+
+<AgentTaskBadge taskId={rec.agentTask} />          // in the list row, beside the title
+<AgentTaskPanel taskId={rec.agentTask}             // full width: under the row, or on the record's screen
+  onSettled={reloadRecord} onRetry={askAgain} retrying={asking} />
+```
+
+The panel follows `GET /api/_a2app/tasks/{id}` while the run is unfinished and
+renders every state the creator skill lists: waiting with elapsed time (and "no
+agent is listening" after ~20 s), the agent's step and running time, the
+`result.summary` in its own readable block, and the failure `reason` with "Ask
+again". `useAgentTask(id)` gives you the same state to disable a control while a
+run is open. The starter's "Ask an agent" button is the worked example.
+
+Never put the result in a title cell or a narrow column. It is prose of any
+length, and the panel is where it goes.
+
+On a single-user app (`authMode: "none"`) the View needs no credential for the
+task read. **On a multi-user app it answers 401**, and the View has no other
+path to the queue yet. There, have the agent write its progress onto the record
+and pass it as `progress={{ status, step, summary, reason }}`; the panel and
+badge render it the same way. A 404 means the task has been pruned, so the
+indicator disappears.
+
+**`validate` checks this.** Its "agent work shown in the View" step fails an
+app whose code queues work (`trigger(…)` with a capability) when no View code
+renders the component or reads `/api/_a2app/tasks/`.
 
 ## Build, run, gate
 
@@ -278,7 +306,7 @@ hand.
 
 ```bash
 agent-app <dir> dev        # boot the candidate on a hidden port: fresh seeded store, prints the dev URL
-agent-app <dir> validate   # framework files → build → go vet + self-test → operations resolve → ownership canon → describe budget (on dev)
+agent-app <dir> validate   # framework files → build → go vet + self-test → operations resolve → agent work shown in View → ownership canon → describe budget (on dev)
 agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
 agent-app <dir> promote    # requires the gate pass; backup, go run . --promote-check, destroys the dev instance
 ```

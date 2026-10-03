@@ -2,14 +2,16 @@
  * The validation gate and the security gate.
  *
  * Stack-agnostic core: framework files valid → build (manifest pipeline) →
- * toolkit-defined steps (migrations, footguns, ops resolution) → ownership canon
- * (validation-gate item AND the one v1-required security-gate check).
+ * toolkit-defined steps (migrations, footguns, ops resolution) → agent work shown
+ * in the View → ownership canon (validation-gate item AND the one v1-required
+ * security-gate check).
  *
  * Every failure is machine-readable — `{ step, message }` — so an agent fixes it
  * without human interpretation.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { agentStateProblem, scanAgentState } from "./agentState.js";
 import { verifySystemHashes } from "./canon.js";
 import { validateFrameworkFiles } from "./frameworkFiles.js";
 import { DESCRIBE_BUDGET_CHARS } from "@a2app/rules";
@@ -111,6 +113,18 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
       runShell(step.run, projectDir);
     });
   }
+
+  // Work queued for an agent has to be visible where it was asked for. Static
+  // and stack-agnostic, so it holds for a hand-built app as much as a
+  // blueprint's; see agentState.ts for what counts.
+  runStep(errors, "agent work shown in the View (app→agent triggers)", () => {
+    const report = scanAgentState(projectDir);
+    const problem = agentStateProblem(report);
+    if (problem) throw new Error(problem);
+    if (report.triggers.length > 0 && report.viewFiles.length === 0) {
+      log.info("app→agent triggers queue work, but this app has no human View to show it in");
+    }
+  });
 
   // Operation resolution — every declared operation reaching a real
   // implementation — is stack-specific and can only run as a toolkit step. It

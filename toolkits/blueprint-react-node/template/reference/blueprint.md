@@ -178,7 +178,9 @@ unbounded collection — page with `perPage`.
 **Shared pieces — `src/`** (one implementation each; import, don't rebuild):
 `<Icon name size>` · `useToast()` → `toast(kind, message)` ·
 `useConfirm()` → `[confirm, confirmElement]` (in-app dialog — never
-`window.confirm`) · `api(path, init)` · `fmtDay(dayKey)` · `isPastDay(dayKey)`.
+`window.confirm`) · `api(path, init)` · `fmtDay(dayKey)` · `isPastDay(dayKey)` ·
+`<AgentTaskPanel>` / `<AgentTaskBadge>` / `useAgentTask(id)` (`AgentTask.jsx` —
+work queued for an agent, shown until it is done; see **App→agent triggers**).
 Component styles are plain CSS classes in `public/ui.css`.
 
 **Tokens — `public/tokens.css`:** the kit sheet — `--agent-app-*` foundation →
@@ -250,24 +252,39 @@ something — nothing is queued and no agent is ever handed it.
 The queue only moves when something is listening: `agent-app <dir> bridge start`,
 or a harness polling `a2app <dir> tasks next --wait`.
 
-**Show the queued work in the View.** An agent run takes seconds to minutes, so
-the control that queued it needs to show where it is (see the creator skill for
-the states to render). Keep `taskId` on the record (a `readOnly` string field
-the runner sets), then follow it from `src/`:
+**Show the queued work in the View — with `src/AgentTask.jsx`.** An agent run
+takes seconds to minutes, so the control that queued it has to show where it is
+until it is done. Keep the returned `taskId` on the record (a `readOnly` string
+field the runner sets, like the starter's `agentTask`), then render it:
 
-```js
-// poll only while unfinished; stop at completed / failed / canceled
-const t = await api(`/api/_a2app/tasks/${encodeURIComponent(record.agentTask)}`);
-// t.status · t.progress?.step · t.claim?.claimedAt · t.result?.summary · t.reason · t.pollAfterMs
+```jsx
+import { AgentTaskBadge, AgentTaskPanel } from "./AgentTask.jsx";
+
+<AgentTaskBadge taskId={rec.agentTask} />          // in the list row, beside the title
+<AgentTaskPanel taskId={rec.agentTask}             // full width: under the row, or on the record's screen
+  onSettled={reloadRecord} onRetry={askAgain} retrying={asking} />
 ```
 
-On a single-user app (`authMode: "none"`) the View needs no credential for this
-read. **On a multi-user app it answers 401.** A browser sends no `Origin` on a
-same-origin GET, so the adapter treats the read as an uncredentialled program,
-and the View has no other path to the queue yet. There, show what the agent
-writes to the record instead (a status or assignee it sets on claim and on
-finish). A 404 means the task has been pruned, so drop the indicator. Don't
-retry it.
+The panel follows `GET /api/_a2app/tasks/{id}` while the run is unfinished and
+renders every state the creator skill lists: waiting with elapsed time (and "no
+agent is listening" after ~20 s), the agent's step and running time, the
+`result.summary` in its own readable block, and the failure `reason` with "Ask
+again". `useAgentTask(id)` gives you the same state to disable a control while a
+run is open. The starter's "Ask an agent" button is the worked example.
+
+Never put the result in a title cell or a narrow column. It is prose of any
+length, and the panel is where it goes.
+
+On a single-user app (`authMode: "none"`) the View needs no credential for the
+task read. **On a multi-user app it answers 401**, and the View has no other
+path to the queue yet. There, have the agent write its progress onto the record
+and pass it as `progress={{ status, step, summary, reason }}`; the panel and
+badge render it the same way. A 404 means the task has been pruned, so the
+indicator disappears.
+
+**`validate` checks this.** Its "agent work shown in the View" step fails an
+app whose code queues work (`trigger(…)` with a capability) when no View code
+renders the component or reads `/api/_a2app/tasks/`.
 
 ## Build, run, gate
 
@@ -276,7 +293,7 @@ health at `/api/_a2app`). Never start a server by hand.
 
 ```bash
 agent-app <dir> dev        # boot the candidate on a hidden port: fresh seeded store, prints the dev URL
-agent-app <dir> validate   # framework files → build (vite) → schema loads → operations resolve → ownership canon → describe budget (on dev)
+agent-app <dir> validate   # framework files → build (vite) → schema loads → operations resolve → agent work shown in View → ownership canon → describe budget (on dev)
 agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
 agent-app <dir> promote    # requires the gate pass; backup, scripts/promote-apply.mjs, destroys the dev instance
 ```

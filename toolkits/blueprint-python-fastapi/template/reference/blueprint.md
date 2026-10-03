@@ -200,13 +200,17 @@ something — nothing is queued and no agent is handed it. The starter's
 The queue only moves when something is listening: `agent-app <dir> bridge start`,
 or a harness polling `a2app <dir> tasks next --wait`.
 
-**Show the queued work in the View.** Keep the returned `taskId` on the record
-and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+**Show the queued work in the View, if you add one.** This stack ships no human
+View, so the starter only keeps the returned `taskId` on the record (its
+`agentTask` field) for an agent or a later View to follow. If you add a View,
+it has to show that work until it is done: follow
+`GET /api/_a2app/tasks/{id}` while it is unfinished and render queued (with
+elapsed time, and "no agent is listening" after ~20 s) → working
+(`progress.step`) → done (`result.summary` in its own full-width block, never a
+title cell) or failed (`reason`, plus a way to ask again). The creator skill
+lists the states. On a multi-user app that read answers 401, so show what the
+agent writes to the record instead. `validate`'s "agent work shown in the View"
+step fails an app whose View does neither.
 
 ## Build, run, gate
 

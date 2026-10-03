@@ -11,6 +11,7 @@ const ICON_PATHS = {
   info: "M8 7.5V11m0-5.5v-.01M14.5 8a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0Z",
   inbox: "M1.5 9.5h3l1 2h5l1-2h3M2.5 3.5h11l1 6v3a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-3l1-6Z",
   refresh: "M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2.6h-2.6",
+  spark: "M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.4 3.4l2.1 2.1M10.5 10.5l2.1 2.1M3.4 12.6l2.1-2.1M10.5 5.5l2.1-2.1",
 };
 
 export default function Icon({ name, size = 16 }) {

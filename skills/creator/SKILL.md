@@ -253,8 +253,17 @@ Store the queue task id the trigger returns on the record, and have the View
 follow it (`GET /api/_a2app/tasks/{id}`, same origin, polled at its
 `pollAfterMs` only while unfinished). That read needs no credential on a
 single-user app only. On a multi-user app it answers 401, so there, have the
-agent write its progress onto the record and render that instead. Render
-every state, where the person asked:
+agent write its progress onto the record and render that instead.
+
+Blueprints that have a queue and a View ship this display as a shared piece:
+an agent-task **panel** and **badge** that follow the task and render every
+state below. `reference/blueprint.md` names the files, and the starter's
+"Ask an agent" button is the worked example. Use them rather than writing
+your own. **`validate` enforces this:** an app whose code queues work
+(`trigger(…)` with a capability) and whose View neither renders that component
+nor reads `/api/_a2app/tasks/` fails the gate.
+
+Render every state, where the person asked:
 
 - `submitted` — waiting to be picked up, with elapsed time. After ~20 s with no
   claim, say that no agent is listening and name `agent-app <dir> bridge start`.
@@ -264,9 +273,22 @@ every state, where the person asked:
 - `completed` — done, with `result.summary` if there is one. Re-read the data
   here, because the agent's writes are the answer.
 - `failed` / `canceled` — the `reason` in words, and a way to ask again.
+  Identical triggers dedupe to one task even after it has finished, so a
+  retry that sends the same payload gets the old failure back. Put the
+  previous task id in the payload (`{ task, previous }`) so asking again is a
+  new request, and disable the control while a run is open.
 
 A badge wherever the record appears in a list ("Agent working") is what lets
 someone leave the screen and come back.
+
+**Give the result room to be read.** An agent's answer is prose of any length:
+several sentences, line breaks, links. It gets its own full-width block, under
+the row or on the record's screen. Keep its line breaks, make its links links,
+and clamp long text behind "Show more" rather than letting it take over the
+page. Never append it to a title cell or put it in an existing narrow column.
+There it wraps a word or two per line and stretches the row down the screen.
+If the result matters after the run, have the agent write it to a field of its
+own and render that field the same way.
 
 ## Finish: boot the candidate, gate, then verify
 
@@ -276,12 +298,13 @@ someone leave the screen and come back.
    prints. While this instance is up, every `a2app` operate command and
    `validate` target it automatically. Then **`agent-app <dir> validate`** runs
    the gate (app-part consistency → build → migrations-on-a-fresh-db →
-   operations resolve → ownership canon → describe budget, measured on the dev
-   instance). On errors: read ALL of them, fix ALL of them, re-run `dev` (a
-   fresh boot picks up backend edits) and `validate` again. A step the gate
-   reports **UNCHECKED** did not pass — it could not run; with the dev instance
-   up, nothing should be unchecked. `validate` records the gate pass `promote`
-   will demand. Never start servers by hand.
+   operations resolve → agent work shown in the View → ownership canon →
+   describe budget, measured on the dev instance). On errors: read ALL of
+   them, fix ALL of them, re-run `dev` (a fresh boot picks up backend edits)
+   and `validate` again. A step the gate reports **UNCHECKED** did not pass —
+   it could not run; with the dev instance up, nothing should be unchecked.
+   `validate` records the gate pass `promote` will demand. Never start servers
+   by hand.
 2. **REALITY CHECK — look at what actually exists, not at what you wrote.** Success
    messages lie by omission; stored state does not. While the app runs:
    - `a2app <dir>` → does the root show the modules you declared, with the entity

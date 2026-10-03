@@ -48,13 +48,42 @@ npm i -g agent-app-framework
 
 This gives you and your AI agent two commands: **`agent-app`** (build, evolve, manage) and **`a2app`** (operate).
 
-**2. Connect it to your harness.** Install the framework **skills** into any harness — the universal route that works everywhere:
+**2. Connect it to your harness.** Choose one of two routes. Both need the CLI from step 1.
+
+*Skills (works with any harness).* Copy the framework skills into the folder where your harness loads `SKILL.md` skills:
 
 ```bash
-agent-app skills --install <your-harness-dir>
+agent-app skills --install <your-harness-skills-dir>   # e.g. .claude/skills
 ```
 
-For a deeper, in-harness experience, install the **plugin** for your harness instead (see [harness-plugins/](harness-plugins/) for OpenClaw, Claude Code, Hermes, dsh, and more).
+*Plugin (a deeper fit).* A plugin adds the skills plus commands, and in some harnesses a panel to see and manage your apps. For example:
+
+**[OpenClaw](harness-plugins/openclaw/)**
+
+```bash
+openclaw plugins install @craftos/agent-app-openclaw
+openclaw plugins enable a2app
+```
+
+Type `/agent-app build a CRM` in chat, or open the **Agent Apps** tab in the Control UI and click **New +**. To show your apps inside that tab, set `gateway.controlUi.embedSandbox: "trusted"` in your OpenClaw config (otherwise it wouldn't work).
+
+**[Pi](harness-plugins/pi/)**
+
+```bash
+pi install npm:@craftos/agent-app-pi
+```
+
+Type `/agent-app build a CRM` in Pi.
+
+**[deepseek-harness](harness-plugins/dsh/)**
+
+```bash
+dsh plugin --profile web add @craftos/agent-app-dsh
+```
+
+In the dsh web UI, click **Agent Apps** in the left sidebar and use **New +**, or ask the agent in chat to build an app.
+
+For Claude Code, Hermes, CraftBot, and other harnesses, see [harness-plugins/](harness-plugins/).
 
 **3. Describe what you want.** Tell your harness the app you need: a CRM, a dashboard, an expense tracker, anything. It refines the requirement, builds a full application to the Agent App Building Standard, verifies it, and launches it. Your need changes? Just tell the agent to evolve the agent app.
 
@@ -110,6 +139,19 @@ What is the difference between MCP, A2A, A2UI, and A2App? Each protocol has its 
 
 * * *
 
+## 📊 A2App vs MCP: token benchmark
+
+Tokens are what an AI agent spends on every message. We compared the same task on the same app, once with MCP (one tool per action) and once with A2App.
+
+<p align="center"><img src="assets/a2app-vs-mcp-tokens.svg" alt="Two line charts of tokens against actions in the app. To finish one task, MCP grows to 18,496 tokens at 100 actions while A2App stays near 6,917. To load what the app can do, MCP grows to 4,748 tokens while A2App is always 48."></p>
+
+- **Loading what the app can do.** MCP lists every action as a tool up front, so the list grows with the app: 4.7k tokens at 100 actions. A2App gives the agent one command of ~50 tokens, and the agent walks to what it needs.
+- **Finishing one task.** For very small apps, MCP costs slightly less because it needs fewer steps. Past about ~20 actions, A2App pulls ahead: 7k tokens at 100 actions, against 18k for MCP.
+
+<sub>Larger the app, better the token efficiency is for A2App</sub>
+
+* * *
+
 ## 🔧 Build from source
 
 ```bash
@@ -122,4 +164,4 @@ The normative contracts are the JSON Schemas in [spec/](spec/); the [conformance
 
 ## 📜 License
 
-[MIT](LICENSE)
+Yup. [MIT](LICENSE)

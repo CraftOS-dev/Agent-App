@@ -164,4 +164,4 @@ The normative contracts are the JSON Schemas in [spec/](spec/); the [conformance
 
 ## 📜 License
 
-[MIT](LICENSE)
+Yup. [MIT](LICENSE)

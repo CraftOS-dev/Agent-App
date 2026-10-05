@@ -85,6 +85,40 @@ verified by nobody. For each one, walk to it and confirm it is really there:
 A declared operation that cannot be walked to, or whose blocked reason
 contradicts the record, is a defect — report it like any other.
 
+**6c. Agent work (app→agent features)** — any control that queues work for an
+agent (an operation whose runner calls `trigger(…, capability)`; `validate`
+names each one) gets this walk, in the browser, without reloading the page
+between steps. You play the agent from a terminal, so nothing depends on a
+harness being installed:
+
+1. **Nobody listening.** With no bridge running, use the control. Within ~1 s
+   the screen shows the work as waiting, with an elapsed time that ticks.
+   Wait ~25 s: it now says that no agent is listening and how to start one
+   (`agent-app <dir> bridge start`). "Waiting…" with no end is a defect.
+2. **In progress.** `a2app <dir> tasks claim <id>`, then
+   `a2app <dir> tasks progress <id> --step "Reading the record"`. The screen
+   shows the agent working, the step text, and how long it has been running,
+   with no reload.
+3. **Done, with a readable result.** Complete it with a long, realistic
+   summary: several sentences, a line break and a URL
+   (`a2app <dir> tasks complete <id> --result '{"summary":"…"}'`). The result
+   appears in its own full-width block that reads like prose. Line breaks are
+   kept, the link is a link, and long text is clamped behind a "Show more"
+   (or similar). A result squeezed into an existing narrow column or appended
+   to a title cell, so it wraps a word or two per line or stretches the row, is
+   a defect. Any data the agent wrote is shown without a reload.
+4. **Failed.** Queue it again and fail it
+   (`a2app <dir> tasks complete <id> --reason "…"`). The reason shows in
+   words, and there is a way to ask again. Asking again must queue NEW work:
+   if the screen jumps straight back to the old failure, the retry is a no-op
+   (identical triggers dedupe to one task).
+5. **Come back later.** Leave the screen (or reload) mid-run. Wherever the
+   record appears in a list, a badge still says an agent is on it.
+
+Every state must be visible as it happens. One that is missing, frozen, or
+only appears after a refresh is a defect against Q5.7. Cite the step above
+and what the screen showed instead.
+
 **7. No fabricated data** — an unreachable external source shows an honest
 empty/offline state, never generated or random values standing in for real data.
 

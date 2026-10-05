@@ -32,6 +32,10 @@ pub fn entities() -> Value {
                 { "name": "due", "type": "string", "max": 10, "dayKey": true },
                 { "name": "notes", "type": "string", "max": 2000 },
                 { "name": "created", "type": "datetime", "readOnly": true },
+                // The queue task an agent is (or was last) working on for this
+                // record. The runner sets it; the View follows it, so the person
+                // can see the work they asked for until it is done.
+                { "name": "agentTask", "type": "string", "max": 64, "readOnly": true },
             ],
         },
     })
@@ -173,11 +177,27 @@ fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Va
 // a copy of the data, which would be stale by the time it is read. Nothing here
 // can widen what the agent may do: the payload is data on the other side, and
 // the capability names the kind of work, not a command to run.
+//
+// Identical triggers dedupe to ONE task, even after it has finished, so
+// asking again with the same payload would hand back the old failure.
+// Naming the previous task makes each request a new occurrence. The View
+// disables the control while a run is open, so a double click cannot
+// queue two.
+//
+// The task id goes on the record so the View can show the work until it is done
+// (view/AgentTask.jsx). The validate gate checks that it does.
 fn run_request_triage(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
     let task_id = args.get("task").and_then(Value::as_str).unwrap_or("");
-    if store.get_record("tasks", task_id).is_none() {
-        return Ok(json!({ "ok": false, "reason": "no such task" }));
+    let mut task = match store.get_record("tasks", task_id) {
+        Some(t) => t,
+        None => return Ok(json!({ "ok": false, "reason": "no such task" })),
+    };
+    let mut payload = json!({ "task": task_id });
+    if let Some(prev) = task.get("agentTask").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+        payload["previous"] = json!(prev);
     }
-    let fired = store.trigger("task.needs_triage", &json!({ "task": task_id }), Some("triage"))?;
+    let fired = store.trigger("task.needs_triage", &payload, Some("triage"))?;
+    task["agentTask"] = fired["taskId"].clone();
+    store.put_record("tasks", task);
     Ok(json!({ "ok": true, "task": task_id, "queued": fired["taskId"] }))
 }

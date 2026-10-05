@@ -10,6 +10,11 @@
  * This stack ships no update watcher (PocketBase serves static files with no
  * system-owned watcher route), so external changes show on the next read —
  * a reload, a filter switch, or your own re-read affordance.
+ *
+ * Agent work: "Ask an agent" queues a triage task (the `request-triage`
+ * operation). The row then shows it until it is done — a badge beside the
+ * title, and the full-width AgentTaskPanel under the row with the state, the
+ * elapsed time and, at the end, the agent's answer.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
@@ -17,6 +22,7 @@ import Icon from "./Icon.jsx";
 import { useToast } from "./toast.jsx";
 import { useConfirm } from "./ConfirmDialog.jsx";
 import { STATUS_LABEL, NEXT_STATUS, fmtDay, isPastDay } from "./format.js";
+import { AgentTaskBadge, AgentTaskPanel, useAgentTask } from "./AgentTask.jsx";
 
 const API = "/api/collections/tasks/records";
 const PER_PAGE = 100; // the client never renders an unbounded collection
@@ -40,6 +46,7 @@ export default function App() {
   const [phase, setPhase] = useState("loading"); // loading | ready | error
   const [errorMessage, setErrorMessage] = useState("");
   const [busy, setBusy] = useState(() => new Set()); // record ids with a write in flight
+  const [asking, setAsking] = useState(() => new Set()); // record ids with an agent request in flight
   const [adding, setAdding] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [title, setTitle] = useState("");
@@ -199,6 +206,33 @@ export default function App() {
     }
   };
 
+  /** Re-read one record and put the stored version in place. */
+  const reloadOne = async (id) => {
+    try {
+      const stored = await api(`${API}/${encodeURIComponent(id)}`);
+      setItems((prev) => prev.map((t) => (t.id === id ? stored : t)));
+    } catch {
+      /* the list's next refresh picks it up */
+    }
+  };
+
+  const askAgent = async (task) => {
+    setAsking((prev) => new Set(prev).add(task.id));
+    try {
+      const res = await api("/api/ops/request-triage", { method: "POST", body: JSON.stringify({ task: task.id }) });
+      if (res?.result?.ok === false) throw new Error(res.result.reason ?? "The app refused the request.");
+      await reloadOne(task.id); // the stored record carries the task id the panel follows
+    } catch (err) {
+      toast("error", `Could not ask an agent about "${task.title}". ${err.message}`);
+    } finally {
+      setAsking((prev) => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
+    }
+  };
+
   const showMore = async () => {
     setLoadingMore(true);
     try {
@@ -302,7 +336,10 @@ export default function App() {
                     key={task.id}
                     task={task}
                     busy={busy.has(task.id)}
+                    asking={asking.has(task.id)}
                     onAdvance={() => advanceStatus(task)}
+                    onAsk={() => askAgent(task)}
+                    onAgentSettled={() => reloadOne(task.id)}
                     onDelete={() => deleteTask(task)}
                   />
                 ))}
@@ -336,9 +373,12 @@ export default function App() {
 
 /* ------------------------------------------------------------ components */
 
-function TaskRow({ task, busy, onAdvance, onDelete }) {
+function TaskRow({ task, busy, asking, onAdvance, onAsk, onAgentSettled, onDelete }) {
   const st = task.status ?? "todo";
   const overdue = task.due && isPastDay(task.due) && st !== "done";
+  // Shares the panel's poller: knowing whether a run is in flight costs no extra request.
+  const agent = useAgentTask(task.agentTask);
+  const agentBusy = asking || (agent.task && !["completed", "failed", "canceled"].includes(agent.task.status));
   return (
     <li className={`task${st === "done" ? " done" : ""}${busy ? " busy" : ""}`}>
       {/* status: a labelled 3-state control; colour is never the only channel */}
@@ -354,14 +394,36 @@ function TaskRow({ task, busy, onAdvance, onDelete }) {
       <span className="title" title={task.title}>
         {task.title}
       </span>
+      {task.agentTask && <AgentTaskBadge taskId={task.agentTask} />}
       {task.due && (
         <span className={`due${overdue ? " overdue" : ""}`}>
           {overdue ? `Overdue · ${fmtDay(task.due)}` : `Due ${fmtDay(task.due)}`}
         </span>
       )}
+      {st !== "done" && (
+        <button
+          className="btn-icon"
+          type="button"
+          title="Ask an agent to triage this"
+          aria-label={`Ask an agent to triage "${task.title}"`}
+          disabled={agentBusy}
+          onClick={onAsk}
+        >
+          <Icon name="spark" />
+        </button>
+      )}
       <button className="btn-icon danger" type="button" aria-label={`Delete task "${task.title}"`} onClick={onDelete}>
         <Icon name="trash" />
       </button>
+      {task.agentTask && (
+        <AgentTaskPanel
+          taskId={task.agentTask}
+          title={`Agent triage of "${task.title}"`}
+          onSettled={onAgentSettled}
+          onRetry={st !== "done" ? onAsk : undefined}
+          retrying={asking}
+        />
+      )}
     </li>
   );
 }

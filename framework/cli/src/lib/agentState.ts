@@ -55,7 +55,7 @@ export const RULE_POINTER =
 
 const SKIP_DIRS = new Set([
   "node_modules", ".git", ".a2app", ".lui", "dist", "build", "out", "target", "public",
-  "data", "pb_data", "vendor", "tmp", "log", "logs", "coverage", "__pycache__", ".venv",
+  "data", "pb_data", "pb_public", "vendor", "tmp", "log", "logs", "coverage", "__pycache__", ".venv",
   "venv", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache",
   "test", "tests", "__tests__", "spec",
 ]);

@@ -9,6 +9,10 @@
  {
  "name": "hooks syntax + rules self-test",
  "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app_impl.js && node --check pb/pb_hooks/_a2app.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest"
+ },
+ {
+ "name": "operations resolve (every declared op has a runner)",
+ "run": "node -e \"const fs=require('fs');const ops=fs.existsSync('operations.json')?(JSON.parse(fs.readFileSync('operations.json','utf8')).operations||[]):[];const has=fs.existsSync('pb/pb_hooks/operations.js');const r=has?(require('./pb/pb_hooks/operations.js').runners||{}):{};const missing=ops.filter(o=>typeof r[o.name]!=='function').map(o=>o.name);if(missing.length){console.error('declared in operations.json with no runner in pb/pb_hooks/operations.js: '+missing.join(', '));process.exit(1)}process.stdout.write('operations resolve ok\\n')\""
  }
  ],
  "lifecycle": {

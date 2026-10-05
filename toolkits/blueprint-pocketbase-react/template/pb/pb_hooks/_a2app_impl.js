@@ -1064,6 +1064,7 @@ function runOperation(e, name) {
     $app.runInTransaction((tx) => {
       const a2app = {
         app: tx,
+        getTask: (id) => loadTask(tx.db(), id),
         trigger: (type, payload, capability) => triggerWith(tx, env, type, payload, capability),
         error: operationError,
       };

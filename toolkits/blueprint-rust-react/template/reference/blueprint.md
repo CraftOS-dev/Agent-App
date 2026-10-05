@@ -128,7 +128,7 @@ pub fn operation_runner(name: &str) -> Option<Runner> {
     }
 }
 
-fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let id = args.get("task").and_then(Value::as_str).unwrap_or("");
     let mut task = match store.get_record("tasks", id) {
         Some(t) => t,
@@ -140,9 +140,11 @@ fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Va
 }
 ```
 
-- **Runner signature:** `fn(&Value, &Value, &mut Store) -> Result<Value, String>`
-  — (args, ctx, store) to a JSON-able result; an `Err` surfaces as a 500
-  `operation_failed` envelope. `store` is the SQLite-backed record store —
+- **Runner signature:** `fn(&Value, &Value, &mut Store) -> Result<Value, OperationError>`
+  — (args, ctx, store) to a JSON-able result or a structured refusal. String
+  errors convert with `?` / `.into()` to 500 `operation_failed`. Import
+  `OperationError` from `crate::a2app_adapter`. `store` is the SQLite-backed
+  record store —
   `list_records(entity, query)` · `get_record(entity, id)` ·
   `put_record(entity, record)` · `delete_record(entity, id)`. Writes are
   durable when the call returns; there is no separate persist() step.
@@ -228,7 +230,7 @@ pub fn events() -> Value {
     json!([{ "type": "invoice.needs_review" }]) // every type a runner fires
 }
 
-fn run_request_review(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_request_review(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let id = args.get("invoice").and_then(Value::as_str).unwrap_or("");
     let fired = store.trigger("invoice.needs_review", &json!({ "invoice": id }), Some("review"))?;
     Ok(json!({ "ok": true, "queued": fired["taskId"] }))
@@ -241,6 +243,16 @@ capability is given, puts a task on the app's queue; it returns
 queued and no agent is handed it. An undeclared type is an `Err`. The starter's
 `request-triage` operation is the worked example.
 
+- **Refuse while the record has unfinished agent work.** Read its current
+  queue task with `store.get_task(id)`. `submitted`, `working` and
+  `input-required` answer HTTP 409 `already_queued`, naming `taskId`, before
+  emitting an event or writing anything. Only terminal tasks (`completed`,
+  `failed`, `canceled`) permit a re-ask with `previous`. A missing task answers
+  409 `agent_task_unavailable`; failed reads also refuse.
+  The server processes requests serially and each runner exclusively borrows
+  the store. Keep the check, enqueue and record update in one runner. A disabled View control cannot guard CLI calls
+  or another tab. Raise/return `OperationError { status: 409, code: "already_queued".into(), message: "...".into(), extra: json!({ "taskId": id }) }`
+  for a structured refusal; ordinary errors remain 500 `operation_failed`.
 - **Declare the type in `events()` first.** A type that is not declared is
   refused at the moment of firing — inside the operation, in front of a user.
 - **Firing the same occurrence twice makes one task.** The same type,

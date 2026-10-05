@@ -1007,8 +1007,9 @@ type Store struct {
 
 	// One mutex guards everything: net/http serves concurrently, and one
 	// connection guarded by one lock keeps SQLite correct without a pool.
-	mu sync.Mutex
-	db *sql.DB // nil for the in-memory variant
+	mu          sync.Mutex
+	operationMu sync.Mutex // held across each whole runner, including enqueue + record write
+	db          *sql.DB    // nil for the in-memory variant
 
 	rows      map[string]map[string]M
 	rowOrder  map[string][]string // insertion order, so listing is deterministic
@@ -1474,8 +1475,19 @@ func randomHex(nBytes int) string {
 }
 
 // OperationRunner is the signature schema.go implements: (args, ctx, store) ->
-// JSON-able result. Returning an error (or panicking) becomes operation_failed.
+// JSON-able result. Return *OperationError for a deliberate HTTP refusal;
+// ordinary errors and panics become 500 operation_failed.
 type OperationRunner func(args M, ctx M, store *Store) (any, error)
+
+// OperationError preserves a runner's deliberate refusal on the HTTP surface.
+type OperationError struct {
+	Status  int
+	Code    string
+	Message string
+	Extra   M
+}
+
+func (e *OperationError) Error() string { return e.Message }
 
 // AdapterConfig is everything the wiring (main.go) hands the adapter.
 type AdapterConfig struct {
@@ -2745,6 +2757,10 @@ func (a *Adapter) handleOperation(headers map[string]string, name string, args M
 	}
 	result, err := a.runOperation(runner, args, ctx)
 	if err != nil {
+		var refusal *OperationError
+		if errors.As(err, &refusal) {
+			return errEnv(refusal.Status, refusal.Code, refusal.Message, refusal.Extra)
+		}
 		return errEnv(500, "operation_failed", `Operation "`+name+`" threw: `+err.Error(), nil)
 	}
 	if !getBool(decl, "readOnly") {
@@ -2756,6 +2772,8 @@ func (a *Adapter) handleOperation(headers map[string]string, name string, args M
 // runOperation shields the surface from a runner that panics: app code failing
 // must answer operation_failed, never take the process down mid-request.
 func (a *Adapter) runOperation(runner OperationRunner, args M, ctx M) (result any, err error) {
+	a.store.operationMu.Lock()
+	defer a.store.operationMu.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%v", r)

@@ -130,9 +130,8 @@ module A2appSchema
     #
     # Identical triggers dedupe to ONE task, even after it has finished, so
     # asking again with the same payload would hand back the old failure.
-    # Naming the previous task makes each request a new occurrence. The View
-    # disables the control while a run is open, so a double click cannot
-    # queue two.
+    # Naming the previous task makes each request a new occurrence. The runner
+    # must refuse while that task is open, including CLI and second-tab calls.
     #
     # The task id goes on the record so the View can show the work until it
     # is done (ui/src/components/AgentTaskPanel.vue). The validate gate checks
@@ -141,7 +140,14 @@ module A2appSchema
       task = store.get_record("tasks", args["task"])
       next { "ok" => false, "reason" => "no such task" } if task.nil?
       payload = { "task" => task["id"] }
-      payload["previous"] = task["agentTask"] if task["agentTask"].is_a?(String) && !task["agentTask"].empty?
+      if task["agentTask"].is_a?(String) && !task["agentTask"].empty?
+        current = store.get_task(task["agentTask"])
+        raise A2appAdapter::OperationError.new(409, "agent_task_unavailable", "The previous agent task could not be found.", { "taskId" => task["agentTask"] }) if current.nil?
+        unless %w[completed failed canceled].include?(current["status"])
+          raise A2appAdapter::OperationError.new(409, "already_queued", "This record already has unfinished agent work.", { "taskId" => task["agentTask"] })
+        end
+        payload["previous"] = task["agentTask"]
+      end
       fired = store.trigger("task.needs_triage", payload, "triage")
       task["agentTask"] = fired["taskId"]
       store.put_record("tasks", task)

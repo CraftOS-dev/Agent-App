@@ -484,6 +484,14 @@ _FILTER_RE = re.compile(
 )
 
 
+class OperationError(Exception):
+    """A runner's explicit HTTP refusal; ordinary exceptions remain 500s."""
+
+    def __init__(self, status: int, code: str, message: str, **extra):
+        super().__init__(message)
+        self.status, self.code, self.extra = status, code, extra
+
+
 class UnsupportedFilter(Exception):
     """Raised when a `filter` expression falls outside the grammar above."""
 
@@ -564,6 +572,8 @@ class Store:
         self.dedup: dict[str, str] = {}
         self._task_seq = 0
         self._event_seq = 0
+        # Serialize whole runners, not just individual database calls.
+        self.operation_lock = threading.Lock()
 
     # records ---------------------------------------------------------------
     def _all_records(self, entity: str) -> list[dict]:
@@ -1597,8 +1607,11 @@ class Adapter:
         if not runner:
             return self._err(501, "not_implemented", f'This app declares "{name}" but implements no operation runner.')
         try:
-            result = runner(args, ctx, self.store)
+            with self.store.operation_lock:
+                result = runner(args, ctx, self.store)
             return 200, {"a2app": True, "ok": True, "operation": name, "result": result}
+        except OperationError as e:
+            return self._err(e.status, e.code, str(e), **e.extra)
         except Exception as e:  # noqa: BLE001
             return self._err(500, "operation_failed", f'Operation "{name}" threw: {e}')
 

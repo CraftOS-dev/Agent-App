@@ -14,7 +14,7 @@
  *
  *   args   the guarded arguments, as plain JS.
  *   ctx    who is calling: { credentialId, agentName, principal }.
- *   a2app  { app, trigger, error }:
+ *   a2app  { app, trigger, getTask, error }:
  *          app      the PocketBase app to read and write through —
  *                   `a2app.app.findRecordById(...)`, `a2app.app.save(record)`.
  *                   It is a TRANSACTION: everything the runner writes, and every
@@ -25,7 +25,8 @@
  *                   a capability is named, queue a task for an agent. Returns
  *                   { eventId, taskId }. An event type missing from `events`
  *                   below is refused.
- *          error    (status, code, message) — `throw a2app.error(409, "already_done",
+ *          getTask  (id) — read the agent task inside this transaction, or null.
+ *          error    (status, code, message, extra?) — `throw a2app.error(409, "already_done",
  *                   "…")` refuses with your own status and code.
  *
  * Return a plain, JSON-able value; it is the `result` of the call. Anything a
@@ -91,9 +92,8 @@ module.exports = {
     //
     // Identical triggers dedupe to ONE task, even after it has finished, so
     // asking again with the same payload would hand back the old failure.
-    // Naming the previous task makes each request a new occurrence. The View
-    // disables the control while a run is open, so a double click cannot queue
-    // two.
+    // Naming the previous task makes each request a new occurrence. The runner
+    // must refuse while that task is open, including CLI and second-tab calls.
     //
     // The task id goes on the record so the View can show the work until it is
     // done (ui/src/AgentTask.jsx). The validate gate checks that it does.
@@ -102,7 +102,14 @@ module.exports = {
       if (!task) return { ok: false, reason: "no such task" };
       const payload = { task: task.id };
       const previous = task.getString("agentTask");
-      if (previous) payload.previous = previous;
+      if (previous) {
+        const current = a2app.getTask(previous);
+        if (!current) throw a2app.error(409, "agent_task_unavailable", "The previous agent task could not be found.", { taskId: previous });
+        if (["completed", "failed", "canceled"].indexOf(current.status) < 0) {
+          throw a2app.error(409, "already_queued", "This record already has unfinished agent work.", { taskId: previous });
+        }
+        payload.previous = previous;
+      }
       const fired = a2app.trigger("task.needs_triage", payload, "triage");
       task.set("agentTask", fired.taskId);
       a2app.app.save(task);

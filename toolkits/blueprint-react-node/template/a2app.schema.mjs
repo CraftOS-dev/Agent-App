@@ -96,7 +96,9 @@ export const schema = {
   // about.
   events: [{ type: "task.needs_triage" }],
 
-  // Runner signature: (args, ctx, { store, trigger }) => jsonable result. `store` is the
+  // Runner signature: (args, ctx, { store, trigger, getTask, error }) => JSON.
+  // `getTask(id)` reads queue state; throw `error(status, code, message, extra)`
+  // for a deliberate HTTP refusal. `store` is the
   // SQLite-backed record store — list(entity) · get(entity, id) · put(entity,
   // record) · remove(entity, id). Writes are durable when the call returns;
   // there is no separate persist() step on this stack. `trigger(type, payload,
@@ -132,15 +134,21 @@ export const schema = {
     //
     // Identical triggers dedupe to ONE task, even after it has finished, so
     // asking again with the same payload would hand back the old failure.
-    // Naming the previous task makes each request a new occurrence. The View
-    // disables the control while a run is open, so a double click cannot
-    // queue two.
+    // Naming the previous task makes each request a new occurrence. The runner
+    // must refuse while that task is open, including CLI and second-tab calls.
     //
     // The task id goes on the record so the View can show the work until it is
     // done (src/AgentTask.jsx). The validate gate checks that it does.
-    "request-triage": (args, _ctx, { store, trigger }) => {
+    "request-triage": (args, _ctx, { store, trigger, getTask, error }) => {
       const task = store.get("tasks", args?.task);
       if (!task) return { ok: false, reason: "no such task" };
+      if (task.agentTask) {
+        const current = getTask(task.agentTask);
+        if (!current) throw error(409, "agent_task_unavailable", "The previous agent task could not be found.", { taskId: task.agentTask });
+        if (!["completed", "failed", "canceled"].includes(current.status)) {
+          throw error(409, "already_queued", "This record already has unfinished agent work.", { taskId: task.agentTask });
+        }
+      }
       const payload = task.agentTask ? { task: task.id, previous: task.agentTask } : { task: task.id };
       const { taskId } = trigger("task.needs_triage", payload, "triage");
       task.agentTask = taskId;

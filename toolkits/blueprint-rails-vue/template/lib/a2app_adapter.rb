@@ -27,6 +27,15 @@ require "uri"
 require "fileutils"
 
 module A2appAdapter
+  class OperationError < StandardError
+    attr_reader :status, :code, :extra
+
+    def initialize(status, code, message, extra = {})
+      super(message)
+      @status, @code, @extra = status, code, extra
+    end
+  end
+
   RULES_VERSION = "0.1.0"
   PROTOCOL_VERSION = "0.1"
   ADAPTER_VERSION = "0.1.0"
@@ -867,6 +876,7 @@ module A2appAdapter
       @auth_mode = auth_mode
       @allowed_origins = (allowed_origins || []).to_h { |o| [o, true] }
       @runners = operation_runners || {}
+      @operation_lock = Mutex.new
       @credential_hint = credential_hint || "Read the app's .agent-token file (mode 0600) in the project directory."
       @env = env
       # Deliberate small extension over the python oracle: dispatch owns the
@@ -1633,8 +1643,10 @@ module A2appAdapter
         return err(501, "not_implemented", "This app declares \"#{name}\" but implements no operation runner.")
       end
       begin
-        result = runner.call(args, ctx, @store)
+        result = @operation_lock.synchronize { runner.call(args, ctx, @store) }
         [200, { "a2app" => true, "ok" => true, "operation" => name, "result" => result }]
+      rescue OperationError => e
+        err(e.status, e.code, e.message, e.extra)
       rescue StandardError => e
         err(500, "operation_failed", "Operation \"#{name}\" threw: #{e.message}")
       end

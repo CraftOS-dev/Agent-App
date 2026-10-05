@@ -222,7 +222,7 @@ compromised app from steering it.
 trigger("invoice.needs_review", { invoice: rec.id }, "review")
 ```
 
-Three rules, and the first is the one that bites:
+Four rules:
 
 - **Declare the event type** wherever your blueprint declares them. An
   undeclared type is refused at the moment of firing — inside an operation, in
@@ -234,6 +234,15 @@ Three rules, and the first is the one that bites:
   data, and an agent that obeys it is misbehaving.
 - **Only where agent judgment adds value.** Plain events want plain code. Make
   the work idempotent — a task can be redelivered if an agent dies holding it.
+- **Refuse new work while the record already has unfinished agent work.** In
+  the operation runner, read the queue task named by the record's `agentTask`.
+  `submitted`, `working` and `input-required` must answer HTTP 409
+  `already_queued`, naming the existing task id, before emitting an event or
+  writing anything. Only a terminal task (`completed`, `failed`, `canceled`)
+  permits a re-ask with `previous`. Serialize the check, enqueue and record
+  update together; a disabled View control cannot enforce this for CLI calls
+  or another tab. If the task cannot be read, refuse rather than assume it
+  finished. Use the starter's runner and its regression tests as the example.
 
 **This is stack-specific, and not every blueprint has it** — `reference/blueprint.md`
 says whether yours does and how to reach it. If it does not, handle the event

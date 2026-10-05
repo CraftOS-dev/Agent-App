@@ -20,7 +20,7 @@
   "gate": [
     {
       "name": "ruby syntax + adapter self-test",
-      "run": "ruby -c lib/a2app_adapter.rb && ruby -c lib/a2app_schema.rb && ruby -c app/controllers/a2app_controller.rb && ruby lib/a2app_adapter.rb --selftest"
+      "run": "ruby -c lib/a2app_adapter.rb && ruby -c lib/a2app_schema.rb && ruby -c app/controllers/a2app_controller.rb && ruby lib/a2app_adapter.rb --selftest && ruby test/triage_test.rb"
     },
     {
       "name": "operations resolve (every declared op has a runner)",

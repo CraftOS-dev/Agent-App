@@ -245,6 +245,16 @@ capability is non-empty, puts a task on the app's queue; it returns
 — nothing is queued and no agent is handed it. An undeclared type is an error.
 The starter's `request-triage` operation is the worked example.
 
+- **Refuse while the record has unfinished agent work.** Read its current
+  queue task with `store.getTask(id)`. `submitted`, `working` and
+  `input-required` answer HTTP 409 `already_queued`, naming `taskId`, before
+  emitting an event or writing anything. Only terminal tasks (`completed`,
+  `failed`, `canceled`) permit a re-ask with `previous`. A missing task answers
+  409 `agent_task_unavailable`; failed reads also refuse.
+  The adapter serializes complete runners with a mutex. Keep the check,
+  enqueue and record update in one runner. A disabled View control cannot guard CLI calls
+  or another tab. Raise/return `&OperationError{Status: 409, Code: "already_queued", Message: "...", Extra: M{"taskId": id}}`
+  for a structured refusal; ordinary errors remain 500 `operation_failed`.
 - **Declare the type in `EVENTS` first.** A type that is not declared is
   refused at the moment of firing — inside the operation, in front of a user.
 - **Firing the same occurrence twice makes one task.** The same type,

@@ -1575,9 +1575,23 @@ impl Access {
     }
 }
 
-/// One operation runner: (args, ctx, store) -> JSON-able result or an error
-/// string (surfaced as a 500 operation_failed envelope).
-pub type Runner = fn(&Value, &Value, &mut Store) -> Result<Value, String>;
+/// A runner's explicit refusal, or an ordinary failure converted from String.
+#[derive(Debug)]
+pub struct OperationError {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+    pub extra: Value,
+}
+
+impl From<String> for OperationError {
+    fn from(message: String) -> Self {
+        Self { status: 500, code: "operation_failed".into(), message, extra: json!({}) }
+    }
+}
+
+/// One operation runner. String errors still convert to 500 operation_failed.
+pub type Runner = fn(&Value, &Value, &mut Store) -> Result<Value, OperationError>;
 /// Runner resolution by operation name — `schema::operation_runner`.
 pub type RunnerLookup = fn(&str) -> Option<Runner>;
 
@@ -2795,7 +2809,17 @@ impl Adapter {
         };
         match runner(args, &ctx, &mut self.store) {
             Ok(result) => (200, json!({ "a2app": true, "ok": true, "operation": name, "result": result })),
-            Err(e) => Self::err(500, "operation_failed", &format!("Operation \"{name}\" threw: {e}")),
+            Err(e) => {
+                let extra: Vec<(&str, Value)> = e.extra.as_object()
+                    .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .unwrap_or_default();
+                let message = if e.status == 500 && e.code == "operation_failed" {
+                    format!("Operation \"{name}\" threw: {}", e.message)
+                } else {
+                    e.message.clone()
+                };
+                Self::err_with(e.status, &e.code, &message, &extra)
+            },
         }
     }
 

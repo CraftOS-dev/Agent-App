@@ -15,7 +15,7 @@
   "gate": [
     {
       "name": "python syntax + adapter self-test",
-      "run": "python -m py_compile a2app_adapter.py main.py schema.py scripts/promote_apply.py && python a2app_adapter.py --selftest"
+      "run": "python -m py_compile a2app_adapter.py main.py schema.py scripts/promote_apply.py && python a2app_adapter.py --selftest && python -m unittest test_triage"
     },
     {
       "name": "operations resolve (every declared op has a runner)",

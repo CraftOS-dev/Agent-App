@@ -190,6 +190,8 @@ export function renderPrompt(task: Task, ctx: PromptContext): string {
     `  capability  ${task.request.capability}`,
     ``,
     `This task is already claimed for you — do not claim it again.`,
+    `Do the requested work directly. Do not run operations that queue more agent`,
+    `work for the record you were handed (for example, request-triage).`,
     ``,
     ...(ctx.cwdIsApp ? [`You are already in the app's directory, so it is addressed below as \`.\`.`, ``] : []),
     `Operate the app with the a2app CLI, never by driving its UI. Start at`,

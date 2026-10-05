@@ -224,7 +224,15 @@ runners: {
   "request-triage": (args, _ctx, a2app) => {
     const task = a2app.app.findRecordById("tasks", args.task);
     const payload = { task: task.id };
-    if (task.getString("agentTask")) payload.previous = task.getString("agentTask");
+    const previous = task.getString("agentTask");
+    if (previous) {
+      const current = a2app.getTask(previous);
+      if (!current) throw a2app.error(409, "agent_task_unavailable", "Previous task missing.", { taskId: previous });
+      if (["completed", "failed", "canceled"].indexOf(current.status) < 0) {
+        throw a2app.error(409, "already_queued", "Unfinished agent work exists.", { taskId: previous });
+      }
+      payload.previous = previous;
+    }
     const { taskId } = a2app.trigger("task.needs_triage", payload, "triage");
     task.set("agentTask", taskId);
     a2app.app.save(task);
@@ -240,6 +248,14 @@ something — nothing is queued and no agent is ever handed it.
 - **The type must be in `events`.** The adapter refuses an undeclared type at
   fire time, inside the operation, so a typo works in review and fails in front
   of a user — the operation answers `operation_failed` and rolls back.
+- **Refuse while the record has unfinished agent work.** `a2app.getTask(id)`
+  reads its queue task in the same transaction as `a2app.trigger` and record
+  writes. `submitted`, `working` and `input-required` answer 409
+  `already_queued` with `taskId`, before any event or write. Only terminal tasks
+  (`completed`, `failed`, `canceled`) permit a new occurrence with `previous`.
+  A missing task answers 409 `agent_task_unavailable`; failed reads also refuse.
+  Throw `a2app.error(status, code, message, extra)` for a deliberate refusal.
+  A disabled View control alone cannot guard CLI calls or a second tab.
 - **Send ids.** The agent re-reads the record; a copy in the payload is stale by
   the time it is read, and prose there is an instruction the app does not get to
   give.

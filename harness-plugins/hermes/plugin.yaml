@@ -1,17 +1,30 @@
-name: agent_app
+name: agent-app
 version: 0.1.0
-description: "Build, evolve, and operate Agent Apps via the framework CLIs: agent-app (build/evolve — scaffold, validate) and a2app (A2App operate — describe, records CRUD, declared operations, task polling)."
-author: Agent App Framework
-kind: backend
+description: "Build, evolve, and operate Agent Apps through the agent-app and a2app CLIs. Adds the /agent-app command, `hermes agent-app`, the six framework skills, the build + operate tools, and an Agent Apps dashboard tab."
+author: CraftOS
+license: MIT
+homepage: https://github.com/CraftOS-dev/Agent-App
+# Explicit, not defaulted: the loader reclassifies a kind-less plugin whose
+# code mentions certain provider symbols, and a standalone plugin is exactly
+# what this is (user plugins of every kind still need `hermes plugins enable`).
+kind: standalone
 provides_tools:
   - agent_app_describe
+  - agent_app_find
   - agent_app_list
   - agent_app_get
   - agent_app_create
   - agent_app_update
   - agent_app_delete
-  - agent_app_find
   - agent_app_run_operation
   - agent_app_poll_tasks
+  - agent_app_next_task
+  - agent_app_task_progress
+  - agent_app_complete_task
   - agent_app_build
   - agent_app_validate
+  - agent_app_serve
+  - agent_app_stop
+  - agent_app_open
+provides_hooks:
+  - pre_gateway_dispatch

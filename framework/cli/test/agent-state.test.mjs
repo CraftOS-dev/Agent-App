@@ -154,10 +154,14 @@ try {
     const r = app("deps-and-tests", {
       "node_modules/pkg/index.js": RUNNER,
       "dist/assets/app.js": RUNNER,
+      "pb/pb_public/assets/index.js": "fetch('/api/_a2app/tasks/' + id);",
       "test/ask.test.mjs": RUNNER,
       "src/App.jsx": "export default () => <p />;",
     });
     check("dependencies, build output and tests are not scanned", r.triggers.length, 0);
+    // PocketBase's compiled View: it holds whatever the source imported, so it
+    // must not stand in for View code that follows the task.
+    check("a built bundle does not count as showing the work", r.followers, []);
   }
 
   /* ------------------------------- the shipped starters pass their own gate */
@@ -167,6 +171,7 @@ try {
     ["blueprint-go-react", true],
     ["blueprint-rust-react", true],
     ["blueprint-rails-vue", true],
+    ["blueprint-pocketbase-react", true],
     ["blueprint-python-fastapi", false],
   ]) {
     // A raw template has no ownership canon yet; the toolkit's systemPaths are

@@ -83,6 +83,8 @@ if (typeof runner === "function") {
       calls.push({ type, payload, capability });
       return { eventId: "ev_1", taskId: "tsk_1" };
     },
+    getTask: () => ({ status: "working" }),
+    error: (status, code, message, extra) => Object.assign(new Error(message), { status, code, ...extra }),
   };
 
   const result = runner({ task: "task_welcome" }, {}, toolbox);

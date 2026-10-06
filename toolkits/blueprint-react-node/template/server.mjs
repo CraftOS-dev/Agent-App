@@ -10,7 +10,7 @@
  * `schemaVersion` are derived from the live schema, an agent always sees the
  * true model.
  */
-import { createA2App, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
+import { createA2App, createStaticView, OperationError, UnsupportedFilterError } from "@a2app/adapter-core";
 import { serve } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import { Hono } from "hono";
@@ -225,6 +225,8 @@ const binding = {
     // always after boot.
     return runner(args, ctx, {
       store,
+      getTask: (id) => a2app.store.getTask(id),
+      error: (status, code, message, extra) => new OperationError(code, message, status, extra),
       /** Emit a declared event, and enqueue a task when `capability` is given. */
       trigger: (type, payload, capability) => a2app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}) }),
     });

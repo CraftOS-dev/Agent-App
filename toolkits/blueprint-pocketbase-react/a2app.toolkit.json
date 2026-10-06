@@ -8,7 +8,7 @@
  "gate": [
  {
  "name": "hooks syntax + rules self-test",
- "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app_impl.js && node --check pb/pb_hooks/_a2app.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest"
+ "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app_impl.js && node --check pb/pb_hooks/_a2app.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest && node scripts/test-triage.cjs"
  },
  {
  "name": "operations resolve (every declared op has a runner)",

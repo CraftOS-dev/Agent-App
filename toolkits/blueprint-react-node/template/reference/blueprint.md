@@ -224,10 +224,20 @@ handle that enqueues agent work is not yours to reach directly — you get it as
 events: [{ type: "task.needs_triage" }],
 
 operationRunners: {
-  "request-triage": (args, _ctx, { store, trigger }) => {
+  "request-triage": (args, _ctx, { store, trigger, getTask, error }) => {
     const task = store.get("tasks", args?.task);
     if (!task) return { ok: false, reason: "no such task" };
-    const { taskId } = trigger("task.needs_triage", { task: task.id }, "triage");
+    if (task.agentTask) {
+      const current = getTask(task.agentTask);
+      if (!current) throw error(409, "agent_task_unavailable", "Previous task missing.", { taskId: task.agentTask });
+      if (!["completed", "failed", "canceled"].includes(current.status)) {
+        throw error(409, "already_queued", "Unfinished agent work exists.", { taskId: task.agentTask });
+      }
+    }
+    const payload = task.agentTask ? { task: task.id, previous: task.agentTask } : { task: task.id };
+    const { taskId } = trigger("task.needs_triage", payload, "triage");
+    task.agentTask = taskId;
+    store.put("tasks", task);
     return { ok: true, queued: taskId };
   },
 },
@@ -242,6 +252,14 @@ something — nothing is queued and no agent is ever handed it.
   inside the operation, so an undeclared type is a feature that works in review
   and fails in front of a user. `test/app-to-agent.test.mjs` checks the two
   agree.
+- **Refuse while the record has unfinished agent work.** `getTask(id)` reads
+  its current queue task. `submitted`, `working` and `input-required` answer
+  409 `already_queued` with `taskId`, before any event or write. Terminal tasks
+  (`completed`, `failed`, `canceled`) permit a new occurrence with `previous`.
+  A missing task answers 409 `agent_task_unavailable`; failed reads also refuse.
+  `error(status, code, message, extra)` creates a structured refusal to throw.
+  Keep check, trigger and record update synchronous in this runner so requests
+  cannot interleave. A disabled View control alone cannot guard CLI calls.
 - **Send ids.** The agent re-reads the record; a copy in the payload is stale by
   the time it is read, and prose there is an instruction the app does not get to
   give.

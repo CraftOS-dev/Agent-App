@@ -19,7 +19,7 @@
 
 use serde_json::{json, Value};
 
-use crate::a2app_adapter::{Runner, Store};
+use crate::a2app_adapter::{OperationError, Runner, Store};
 
 pub fn entities() -> Value {
     json!({
@@ -110,7 +110,8 @@ pub fn seed() -> Value {
     })
 }
 
-// Operation runners: (args, ctx, store) -> Ok(JSON result) or Err(message).
+// Operation runners return JSON or OperationError. String errors convert with
+// `?` / `.into()` to ordinary 500 operation_failed responses.
 // The adapter calls the runner for a declared operation; a destructive op is
 // gated by approval first. `store` is the live SQLite-backed store — read with
 // `store.get_record` / `store.list_records`, write with `store.put_record` /
@@ -128,7 +129,7 @@ pub fn operation_runner(name: &str) -> Option<Runner> {
     }
 }
 
-fn run_clear_done(_args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_clear_done(_args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let listed = store.list_records("tasks", &json!({})).map_err(|e| e.to_string())?;
     let done_ids: Vec<String> = listed
         .get("items")
@@ -150,12 +151,12 @@ fn run_clear_done(_args: &Value, _ctx: &Value, store: &mut Store) -> Result<Valu
     Ok(json!({ "removed": removed }))
 }
 
-fn run_count_tasks(_args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_count_tasks(_args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let listed = store.list_records("tasks", &json!({})).map_err(|e| e.to_string())?;
     Ok(json!({ "count": listed.get("totalItems").cloned().unwrap_or(json!(0)) }))
 }
 
-fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let task_id = args.get("task").and_then(Value::as_str).unwrap_or("");
     let mut task = match store.get_record("tasks", task_id) {
         Some(t) => t,
@@ -180,13 +181,12 @@ fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Va
 //
 // Identical triggers dedupe to ONE task, even after it has finished, so
 // asking again with the same payload would hand back the old failure.
-// Naming the previous task makes each request a new occurrence. The View
-// disables the control while a run is open, so a double click cannot
-// queue two.
+// Naming the previous task makes each request a new occurrence. The runner
+// must refuse while that task is open, including CLI and second-tab calls.
 //
 // The task id goes on the record so the View can show the work until it is done
 // (view/AgentTask.jsx). The validate gate checks that it does.
-fn run_request_triage(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, String> {
+fn run_request_triage(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
     let task_id = args.get("task").and_then(Value::as_str).unwrap_or("");
     let mut task = match store.get_record("tasks", task_id) {
         Some(t) => t,
@@ -194,10 +194,104 @@ fn run_request_triage(args: &Value, _ctx: &Value, store: &mut Store) -> Result<V
     };
     let mut payload = json!({ "task": task_id });
     if let Some(prev) = task.get("agentTask").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+        let current = store.get_task(prev).ok_or_else(|| OperationError {
+            status: 409, code: "agent_task_unavailable".into(),
+            message: "The previous agent task could not be found.".into(), extra: json!({ "taskId": prev }),
+        })?;
+        if !matches!(current.get("status").and_then(Value::as_str), Some("completed" | "failed" | "canceled")) {
+            return Err(OperationError {
+                status: 409, code: "already_queued".into(),
+                message: "This record already has unfinished agent work.".into(), extra: json!({ "taskId": prev }),
+            });
+        }
         payload["previous"] = json!(prev);
     }
     let fired = store.trigger("task.needs_triage", &payload, Some("triage"))?;
     task["agentTask"] = fired["taskId"].clone();
     store.put_record("tasks", task);
     Ok(json!({ "ok": true, "task": task_id, "queued": fired["taskId"] }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::a2app_adapter::{Adapter, AdapterConfig};
+
+    fn fixture() -> Adapter {
+        Adapter::new(AdapterConfig {
+            app_id: "triage-test".into(), app_name: None,
+            entities: entities(), operations: operations(), store: Store::memory(seed()),
+            token: "test".into(), modules: json!([{ "name": "planning" }]),
+            allowed_origins: vec![], runner_lookup: operation_runner, events: events(),
+            auth_mode: "none".into(), credential_hint: None, env: None, app_version: None,
+        }).unwrap()
+    }
+
+    fn ask(app: &mut Adapter) -> (u16, Value) {
+        app.dispatch("POST", "/api/ops/request-triage",
+            &HashMap::from([("x-a2app-token".into(), "test".into())]),
+            Some(&json!({ "task": "task_welcome" })), &HashMap::new())
+    }
+
+    #[test]
+    fn triage_states() {
+        for state in ["submitted", "working", "input-required", "completed", "failed", "canceled"] {
+            let mut app = fixture();
+            let (status, body) = ask(&mut app);
+            assert_eq!(status, 200);
+            let previous = body["result"]["queued"].as_str().unwrap().to_string();
+            let mut task = app.store.get_task(&previous).unwrap();
+            task["status"] = json!(state);
+            app.store.save_task(task);
+            let before = app.store.get_record("tasks", "task_welcome");
+            let events = app.store.events_since(None).0.len();
+            let (status, body) = ask(&mut app);
+            if matches!(state, "completed" | "failed" | "canceled") {
+                assert_eq!(status, 200, "{state}: {body}");
+                let id = body["result"]["queued"].as_str().unwrap();
+                assert_ne!(id, previous);
+                assert_eq!(app.store.get_task(id).unwrap()["request"]["payload"]["previous"], previous);
+            } else {
+                assert_eq!(status, 409, "{state}: {body}");
+                assert_eq!(body["code"], "already_queued");
+                assert_eq!(body["taskId"], previous);
+                assert_eq!(app.store.list_tasks(None).len(), 1);
+                assert_eq!(app.store.events_since(None).0.len(), events);
+                assert_eq!(app.store.get_record("tasks", "task_welcome"), before);
+            }
+        }
+    }
+
+    #[test]
+    fn triage_unavailable() {
+        let mut app = fixture();
+        let mut record = app.store.get_record("tasks", "task_welcome").unwrap();
+        record["agentTask"] = json!("missing");
+        app.store.put_record("tasks", record);
+        let (status, body) = ask(&mut app);
+        assert_eq!(status, 409);
+        assert_eq!(body["code"], "agent_task_unavailable");
+        assert_eq!(body["taskId"], "missing");
+        assert_eq!(app.store.list_tasks(None).len(), 0);
+        assert_eq!(app.store.events_since(None).0.len(), 0);
+    }
+
+    #[test]
+    fn ordinary_runner_failure() {
+        fn fail(_: &Value, _: &Value, _: &mut Store) -> Result<Value, OperationError> {
+            Err("ordinary failure".to_string().into())
+        }
+        let mut app = Adapter::new(AdapterConfig {
+            runner_lookup: |_| Some(fail),
+            app_id: "test".into(), app_name: None, entities: entities(), operations: operations(),
+            store: Store::memory(seed()), token: "test".into(), modules: json!([{ "name": "planning" }]),
+            allowed_origins: vec![], events: events(), auth_mode: "none".into(),
+            credential_hint: None, env: None, app_version: None,
+        }).unwrap();
+        let (status, body) = ask(&mut app);
+        assert_eq!(status, 500);
+        assert_eq!(body["code"], "operation_failed");
+        assert_eq!(body["message"], "Operation \"request-triage\" threw: ordinary failure");
+    }
 }

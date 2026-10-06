@@ -151,9 +151,8 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 	//
 	// Identical triggers dedupe to ONE task, even after it has finished, so
 	// asking again with the same payload would hand back the old failure.
-	// Naming the previous task makes each request a new occurrence. The View
-	// disables the control while a run is open, so a double click cannot
-	// queue two.
+	// Naming the previous task makes each request a new occurrence. The runner
+	// must refuse while that task is open, including CLI and second-tab calls.
 	//
 	// The task id goes on the record so the View can show the work until it is
 	// done (src/AgentTask.jsx). The validate gate checks that it does.
@@ -164,6 +163,15 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 		}
 		payload := M{"task": task["id"]}
 		if prev := getStr(task, "agentTask"); prev != "" {
+			current := store.getTask(prev)
+			if current == nil {
+				return nil, &OperationError{409, "agent_task_unavailable", "The previous agent task could not be found.", M{"taskId": prev}}
+			}
+			switch getStr(current, "status") {
+			case "completed", "failed", "canceled":
+			default:
+				return nil, &OperationError{409, "already_queued", "This record already has unfinished agent work.", M{"taskId": prev}}
+			}
 			payload["previous"] = prev
 		}
 		fired, err := store.trigger("task.needs_triage", payload, "triage")

@@ -10,6 +10,8 @@ discovery bounded however large the app grows — an entity or operation outside
 every module has no screen and cannot be reached by walking.
 """
 
+from a2app_adapter import OperationError
+
 ENTITIES = {
     "tasks": {
         "module": "planning",
@@ -118,6 +120,11 @@ def _request_triage(args, ctx, store):
         return {"ok": False, "reason": "no such task"}
     payload = {"task": task["id"]}
     if task.get("agentTask"):
+        current = store.get_task(task["agentTask"])
+        if current is None:
+            raise OperationError(409, "agent_task_unavailable", "The previous agent task could not be found.", taskId=task["agentTask"])
+        if current["status"] not in ("completed", "failed", "canceled"):
+            raise OperationError(409, "already_queued", "This record already has unfinished agent work.", taskId=task["agentTask"])
         payload["previous"] = task["agentTask"]
     fired = store.trigger("task.needs_triage", payload, capability="triage")
     task["agentTask"] = fired["taskId"]

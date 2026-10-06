@@ -17,7 +17,7 @@
   "gate": [
     {
       "name": "cargo build + adapter self-test",
-      "run": "cargo run --quiet -- --selftest"
+      "run": "cargo test --quiet && cargo run --quiet -- --selftest"
     },
     {
       "name": "operations resolve (every declared op has a runner)",

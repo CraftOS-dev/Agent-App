@@ -27,6 +27,7 @@ import { homePath, REGISTRY_FILE, writeFileAtomic } from "./home.js";
 import { readDevRecord } from "./instance.js";
 import { withHomeLock } from "./lock.js";
 import { log } from "./log.js";
+import { inspectDelivery, type DeliveryInspection } from "./delivery.js";
 
 export const REGISTRY_VERSION = 1;
 
@@ -78,6 +79,8 @@ export interface AppView extends RegistryEntry {
    * each one, and a bridge someone started weeks ago is invisible.
    */
   bridge: { pid: number; harness: string; mode: string } | null;
+  /** Read-only delivery inspection of live, independent of dev routing. */
+  agentWork: DeliveryInspection | null;
 }
 
 export function registryPath(): string {
@@ -276,30 +279,6 @@ function serveRecord(appDir: string): { pid: number; port: number; url: string }
   }
 }
 
-/**
- * The bridge record for an app, when its process is still alive.
- *
- * A record whose pid is gone is a leftover, not a bridge — reporting one would
- * tell a user their app can reach an agent when nothing is watching its queue.
- */
-function bridgeRecord(appDir: string): AppView["bridge"] {
-  const file = join(appDir, ".a2app", "bridge.json");
-  if (!existsSync(file)) return null;
-  try {
-    const rec = JSON.parse(readFileSync(file, "utf8")) as { pid?: number; harness?: string; mode?: string };
-    if (typeof rec.pid !== "number") return null;
-    try {
-      process.kill(rec.pid, 0);
-    } catch (err) {
-      // EPERM means it exists but is not ours to signal; anything else means gone.
-      if ((err as NodeJS.ErrnoException).code !== "EPERM") return null;
-    }
-    return { pid: rec.pid, harness: rec.harness ?? "unknown", mode: rec.mode ?? "unknown" };
-  } catch {
-    return null;
-  }
-}
-
 /** The app's own manifest, when readable — authoritative over the entry. */
 function manifestOf(appDir: string): { id?: string; name?: string; port?: number } | null {
   const file = join(appDir, "manifest.json");
@@ -326,7 +305,7 @@ async function devView(dir: string, appId: string): Promise<AppView["dev"]> {
 export async function view(entry: RegistryEntry): Promise<AppView> {
   const dir = resolve(entry.path);
   if (!existsSync(join(dir, "manifest.json"))) {
-    return { ...entry, status: "missing", url: null, pid: null, dev: null, bridge: null };
+    return { ...entry, status: "missing", url: null, pid: null, dev: null, bridge: null, agentWork: null };
   }
   const manifest = manifestOf(dir);
   const port = manifest?.port ?? entry.port;
@@ -336,15 +315,19 @@ export async function view(entry: RegistryEntry): Promise<AppView> {
     name: manifest?.name ?? entry.name,
     ...(port !== undefined ? { port } : {}),
   };
-  const dev = await devView(dir, fresh.id);
-  const bridge = bridgeRecord(dir);
+  const [dev, agentWork] = await Promise.all([
+    devView(dir, fresh.id),
+    inspectDelivery(dir, fresh.id, `http://127.0.0.1:${port ?? 8090}`),
+  ]);
+  const running = agentWork.running;
+  const bridge = running === null ? null : { pid: running.pid, harness: running.harness, mode: running.mode };
   if (port === undefined || !(await portInUse(port))) {
-    return { ...fresh, status: "stopped", url: null, pid: null, dev, bridge };
+    return { ...fresh, status: "stopped", url: null, pid: null, dev, bridge, agentWork };
   }
   // Something holds the port — is it this app, or a stranger?
   const servingId = await identify(port);
   if (servingId === null || servingId !== fresh.id) {
-    return { ...fresh, status: "unreachable", url: null, pid: null, dev, bridge };
+    return { ...fresh, status: "unreachable", url: null, pid: null, dev, bridge, agentWork };
   }
   return {
     ...fresh,
@@ -353,6 +336,7 @@ export async function view(entry: RegistryEntry): Promise<AppView> {
     pid: serveRecord(dir)?.pid ?? null,
     dev,
     bridge,
+    agentWork,
   };
 }
 

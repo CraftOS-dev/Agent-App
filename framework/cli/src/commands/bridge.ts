@@ -30,7 +30,6 @@ import {
   bridgeLockPath,
   bridgeLogPath,
   clearBridgeRecord,
-  countWaiting,
   DEFAULT_INTERVAL_MS,
   DEFAULT_TASK_TIMEOUT_MS,
   logTail,
@@ -47,16 +46,16 @@ import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/pr
 import { loadProject, UsageError, type Project } from "../lib/project.js";
 import { connect } from "../lib/target.js";
 import { log } from "../lib/log.js";
+import { appCommand, inspectDelivery, inspectLocalBridge, reportDelivery, type RunningBridge } from "../lib/delivery.js";
 
 /** A bridge that is recorded AND actually alive. A record whose process is gone
  *  is not a running bridge — it is a leftover, and treating it as one would make
  *  `start` refuse forever after a crash. */
-function runningBridge(dir: string): { pid: number; harness: string; mode: string; startedAt: string } | null {
-  const rec = readBridgeRecord(dir);
+function runningBridge(dir: string): RunningBridge | null {
+  const rec = inspectLocalBridge(dir).running;
   if (rec === null) return null;
   if (rec.pid === process.pid) return null;
-  if (!isPidAlive(rec.pid)) return null;
-  return { pid: rec.pid, harness: rec.harness, mode: rec.mode, startedAt: rec.startedAt };
+  return rec;
 }
 
 /** The five rungs as a person needs to read them when nothing worked. */
@@ -80,7 +79,8 @@ function explainNoRoute(app: string, ladder: RungReport[]): void {
 async function status(args: string[], app: string, project: Project): Promise<number> {
   const loaded = loadHarnesses();
   const selection = await selectProfile(loaded, flag(args, "harness"));
-  const running = runningBridge(project.dir);
+  const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
+  const running = agentWork.running;
 
   let ladder: RungReport[] = [];
   let mode: string | null = null;
@@ -88,14 +88,6 @@ async function status(args: string[], app: string, project: Project): Promise<nu
     const chosen = await chooseRoute(selection.profile);
     ladder = chosen.ladder;
     mode = chosen.route?.mode ?? null;
-  }
-
-  let waiting: number | null = null;
-  try {
-    const { client } = await connect(app);
-    waiting = await countWaiting(client);
-  } catch {
-    waiting = null; // the app is not up; that is reported, not fatal
   }
 
   const report = {
@@ -107,7 +99,8 @@ async function status(args: string[], app: string, project: Project): Promise<nu
     supported: mode !== null,
     ladder,
     running,
-    tasksWaiting: waiting,
+    tasksWaiting: agentWork.tasksWaiting,
+    agentWork,
     config: existsSync(harnessesPath()) ? harnessesPath() : null,
     profiles: loaded.profiles.map((p) => p.id),
   };
@@ -117,8 +110,11 @@ async function status(args: string[], app: string, project: Project): Promise<nu
   if (selection.profile === null) log.warn(selection.why);
   else if (mode === null) explainNoRoute(app, ladder);
   else if (mode === "subscribe") log.info(`${selection.profile.id} subscribes — start it to be shown the listen command`);
-  else log.info(`ready: ${selection.profile.id} via ${mode} (${selection.why})`);
-  if (waiting !== null && waiting > 0) log.info(`${waiting} task(s) waiting in the queue`);
+  else log.info(`route available: ${selection.profile.id} via ${mode} (${selection.why}); this does not verify delivery`);
+  reportDelivery(agentWork, project.dir);
+  if (!agentWork.queuesAgentWork && agentWork.state === "absent") {
+    log.info(agentWork.tasksWaiting === null ? "waiting work: unknown (live queue could not be read)" : `${agentWork.tasksWaiting} task(s) waiting in the live queue`);
+  }
   for (const line of logTail(project.dir)) log.info(`  log: ${line}`);
 
   log.raw(JSON.stringify(report, null, 2));
@@ -354,6 +350,7 @@ async function start(args: string[], app: string, project: Project): Promise<num
       mode: route.mode,
       intervalMs,
       startedAt: new Date().toISOString(),
+      baseUrl: client.baseUrl,
       ...(gatewayPid !== undefined ? { gatewayPid } : {}),
     });
   }
@@ -425,8 +422,9 @@ async function stopBridge(project: Project, app: string): Promise<number> {
     // That task is not lost: it stays `working` until the app's own sweeper
     // returns it to the queue, which is the same path a crashed agent takes.
     log.info(
-      `a task being worked on right now was interrupted; the app returns it to the queue by itself.\n` +
-        `The app keeps queueing tasks either way — nothing will claim them until: agent-app ${app} bridge start`,
+      "Any task interrupted by this stop can return to the queue after its claim expires.\n" +
+        `The app can still queue work. Resume this local listener: ${appCommand(project.dir, "bridge start")}\n` +
+        "Another harness may be polling the queue independently.",
     );
     log.raw(JSON.stringify({ ok: true, stopped: rec.pid }, null, 2));
     return 0;

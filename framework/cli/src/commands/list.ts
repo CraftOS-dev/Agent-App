@@ -11,6 +11,7 @@ import { hasFlag } from "../lib/args.js";
 import { list, prune } from "../lib/registry.js";
 import { registryPath } from "../lib/registry.js";
 import { log } from "../lib/log.js";
+import { appCommand } from "../lib/delivery.js";
 
 export async function run(args: string[]): Promise<number> {
   if (hasFlag(args, "prune")) {
@@ -41,13 +42,25 @@ export async function run(args: string[]): Promise<number> {
     // row — an abandoned candidate that only lived in `.a2app/dev.json` was
     // invisible here, which is exactly how it stayed abandoned.
     const dev = app.dev === null ? "" : app.dev.answering ? `  dev:${app.dev.port}` : "  dev:stale";
-    // A running bridge means this app can start agent runs on this machine.
-    // That is a standing capability, not a detail of one command, so it belongs
-    // where someone looks to see what their apps are doing.
-    const bridge = app.bridge === null ? "" : `  bridge:${app.bridge.harness}/${app.bridge.mode}`;
+    // Keep local process state separate from app health and queue observations.
+    const work = app.agentWork;
+    const relevant = work !== null && (work.queuesAgentWork || work.state !== "absent");
+    const bridge = app.bridge !== null ? `  bridge:${app.bridge.harness}/${app.bridge.mode}`
+      : relevant ? `  bridge:${work.state === "stale" ? "stale" : "missing"}` : "";
+    const waiting = relevant ? `  waiting:${work.tasksWaiting ?? "unknown"}` : "";
+    const target = app.bridge !== null && work !== null && work.bridgeTargetsLive !== true
+      ? `  bridge-target:${work.bridgeTargetsLive === false ? "other" : "unknown"}` : "";
     log.raw(
-      `${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}${dev}${bridge}`,
+      `${mark[app.status]} ${app.name.padEnd(width)}  ${app.id}  :${port.padEnd(5)} ${app.status.padEnd(11)} ${where}${dev}${bridge}${waiting}${target}`,
     );
+    if (relevant && app.bridge === null) {
+      log.warn(`"${app.name}": ${work.tasksWaiting === null ? "waiting work unknown" : `${work.tasksWaiting} waiting task(s) observed`}; no local bridge. ` +
+        `Delivery is unverified; an external harness may be polling. Start: ${appCommand(app.path, "bridge start")} · diagnose: ${appCommand(app.path, "bridge")}`);
+    }
+    if (target) {
+      log.warn(`"${app.name}": the local bridge ${work?.bridgeTargetsLive === false ? "targets a different endpoint from live" : "has no recorded endpoint"}. ` +
+        `Check ${appCommand(app.path, "bridge")} before treating agent work as operational.`);
+    }
   }
   if (apps.some((a) => a.status === "unreachable")) {
     log.warn("▲ unreachable: another process holds that app's port — stop it, or give the app a different port.");
@@ -63,7 +76,7 @@ export async function run(args: string[]): Promise<number> {
   }
   if (apps.some((a) => a.bridge !== null)) {
     log.info(
-      "bridge:<harness>/<route> — that app's queue is being watched and can start agent runs here. " +
+      "bridge:<harness>/<route> — a local bridge process is running; its PID does not verify task delivery. " +
         "`agent-app <app> bridge` for detail · `agent-app <app> bridge stop` to end it.",
     );
   }

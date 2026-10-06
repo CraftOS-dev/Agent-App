@@ -34,6 +34,7 @@ import { identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
+import { inspectDelivery, reportDelivery } from "../lib/delivery.js";
 
 function readServe(file: string): { pid: number } | null {
   try {
@@ -86,6 +87,8 @@ export async function run(args: string[], app: string): Promise<number> {
       if (servingId === project.manifest.id) {
         const prev = readServe(servePath);
         log.ok(`already serving on ${project.baseUrl}${prev ? ` (pid ${prev.pid})` : ""}`);
+        const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
+        reportDelivery(agentWork, project.dir);
         const shown = await show();
         log.raw(
           JSON.stringify(
@@ -96,6 +99,7 @@ export async function run(args: string[], app: string): Promise<number> {
               url: project.baseUrl,
               pid: prev?.pid ?? null,
               alreadyRunning: true,
+              agentWork,
               ...shown,
             },
             null,
@@ -201,6 +205,8 @@ export async function run(args: string[], app: string): Promise<number> {
         "\n",
     );
     log.ok(`serving "${project.manifest.name}" on ${project.baseUrl} (pid ${pid})`);
+    const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
+    reportDelivery(agentWork, project.dir);
     // A relaunch after a code change is the moment a tab opened earlier goes
     // stale, and the person looking at it has no way to know. The View's update
     // watcher tells them; say so here so the loop is visible from the terminal
@@ -221,7 +227,7 @@ export async function run(args: string[], app: string): Promise<number> {
     const shown = await show();
     log.raw(
       JSON.stringify(
-        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, ...shown },
+        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, agentWork, ...shown },
         null,
         2,
       ),

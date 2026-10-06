@@ -88,6 +88,8 @@ export interface BridgeRecord {
   mode: string;
   intervalMs: number;
   startedAt: string;
+  /** Endpoint fixed at startup; a dev bridge must not be mistaken for live. */
+  baseUrl?: string;
   /** pid of a gateway this bridge started, so `stop` can take it down too */
   gatewayPid?: number;
 }
@@ -111,13 +113,14 @@ export function readBridgeRecord(dir: string): BridgeRecord | null {
   if (!existsSync(file)) return null;
   try {
     const raw = readJsonFile<Partial<BridgeRecord>>(file);
-    if (typeof raw.pid !== "number") return null;
+    if (typeof raw.pid !== "number" || !Number.isInteger(raw.pid) || raw.pid <= 1) return null;
     return {
       pid: raw.pid,
-      harness: raw.harness ?? "unknown",
-      mode: raw.mode ?? "unknown",
+      harness: typeof raw.harness === "string" ? raw.harness : "unknown",
+      mode: typeof raw.mode === "string" ? raw.mode : "unknown",
       intervalMs: raw.intervalMs ?? DEFAULT_INTERVAL_MS,
-      startedAt: raw.startedAt ?? "",
+      startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
+      ...(typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
       ...(typeof raw.gatewayPid === "number" ? { gatewayPid: raw.gatewayPid } : {}),
     };
   } catch {
@@ -802,11 +805,16 @@ export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: 
 }
 
 /** How many tasks are waiting right now — used by `bridge` status. */
-export async function countWaiting(client: A2AppClient): Promise<number | null> {
+export async function countWaiting(client: Pick<A2AppClient, "pollTasks">): Promise<number | null> {
   try {
     const res = await client.pollTasks("submitted");
     if (!res.ok) return null;
-    return parseTasks(res.json).length;
+    const body = res.json as { tasks?: unknown } | null;
+    if (!body || !Array.isArray(body.tasks)) return null;
+    const tasks = parseTasks(body);
+    // A malformed success envelope is not evidence of an empty queue.
+    if (tasks.length !== body.tasks.length) return null;
+    return tasks.length;
   } catch {
     return null;
   }

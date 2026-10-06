@@ -24,8 +24,8 @@ const SUITES_DIR = resolve(HERE, "..", "..", "suites");
  */
 function findCliEntry(bin: "a2app" | "agent-app"): string | null {
   const candidates = [
-    resolve(HERE, "..", "node_modules", "agent-app", "dist", `${bin}.js`),
-    resolve(HERE, "..", "..", "..", "node_modules", "agent-app", "dist", `${bin}.js`),
+    resolve(HERE, "..", "node_modules", "agent-app-framework", "dist", `${bin}.js`),
+    resolve(HERE, "..", "..", "..", "node_modules", "agent-app-framework", "dist", `${bin}.js`),
     resolve(HERE, "..", "..", "..", "framework", "cli", "dist", `${bin}.js`),
   ];
   return candidates.find((c) => existsSync(c)) ?? null;

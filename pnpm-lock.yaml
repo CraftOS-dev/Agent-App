@@ -106,9 +106,9 @@ importers:
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43
-      agent-app:
+      agent-app-framework:
         specifier: workspace:*
-        version: link:../..
+        version: link:../../framework/cli
 
   framework/cli:
     dependencies:

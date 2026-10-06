@@ -18,6 +18,7 @@ import { withLock } from "../lib/lock.js";
 import { identifyApp } from "../lib/net.js";
 import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
 import { log } from "../lib/log.js";
+import { appCommand, inspectLocalBridge } from "../lib/delivery.js";
 
 /**
  * `stop --dev`: tear down the DEV instance (abandoning the candidate) and
@@ -65,6 +66,14 @@ export async function run(args: string[], app: string): Promise<number> {
 
   return withLock(serveLock, async () => {
     const servePath = join(project.dir, ".a2app", "serve.json");
+    const reportStopped = (stopped: number | null): void => {
+      const bridge = inspectLocalBridge(project.dir);
+      if (bridge.running !== null) {
+        log.info(`the local bridge remains running (pid ${bridge.running.pid}) and continues polling; ` +
+          `it can resume when the app returns. Stop it separately: ${appCommand(project.dir, "bridge stop")}`);
+      }
+      log.raw(JSON.stringify({ ok: true, stopped, bridge }, null, 2));
+    };
 
     const clearRecord = async (): Promise<void> => {
       rmSync(servePath, { force: true });
@@ -84,7 +93,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
     if (!existsSync(servePath)) {
       log.info("not serving (no .a2app/serve.json)");
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
@@ -100,7 +109,7 @@ export async function run(args: string[], app: string): Promise<number> {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1) {
       log.warn(`serve.json has no usable pid — clearing the record without killing anything.`);
       await clearRecord();
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
@@ -115,13 +124,13 @@ export async function run(args: string[], app: string): Promise<number> {
           `this app is not answering on port ${appPort} (recorded pid ${pid}) — clearing a stale serve record without killing.`,
         );
         await clearRecord();
-        log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+        reportStopped(null);
         return 0;
       }
     } else if (!isPidAlive(pid)) {
       log.info(`recorded process (pid ${pid}) is not running — clearing stale record.`);
       await clearRecord();
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
@@ -143,7 +152,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
     await clearRecord();
     log.ok(`stopped (pid ${pid})`);
-    log.raw(JSON.stringify({ ok: true, stopped: pid }, null, 2));
+    reportStopped(pid);
     return 0;
   });
 }

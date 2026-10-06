@@ -79,6 +79,38 @@ agent-app <dir> bridge start --foreground   # run the loop here; Ctrl-C stops af
 agent-app <dir> bridge stop
 ```
 
+**Launch and handoff readiness.** Both a fresh `serve` and an already-serving
+result inspect the live app. An app whose code queues agent work gets a
+prominent warning and the exact `bridge start` command if no local bridge is
+running. `serve` still returns success for a healthy server and does not start
+agent runs automatically. Its JSON adds `agentWork`: `queuesAgentWork`, `state`
+(`absent`, `stale`, `running`), `running`, `tasksWaiting`, the live `baseUrl` and
+`bridgeTargetsLive` (true/false, or null for an unknown recorded endpoint).
+`list --json` and `bridge` expose the same inspection; bridge's existing
+`running` and `tasksWaiting` fields remain available. These reads always inspect
+live even when operate commands target a recorded dev instance.
+New bridge records include the endpoint actually selected at startup. A bridge
+still watching dev, or a legacy record with an unknown endpoint, is flagged by
+serve/list/bridge. Restart it after dev is gone before handing off live work.
+
+`list` marks queueing apps as `bridge:missing` or `bridge:stale` and shows waiting
+work. `tasksWaiting` is the count observed in the submitted-task poll, not a
+guaranteed total; `null`/`waiting:unknown` means the queue could not be read.
+Identity is verified before sending the agent credential, and network probes
+have short deadlines including body reads. Detection reuses the static trigger
+scanner: dynamic/custom enqueue code may be missed, so observed waiting work
+also makes an app relevant. Adapter queue support alone does not imply that an
+app queues work.
+
+A missing local bridge does not rule out an external harness polling the queue.
+A live PID or available harness route does not prove successful delivery.
+Creator/modify finish queueing features with a live delivery check and, where
+authorized, a detached `bridge start` that remains up after the launching
+command exits. A one-shot or interactive foreground test is not that handoff.
+`stop` leaves the bridge running and reports how to stop it separately; it can
+resume polling when the app is served again. Reboot startup and crash supervision
+are not provided by this check.
+
 Flags: `--harness <id>`, `--interval <ms>` (default 5000), `--task-timeout <ms>` (default 15 min), `--capability <name>` (repeatable — deliver only these).
 
 **Harness profiles** live in `$A2APP_HOME/harnesses.json` (`~/.a2app/harnesses.json`). `claude`, `codex`, `gemini` and `aider` are built in; an entry with the same `id` replaces a built-in outright rather than merging into it, so what the file says is what runs.

@@ -1,0 +1,11 @@
+{
+  "name": "agent-app",
+  "label": "Agent Apps",
+  "description": "Build, evolve, and operate Agent Apps: one tab per app, an embedded view of each running app, and its agent session beside it.",
+  "icon": "Package",
+  "version": "0.1.0",
+  "tab": { "path": "/agent-apps", "position": "end" },
+  "entry": "manager.js",
+  "css": "manager.css",
+  "api": "plugin_api.py"
+}

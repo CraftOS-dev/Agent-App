@@ -1,183 +1,221 @@
-"""Agent App Framework plugin for Hermes.
+"""Agent App Framework plugin for Hermes: the agent side.
 
-A native Hermes backend plugin (Hermes plugins are Python). It registers tools
-that build and operate Agent Apps by shelling the framework CLIs, so anything an
-agent does over the A2App protocol, Hermes can do through these tools. Drop this
-directory into `~/.hermes/plugins/`; set `A2APP_CLI` (operate, default `a2app`) and `AGENT_APP_CLI`
-(build/evolve, default `agent-app`) to override the binaries.
+`register(ctx)` wires the framework into Hermes through its own plugin API:
 
-Every tool shells the real CLI and returns its output verbatim — a guard
-rejection (invalid enum, relative date, …) is useful data, so it is returned to
-the model rather than swallowed.
+  - the build + operate tools (`agent_app_*`, toolset `agent_app`), each
+    shelling a real `agent-app` or `a2app` verb;
+  - the six framework skills, as plugin skills (`agent-app:creator`, ...);
+  - a system-prompt section that routes any app request to the owning skill,
+    which is how plugin skills are found at all (Hermes keeps them out of the
+    `<available_skills>` index and gives them no slash commands);
+  - the `/agent-app <request>` command, which hands the request to the agent:
+    `ctx.inject_message` in the classic CLI, a `pre_gateway_dispatch` rewrite
+    on messaging platforms;
+  - `hermes agent-app <args...>`, a passthrough to both CLIs;
+  - the `hermes` route in `$A2APP_HOME/harnesses.json`, so
+    `agent-app <dir> bridge` can start Hermes when an app queues work.
+
+The Agent Apps dashboard tab lives beside this, in `dashboard/` (Hermes loads
+dashboard plugins in the dashboard process, not through `register`).
 """
+from __future__ import annotations
+
+import argparse
+import logging
 import os
-import subprocess
+import re
+import sys
 
-CLI = os.environ.get("A2APP_CLI", "a2app")
-# Build/evolve is a second binary; the operate client rejects build verbs by
-# design (framework spec 5.1), so each verb is routed to its owner.
-FRAMEWORK_CLI = os.environ.get("AGENT_APP_CLI", "agent-app")
-FRAMEWORK_VERBS = {
-    "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop",
-    "list", "global", "skills", "dev", "promote", "backup", "restore",
+from . import engine
+
+logger = logging.getLogger(__name__)
+
+# How `agent-app <dir> bridge` starts Hermes when an app queues work: one
+# turn, run in the app's directory, then exit (`-Q` exits after answering
+# even on a TTY; `--cli` keeps a `display.interface: tui` default from taking
+# over a run nobody is watching). The framework has no built-in Hermes
+# profile, so without this entry the bridge cannot see Hermes. Dangerous
+# commands follow the user's `approvals.single_query_mode` (deny by default);
+# this route grants nothing on their behalf.
+HERMES_PROFILE = {
+    "id": "hermes",
+    "name": "Hermes",
+    "routes": [{"mode": "headless", "command": "hermes", "args": ["--cli", "chat", "-Q", "-q", engine.PROMPT_PLACEHOLDER]}],
 }
-# The closed set of verbs that address every app rather than one, and so take no
-# app argument. Closed is what makes _verb exact: it never has to inspect a
-# positional to guess what it is.
-REGISTRY_VERBS = {"list", "global", "skills"}
+
+# One line per skill for the routing section; the full descriptions are long
+# and the section has a hard size limit.
+_SKILL_ROLES = {
+    "creator": "build a NEW app",
+    "modify": "change an EXISTING app",
+    "operator": "use, read, or run an app (no code changes)",
+    "importer": "adopt existing software",
+    "walk-verify": "independent verification, never by the builder",
+    "connect": "a published app you do not own",
+}
+
+# The prefix a routed /agent-app request carries. A leading slash would send
+# the injected text back through command dispatch.
+ROUTED_PREFIX = "Agent App Framework request (/agent-app):"
+
+USAGE = (
+    "Usage: /agent-app <what you want>\n"
+    'e.g. "/agent-app build a CRM", "/agent-app add a report to my expense app", '
+    '"/agent-app operate atlas-erp"'
+)
+
+# Where a plugin command cannot start a turn (the TUI, and the dashboard
+# chat): say what to do instead of failing silently.
+NO_TURN_HERE = (
+    "This interface does not let a plugin command start a turn. Send the request as a "
+    'normal message instead, e.g. "build a CRM as an Agent App": the Agent App skills '
+    "are loaded and the request is routed to the right one."
+)
+
+# `/agent-app ...` on a messaging platform. Telegram allows no hyphen in a
+# command, and appends `@botname` in groups.
+_GATEWAY_COMMAND = re.compile(r"^/agent[-_]app(?:@\S+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 
-def _verb(argv: list[str]) -> str:
-    """The verb in an app-first argv.
-
-    Both CLIs are written `<binary> <app> <verb> [args]`, so the verb is the
-    SECOND element — except for a registry verb, which takes no app and
-    therefore stands alone in first position (framework spec 5.1).
-    """
-    if argv and argv[0] in REGISTRY_VERBS:
-        return argv[0]
-    return argv[1] if len(argv) > 1 else ""
+def routed_prompt(request: str) -> str:
+    return f"{ROUTED_PREFIX} {request}"
 
 
-def _run(argv: list[str]) -> str:
-    # Run a JS entry (…/cli.js) with node; never use a shell, so field values
-    # reach the CLI as literal arguments.
-    exe = FRAMEWORK_CLI if _verb(argv) in FRAMEWORK_VERBS else CLI
-    cmd = ["node", exe, *argv] if exe.endswith((".js", ".mjs", ".cjs")) else [exe, *argv]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-    except FileNotFoundError:
-        return f"framework CLI not found (looked for {exe!r}). Install it with `npm i -g agent-app`, or set A2APP_CLI / AGENT_APP_CLI to the binary paths."
-    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-    return out or f"(exit {proc.returncode})"
+def guidance(skills: list[tuple[str, object, dict]], namespace: str, skills_home: str | None) -> str:
+    """The system-prompt section that makes the framework reachable."""
+    lines = [
+        "## Agent App Framework",
+        "",
+        "An Agent App is a self-contained full-stack web app operated through its A2App adapter "
+        "(the `a2app` CLI), never by driving its UI. Build and evolve go through the `agent-app` CLI. "
+        "When a message asks to build, change, run, import, verify, or connect to an app (a message "
+        f'beginning "{ROUTED_PREFIX}" came from the /agent-app command), load the matching framework '
+        "skill with skill_view and follow it end to end:",
+    ]
+    for name, _path, meta in skills:
+        role = _SKILL_ROLES.get(name) or str(meta.get("description", ""))[:120]
+        lines.append(f"- `{namespace}:{name}`: {role}")
+    lines += [
+        "",
+        "Do not build or operate an app from general knowledge outside these skills. "
+        "`agent-app list` locates every known Agent App, and a command accepts a registered app id "
+        "or name wherever it takes a directory. The `agent_app_*` tools wrap the same CLIs.",
+    ]
+    if skills_home:
+        lines.append(
+            f"The skills' shared files (QUALITY.md, index.json) are in `{skills_home}`; read them "
+            "with your file tools when a skill cites them."
+        )
+    return "\n".join(lines)
 
 
-# --------------------------------------------------------------- handlers
+def _tool_handler(tool: engine.Tool):
+    def handler(args: dict, **_kw) -> str:
+        # A relative `dir` means what it means in the agent's terminal, whose
+        # working directory Hermes exports as TERMINAL_CWD (a remote terminal
+        # backend's path does not exist here, and is ignored).
+        cwd = os.environ.get("TERMINAL_CWD") or None
+        if cwd is not None and not os.path.isdir(cwd):
+            cwd = None
+        return tool.call(args if isinstance(args, dict) else {}, cwd=cwd).text()
 
-def _describe(args: dict, **_kw) -> str:
-    # Describe is navigational: the path names ONE place in the app.
-    segments = [p for p in str(args.get("path", "")).split("/") if p]
-    return _run([str(args["dir"]), *segments])
-
-
-def _list(args: dict, **_kw) -> str:
-    a = [str(args["dir"]), "data", str(args["entity"]), "list"]
-    if args.get("filter"):
-        a += ["--filter", str(args["filter"])]
-    if args.get("sort"):
-        a += ["--sort", str(args["sort"])]
-    if args.get("limit") is not None:
-        a += ["--limit", str(args["limit"])]
-    return _run(a)
+    return handler
 
 
-def _get(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "data", str(args["entity"]), "get", str(args["id"])])
+def _cli_setup(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "argv",
+        nargs=argparse.REMAINDER,
+        metavar="ARGS",
+        help="arguments for agent-app (build/evolve verbs) or a2app (operate); routed by verb",
+    )
 
 
-def _create(args: dict, **_kw) -> str:
-    import json
-    return _run([str(args["dir"]), "data", str(args["entity"]), "create", "--json", json.dumps(args.get("fields") or {})])
+def _cli_run(args: argparse.Namespace) -> int:
+    argv = list(getattr(args, "argv", None) or [])
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        sys.stderr.write(
+            "usage: hermes agent-app <app> [<path...>] [<operation>] | <dir> <verb> | list\n"
+            "Build/evolve verbs run agent-app; everything else runs a2app.\n"
+        )
+        return 2
+    return engine.run_passthrough(engine.bin_for(argv), argv)
 
 
-def _update(args: dict, **_kw) -> str:
-    import json
-    return _run([str(args["dir"]), "data", str(args["entity"]), "update", str(args["id"]), "--json", json.dumps(args.get("fields") or {})])
-
-
-def _delete(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "data", str(args["entity"]), "delete", str(args["id"])])
-
-
-def _find(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "--find", str(args["term"])])
-
-
-def _run_operation(args: dict, **_kw) -> str:
-    a = [str(args["dir"]), *[p for p in str(args["path"]).split("/") if p], str(args["operation"])]
-    for key, value in (args.get("fields") or {}).items():
-        a += [f"--{key}", str(value)]
-    if args.get("approve"):
-        a += ["--approve", str(args["approve"])]
-    return _run(a)
-
-
-def _poll_tasks(args: dict, **_kw) -> str:
-    if args.get("status"):
-        return _run([str(args["dir"]), "tasks", "--status", str(args["status"])])
-    return _run([str(args["dir"]), "tasks"])
-
-
-def _build(args: dict, **_kw) -> str:
-    a = [str(args["dir"]), "scaffold"]
-    if args.get("blueprint"):
-        a += ["--blueprint", str(args["blueprint"])]
-    if args.get("name"):
-        a += ["--name", str(args["name"])]
-    return _run(a)
-
-
-def _validate(args: dict, **_kw) -> str:
-    return _run([str(args["dir"]), "validate", "--no-build"] if args.get("noBuild") else [str(args["dir"]), "validate"])
-
-
-# --------------------------------------------------------------- schemas
-
-_STR = {"type": "string"}
-_DIR = {"type": "string", "description": "Agent App project directory"}
-_ENTITY = {"type": "string", "description": "entity / collection name"}
-
-
-def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
-    return {
-        "name": name,
-        "description": description,
-        "parameters": {"type": "object", "properties": properties, "required": required},
-    }
-
-
-_TOOLS = [
-    (_schema("agent_app_describe",
-             'Describe ONE place in an Agent App. `path` is empty for the root (its modules), "sales" for a '
-             'module, "sales/invoices" for an entity, "sales/invoices/INV-1" for a record and the operations '
-             "its state allows. Every response names the legal next moves. No call returns the whole model.",
-             {"dir": _DIR, "path": _STR}, ["dir"]), _describe, "🔎"),
-    (_schema("agent_app_list", "List records of an entity (optional filter/sort/limit).",
-             {"dir": _DIR, "entity": _ENTITY, "filter": _STR, "sort": _STR, "limit": {"type": "integer"}}, ["dir", "entity"]), _list, "📋"),
-    (_schema("agent_app_get", "Fetch one record by id.",
-             {"dir": _DIR, "entity": _ENTITY, "id": _STR}, ["dir", "entity", "id"]), _get, "🔍"),
-    (_schema("agent_app_create", "Create a record; the app's guard validates it and rejections are returned verbatim.",
-             {"dir": _DIR, "entity": _ENTITY, "fields": {"type": "object"}}, ["dir", "entity", "fields"]), _create, "➕"),
-    (_schema("agent_app_update", "Update a record by id.",
-             {"dir": _DIR, "entity": _ENTITY, "id": _STR, "fields": {"type": "object"}}, ["dir", "entity", "id", "fields"]), _update, "✏️"),
-    (_schema("agent_app_delete", "Delete a record by id.",
-             {"dir": _DIR, "entity": _ENTITY, "id": _STR}, ["dir", "entity", "id"]), _delete, "🗑️"),
-    # No agent_app_operations: no global operation list exists. An operation is
-    # found on the screen it belongs to and invoked at the path identifying it.
-    (_schema("agent_app_find",
-             "Search entity, operation and module names across the app; returns their locations.",
-             {"dir": _DIR, "term": _STR}, ["dir", "term"]), _find, "🔎"),
-    (_schema("agent_app_run_operation",
-             "Invoke a declared operation at the path that identifies it. A destructive op returns "
-             "approval_required with a key; pass `approve` to execute.",
-             {"dir": _DIR, "path": _STR, "operation": _STR, "fields": {"type": "object"}, "approve": _STR},
-             ["dir", "path", "operation"]), _run_operation, "▶️"),
-    (_schema("agent_app_poll_tasks", "Poll the app-to-agent task queue (default status: submitted).",
-             {"dir": _DIR, "status": _STR}, ["dir"]), _poll_tasks, "📥"),
-    (_schema("agent_app_build", "Scaffold a new Agent App from a blueprint.",
-             {"dir": _DIR, "blueprint": _STR, "name": _STR}, ["dir"]), _build, "🏗️"),
-    (_schema("agent_app_validate", "Run the validation + security gate.",
-             {"dir": _DIR, "noBuild": {"type": "boolean"}}, ["dir"]), _validate, "✅"),
-]
+def _on_pre_gateway_dispatch(event=None, **_kw):
+    text = getattr(event, "text", None)
+    if not isinstance(text, str):
+        return None
+    match = _GATEWAY_COMMAND.match(text.strip())
+    if match is None:
+        return None
+    request = (match.group(1) or "").strip()
+    if not request:
+        return None  # a bare command reaches its handler, which replies with usage
+    return {"action": "rewrite", "text": routed_prompt(request)}
 
 
 def register(ctx) -> None:
     """Called once by the Hermes plugin loader."""
-    for schema, handler, emoji in _TOOLS:
+    namespace = getattr(getattr(ctx, "manifest", None), "name", None) or "agent-app"
+
+    registration = engine.register_harness_profile(HERMES_PROFILE)
+    if registration["status"] == "registered":
+        logger.info("agent-app: %s", registration["detail"])
+    elif registration["status"] == "refused":
+        logger.warning("agent-app: %s", registration["detail"])
+
+    for tool in engine.a2app_tools():
         ctx.register_tool(
-            name=schema["name"],
+            name=tool.name,
             toolset="agent_app",
-            schema=schema,
-            handler=handler,
-            emoji=emoji,
+            schema=tool.schema(),
+            handler=_tool_handler(tool),
+            emoji=tool.emoji,
         )
+
+    skills_home = engine.skills_dir()
+    skills = engine.framework_skills(skills_home) if skills_home is not None else []
+    for name, path, meta in skills:
+        try:
+            ctx.register_skill(name, path, description=meta["description"], frontmatter=meta)
+        except (ValueError, OSError) as exc:
+            logger.warning("agent-app: skill %s not registered: %s", name, exc)
+    if not skills:
+        logger.warning(
+            "agent-app: the framework skills were not found (no staged skills/ and `agent-app skills --path` "
+            "gave none). %s",
+            engine.INSTALL_HINT,
+        )
+
+    ctx.register_system_prompt_section(
+        "agent-app",
+        guidance(skills, namespace, str(skills_home) if skills_home is not None else None),
+    )
+
+    def slash(raw_args: str):
+        request = (raw_args or "").strip()
+        if not request:
+            return USAGE
+        if ctx.inject_message(routed_prompt(request)):
+            return None
+        return NO_TURN_HERE
+
+    ctx.register_command(
+        "agent-app",
+        handler=slash,
+        description="Build, evolve, or operate an Agent App: routes the request to the right framework skill.",
+        args_hint="<what you want>",
+        argument_mode="text",
+    )
+    ctx.register_hook("pre_gateway_dispatch", _on_pre_gateway_dispatch)
+
+    ctx.register_cli_command(
+        name="agent-app",
+        help="Run the Agent App Framework CLIs (build/evolve/operate an Agent App)",
+        setup_fn=_cli_setup,
+        handler_fn=_cli_run,
+        description="Passthrough to agent-app (build/evolve verbs) and a2app (operate), routed by verb.",
+    )

@@ -6,7 +6,7 @@ license: MIT
 homepage: https://github.com/CraftOS-dev/Agent-App
 # Explicit, not defaulted: the loader reclassifies a kind-less plugin whose
 # code mentions certain provider symbols, and a standalone plugin is exactly
-# what this is (user plugins of every kind still need `hermes plugins enable`).
+# what this is (and a standalone user plugin still needs `hermes plugins enable`).
 kind: standalone
 provides_tools:
   - agent_app_describe

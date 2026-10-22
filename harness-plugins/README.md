@@ -6,7 +6,7 @@ Per-harness **plugins**: each exposes the framework in the harness's own plugin 
 |---|---|---|---|
 | [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 17 build+operate tools, skills, display, `runA2App`, and `registerHarnessProfile`; every plugin below uses it |
 | [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel, and a build form that starts the agent run directly) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
-| [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)` | 11 tools via `ctx.register_tool(...)` |
+| [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)`; `scripts/build.py` stages a self-contained `dist/` | The 17 build+operate tools via `ctx.register_tool(...)` (a Python port of the engine), the six skills, `/agent-app` + `hermes agent-app`, and an "Agent Apps" **dashboard tab** like OpenClaw's |
 | [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 14 tools via `ctx.tools.register(defineTool(...))`; a browser iframe renderer |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 11 actions in the `agent_app` action set |
 | [claude-code/](claude-code/) | Claude Code | **MCP** (stdio JSON-RPC 2.0) | 14 tools via a real MCP server; register with `claude mcp add` |
@@ -91,6 +91,7 @@ exactly that. What the plugins here register:
 | [claude-code/](claude-code/) | `claude`, replacing the built-in | `claude -p {prompt} --permission-mode dontAsk --allowedTools "Bash(a2app *)"`. The built-in passes no permission flags, and print mode denies every Bash call that would prompt, so the agent could not run `a2app` at all |
 | [openclaw/](openclaw/) | `openclaw` | `openclaw agent exec {prompt}`: one embedded turn in the app's directory, alongside a running gateway |
 | [dsh/](dsh/) | `dsh` | `dsh --profile headless {prompt}` |
+| [hermes/](hermes/) | `hermes` | `hermes --cli chat -Q --query-file -`, the prompt on stdin: one single-query turn in the app's directory |
 | [pi/](pi/) | `pi` | `pi -p {prompt}`, written by a Pi extension |
 
 What a plugin must **not** do is start a bridge on a user's behalf. A bridge lets

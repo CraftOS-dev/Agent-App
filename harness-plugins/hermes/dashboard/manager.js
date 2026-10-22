@@ -1,32 +1,34 @@
 /**
- * The Agent Apps dashboard tab: the page.
+ * The Agent Apps tab: the page.
  *
- * A classic script (the dashboard loads plugin entries with a plain <script>
- * tag), so no modules and no JSX: React comes from the plugin SDK, and the
- * registered component only hosts a container that the manager mounts into.
+ * A classic script, so no modules and no JSX. It runs in two hosts:
+ *  - `hermes dashboard`, which loads it as a plugin entry: the registered
+ *    component (React from the plugin SDK) only hosts a container that the
+ *    manager mounts into, and calls go through the SDK's fetchJSON so the
+ *    dashboard's session token rides along;
+ *  - hermes-webui, whose extension (../webui/agent-apps.js) calls
+ *    `window.__AGENT_APP_MANAGER__.mount(root, host)` with a fetchJSON bound to
+ *    the plugin's loopback backend.
  *
  * Layout: a browser-style tab strip (one tab per Agent App plus "New +"), a
  * content area embedding the active app, and a resizable side panel rendering
  * that app's Hermes session with a composer. Data flows through the plugin's
- * API (`/api/plugins/agent-app/*`, called with the SDK's fetchJSON so the
- * dashboard's session token rides along); apps are polled every 4s and the
- * open transcript every 2.5s. DOM is built with createElement/textContent so
- * app-provided strings never reach innerHTML.
+ * API (`/api/plugins/agent-app/*`); apps are polled every 4s and the open
+ * transcript every 2.5s, only while the page is visible. DOM is built with
+ * createElement/textContent so app-provided strings never reach innerHTML.
  *
  * An app runs on the Hermes machine's loopback interface, so it is embedded
- * only when the dashboard itself is open over http on loopback; anywhere else
- * the frame would point at the viewer's own machine (or be blocked as mixed
+ * only when the page itself is open over http on loopback; anywhere else the
+ * frame would point at the viewer's own machine (or be blocked as mixed
  * content), and the page says so instead of showing a broken frame.
  */
 (function () {
   "use strict";
   var SDK = window.__HERMES_PLUGIN_SDK__;
-  if (!SDK || !window.__HERMES_PLUGINS__) return;
-  var React = SDK.React;
 
   var NAME = "agent-app";
   var API = "/api/plugins/" + NAME;
-  var EMBEDDABLE = location.protocol === "http:" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  var LOOPBACK_HTTP = location.protocol === "http:" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -36,24 +38,41 @@
   }
 
   /** One API call. Failures resolve to `{ ok: false, message }` rather than
-   *  throwing: fetchJSON throws "<status>: <body>" on a non-2xx, and the body
+   *  throwing. On a non-2xx, fetchJSON throws an ApiError whose message is
+   *  already the body's `message`/`detail` and which keeps the raw body on
+   *  `.body`; older dashboards threw "<status>: <body>". Either way the body
    *  is this API's own JSON. */
-  function api(path, body) {
-    var init = body
-      ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
-      : undefined;
-    return SDK.fetchJSON(API + path, init).catch(function (e) {
-      var text = String((e && e.message) || e);
-      var m = /^\d+: ([\s\S]*)$/.exec(text);
-      try {
-        var j = JSON.parse(m ? m[1] : "");
-        if (j && typeof j === "object") return { ok: false, message: j.message || j.detail || text };
-      } catch (_) { /* not JSON */ }
-      return { ok: false, message: text };
-    });
+  function makeApi(fetchJSON) {
+    return function api(path, body) {
+      var init = body
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : undefined;
+      return Promise.resolve().then(function () { return fetchJSON(API + path, init); }).catch(function (e) {
+        var text = String((e && e.message) || e);
+        var legacy = /^\d+: ([\s\S]*)$/.exec(text);
+        var raw = e && typeof e.body === "string" ? e.body : legacy ? legacy[1] : "";
+        try {
+          var j = JSON.parse(raw);
+          if (j && typeof j === "object" && (j.message || j.detail)) return { ok: false, message: j.message || j.detail };
+        } catch (_) { /* not JSON */ }
+        return { ok: false, message: text };
+      });
+    };
   }
 
-  function mount(root) {
+  /**
+   * Mount the manager into `root`. `host`:
+   *  - fetchJSON(url, init): required; resolves the parsed body, throws on a non-2xx
+   *  - embeddable: whether running apps may be framed (default: page is http on loopback)
+   *  - fill: size from CSS instead of fitting the viewport below `root`
+   *  - unreachableHint: what to tell the user when the API does not answer
+   * Returns a dispose function, which also carries refresh() and setEmbeddable(bool).
+   */
+  function mount(root, host) {
+    host = host || {};
+    var api = makeApi(host.fetchJSON);
+    var EMBEDDABLE = host.embeddable != null ? !!host.embeddable : LOOPBACK_HTTP;
+    var noFrameReason = "";
     var S = {
       meta: { blueprints: [], build: "dev" },
       rows: [], active: null, side: false,
@@ -104,13 +123,15 @@
     menu.hidden = true;
     root.append(tabbar, main, menu);
 
-    /* ── Size: fill the viewport below the dashboard's page header ── */
+    /* ── Size: fill the viewport below the dashboard's page header (or let the host's CSS size it) ── */
     function fit() {
       var top = root.getBoundingClientRect().top;
       root.style.height = Math.max(420, Math.floor(window.innerHeight - top - 24)) + "px";
     }
-    on(window, "resize", fit);
-    requestAnimationFrame(fit);
+    if (!host.fill) {
+      on(window, "resize", fit);
+      requestAnimationFrame(fit);
+    }
 
     /* ── Data ── */
     function refresh() {
@@ -184,7 +205,10 @@
       menu.style.top = rect.bottom + 6 + "px";
     }
     function closeMenu() { menu.hidden = true; S.confirmDelete = null; }
-    on(document, "click", function (e) { if (!menu.contains(e.target)) closeMenu(); });
+    // The event's own path, not menu.contains(target): "Delete…" re-renders the
+    // menu, which detaches the clicked button before this listener runs, and a
+    // detached target would read as an outside click and close the confirm step.
+    on(document, "click", function (e) { if (e.composedPath().indexOf(menu) < 0) closeMenu(); });
 
     /* ── Lifecycle actions ── */
     function act(r, verb) {
@@ -247,7 +271,7 @@
     function apiErrorPanel() {
       var c = el("div", "aa-card");
       c.appendChild(el("h2", null, "The Agent Apps API is not reachable"));
-      c.appendChild(el("p", "aa-sub", "If you just enabled the plugin, restart `hermes dashboard`: it mounts plugin APIs at startup. The page retries every few seconds."));
+      c.appendChild(el("p", "aa-sub", (host.unreachableHint || "If you just enabled the plugin, restart `hermes dashboard`: it mounts plugin APIs at startup.") + " The page retries every few seconds."));
       c.appendChild(el("p", "aa-meta", S.apiError));
       return c;
     }
@@ -267,7 +291,7 @@
       }
       if (r.status === "running") {
         c.appendChild(el("h2", null, r.name + " is running"));
-        c.appendChild(el("p", "aa-sub", "The app listens on the Hermes machine's loopback interface, so it can only be embedded when this dashboard is open over http on that machine (http://127.0.0.1 or http://localhost). Open it directly from there:"));
+        c.appendChild(el("p", "aa-sub", (noFrameReason || "The app listens on the Hermes machine's loopback interface, so it can only be embedded when this page is open over http on that machine (http://127.0.0.1 or http://localhost).") + " Open it directly:"));
         var link = el("a", "aa-btn primary", r.url);
         link.href = r.url;
         link.target = "_blank";
@@ -277,7 +301,7 @@
       }
       if (r.status === "unreachable") {
         c.appendChild(el("h2", null, r.name + " is unreachable"));
-        c.appendChild(el("p", "aa-sub", "Port " + r.port + " is answering, but not as this app. Stop whatever holds the port, or pause and relaunch."));
+        c.appendChild(el("p", "aa-sub", (r.port ? "Port " + r.port : "Its port") + " is answering, but not as this app. Stop whatever holds the port, or pause and relaunch."));
       } else if (r.buildEnded) {
         c.appendChild(el("h2", null, "Build session ended"));
         c.appendChild(el("p", "aa-sub", "The agent's build run for “" + r.name + "” finished, but the app is not running. Check the session for what happened, or try launching it."));
@@ -517,7 +541,10 @@
     }
 
     // A transient failure must not kill the poll loops; the next tick retries.
-    function quiet(fn) { return function () { fn().catch(function () {}); }; }
+    // A hidden page does not poll: every /apps poll runs `agent-app list`, and a
+    // host may keep the page mounted while showing another view.
+    function visible() { return root.isConnected && root.getClientRects().length > 0; }
+    function quiet(fn) { return function () { if (visible()) fn().catch(function () {}); }; }
     function loadMeta() {
       return api("/meta").then(function (meta) {
         if (!meta.ok) return;
@@ -529,18 +556,35 @@
     timers.push(setInterval(quiet(refresh), 4000));
     timers.push(setInterval(quiet(pollLog), 2500));
 
-    return function dispose() {
+    function dispose() {
       timers.forEach(clearInterval);
       disposers.forEach(function (d) { d(); });
       root.replaceChildren();
+    }
+    dispose.refresh = function () { return refresh().catch(function () {}); };
+    // A host that learns frames are blocked (a CSP frame-src refusal) turns
+    // embedding off; the page then links to the app instead.
+    dispose.setEmbeddable = function (value, reason) {
+      if (EMBEDDABLE === !!value) return;
+      EMBEDDABLE = !!value;
+      noFrameReason = value ? "" : String(reason || "");
+      frames.forEach(function (f) { f.remove(); });
+      frames.clear();
+      viewKey = "";
+      render();
     };
+    return dispose;
   }
 
-  function AgentAppsPage() {
-    var ref = SDK.hooks.useRef(null);
-    SDK.hooks.useEffect(function () { return mount(ref.current); }, []);
-    return React.createElement("div", { ref: ref, className: "aa" });
-  }
+  window.__AGENT_APP_MANAGER__ = { mount: mount };
 
-  window.__HERMES_PLUGINS__.register(NAME, AgentAppsPage);
+  if (SDK && window.__HERMES_PLUGINS__) {
+    var React = SDK.React;
+    var AgentAppsPage = function () {
+      var ref = SDK.hooks.useRef(null);
+      SDK.hooks.useEffect(function () { return mount(ref.current, { fetchJSON: SDK.fetchJSON }); }, []);
+      return React.createElement("div", { ref: ref, className: "aa" });
+    };
+    window.__HERMES_PLUGINS__.register(NAME, AgentAppsPage);
+  }
 })();

@@ -39,8 +39,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, Body
-from fastapi.responses import JSONResponse
+from urllib.parse import parse_qs
+
+try:
+    from fastapi import APIRouter, Body
+    from fastapi.responses import JSONResponse
+except ImportError:  # loaded by the hermes-webui backend (../webui_backend.py), which needs only dispatch()
+    APIRouter = None
 
 
 def _load_engine():
@@ -65,11 +70,40 @@ SESSION_SOURCE = "tool"
 # How long a build may run before the manager stops showing it as building.
 BUILD_WAIT_S = 2 * 60 * 60
 
-# Environment a turn must not inherit from the dashboard process: the
-# gateway-session switches a desktop or Chat-tab session sets process-wide
-# (they would route the turn's approvals to a gateway nobody watches), the
-# per-session routing variables, and a TUI preference.
-_SCRUBBED_ENV = ("HERMES_TUI", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_INTERACTIVE", "HERMES_UI_SESSION_ID")
+# Environment a turn must not inherit from the host process (the dashboard, or
+# a web UI that hosts the tab): the gateway-session switches a desktop or
+# Chat-tab session sets process-wide (they would route the turn's approvals to
+# a gateway nobody watches), a session-less `/yolo` (it would auto-approve the
+# turn's dangerous commands, which only the user's own config may do), the
+# delegated-child and plugin-host markers, and a TUI preference. The
+# per-session routing variables are scrubbed by prefix and, when Hermes is
+# importable, from its own map of them, which is what the kanban dispatcher
+# scrubs too.
+_SCRUBBED_ENV = frozenset({
+    "HERMES_TUI", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_INTERACTIVE",
+    "HERMES_YOLO_MODE", "HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_PLUGIN_HOST_PROCESS",
+})
+_SCRUBBED_PREFIXES = ("HERMES_SESSION_", "HERMES_UI_SESSION_", "HERMES_CRON_", "HERMES_BROWSER_CONTROL_")
+
+# How long a cancelled turn gets to exit on SIGTERM before it is killed.
+CANCEL_GRACE_S = 5.0
+
+
+def _session_scoped_vars() -> frozenset[str]:
+    try:
+        from gateway.session_context import _VAR_MAP
+
+        return frozenset(_VAR_MAP)
+    except Exception:
+        return frozenset()
+
+
+def turn_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a session turn runs with: the host's, minus anything
+    that belongs to the host's own sessions or approval state."""
+    source = os.environ if environ is None else environ
+    drop = _SCRUBBED_ENV | _session_scoped_vars()
+    return {k: v for k, v in source.items() if k not in drop and not k.startswith(_SCRUBBED_PREFIXES)}
 
 
 def session_id_for(path: str) -> str:
@@ -91,18 +125,44 @@ def session_preamble(name: str, path: str) -> str:
     )
 
 
+def _is_batch(path: str) -> bool:
+    return os.name == "nt" and path.lower().endswith((".cmd", ".bat"))
+
+
+def _hermes_launchers() -> list[str]:
+    """Where Hermes's installers put the `hermes` launcher, for a host whose
+    PATH does not include it (a web UI started by a supervisor, say)."""
+    out = [os.path.join(os.path.expanduser("~"), ".local", "bin", "hermes")]
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = Path(get_hermes_home())
+        out += [str(home / "bin" / "hermes.exe"), str(home / "bin" / "hermes")]
+    except Exception:
+        pass
+    return out
+
+
 def hermes_argv() -> list[str]:
-    """How to start Hermes. This process IS Hermes, so its own interpreter
-    runs the same install (and inherits the active profile's HERMES_HOME);
-    the module form also never goes through a Windows batch shim. HERMES_BIN
-    overrides, as it does for the kanban dispatcher."""
+    """How to start Hermes. HERMES_BIN overrides, as it does for the kanban
+    dispatcher. Otherwise, inside `hermes dashboard` this process IS Hermes,
+    running in its own venv, so its interpreter runs the same install (and
+    inherits the active profile's HERMES_HOME), and the module form never goes
+    through a Windows batch shim. A host that imports Hermes into a bare
+    interpreter (hermes-webui does) cannot start a child that way, so it uses
+    the `hermes` launcher instead."""
     override = os.environ.get("HERMES_BIN", "").strip()
     if override:
         if override.lower().endswith(".py"):
             return [sys.executable, override]
         found = shutil.which(override) or override
-        if not (os.name == "nt" and found.lower().endswith((".cmd", ".bat"))):
+        if not _is_batch(found):
             return [found]
+    if sys.prefix != sys.base_prefix:
+        return [sys.executable, "-m", "hermes_cli.main"]
+    found = shutil.which("hermes") or next((p for p in _hermes_launchers() if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    if found is not None and not _is_batch(found):
+        return [found]
     return [sys.executable, "-m", "hermes_cli.main"]
 
 
@@ -170,6 +230,35 @@ class HermesSessions:
             db.close()
 
 
+def _stop_tree(proc: subprocess.Popen, grace: float = CANCEL_GRACE_S) -> None:
+    """Stop a turn and everything it started. On POSIX the turn leads its own
+    process group: SIGTERM, then SIGKILL if the group outlives `grace`. Windows
+    has no graceful stop for a windowless tree, so it is killed outright."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        proc.terminate()
+        return
+
+    def escalate() -> None:
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+
+    threading.Thread(target=escalate, name=f"agent-app:kill:{proc.pid}", daemon=True).start()
+
+
 class _Session:
     def __init__(self) -> None:
         self.queue: collections.deque = collections.deque()
@@ -204,7 +293,7 @@ class TurnRunner:
             if state.working:
                 return
             state.working = True
-        threading.Thread(target=self._drain, args=(sid,), name=f"agent-app:{sid}", daemon=True).start()
+        threading.Thread(target=self._drain, args=(sid, state), name=f"agent-app:{sid}", daemon=True).start()
 
     def busy(self, sid: str) -> bool:
         with self._lock:
@@ -216,32 +305,35 @@ class TurnRunner:
             state = self._sessions.get(sid)
             return state.error if state is not None else None
 
-    def cancel(self, sid: str) -> None:
-        """Drop queued turns and stop the running one (with its children)."""
+    def cancel(self, sid: str, wait: float = 0.0) -> None:
+        """Drop queued turns and stop the running one (with its children).
+        With `wait`, block up to that many seconds for it to exit, so the
+        caller can safely remove what the turn was working on."""
         with self._lock:
             state = self._sessions.pop(sid, None)
-        if state is None:
+            if state is None:
+                return
+            state.queue.clear()
+            proc = state.proc
+        if proc is None or proc.poll() is not None:
             return
-        state.queue.clear()
-        proc = state.proc
-        if proc is not None and proc.poll() is None:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    capture_output=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            else:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    proc.terminate()
+        _stop_tree(proc)
+        if wait > 0:
+            try:
+                proc.wait(timeout=wait)
+            except subprocess.TimeoutExpired:
+                pass
 
-    def _drain(self, sid: str) -> None:
+    def _owns(self, sid: str, state: _Session) -> bool:
+        # A cancel pops the state, and a later submit may install a new one:
+        # a drain thread works only for the state it was started for, or two
+        # threads would run turns on one session at once.
+        return self._sessions.get(sid) is state
+
+    def _drain(self, sid: str, state: _Session) -> None:
         while True:
             with self._lock:
-                state = self._sessions.get(sid)
-                if state is None:
+                if not self._owns(sid, state):
                     return  # cancelled
                 if not state.queue:
                     state.working = False
@@ -269,7 +361,7 @@ class TurnRunner:
             # The message goes in on stdin: arbitrary text, never re-parsed.
             "--query-file", "-",
         ]
-        env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_SESSION_") and k not in _SCRUBBED_ENV}
+        env = turn_env()
         windows = os.name == "nt"
         with open(log_path, "ab") as log:
             start = log.tell()
@@ -292,6 +384,9 @@ class TurnRunner:
                 return False
             with self._lock:
                 state.proc = proc
+                cancelled = not self._owns(sid, state)
+            if cancelled:  # cancelled while it was starting, before it could be found
+                _stop_tree(proc)
             try:
                 proc.communicate(input=message.encode("utf-8"))
             except OSError:
@@ -332,6 +427,9 @@ class Manager:
             data_dir = engine.apps_dir().parent / "hermes-plugin"
         return cls(TurnRunner(data_dir), HermesSessions())
 
+    def meta(self) -> dict:
+        return {"ok": True, "blueprints": list(engine.FRAMEWORK_BLUEPRINTS), "build": engine.build_stamp(), "appsDir": str(engine.apps_dir())}
+
     def rows(self) -> list[dict]:
         """Registered apps merged with builds not yet in the registry. A build
         retires once its app is seen running."""
@@ -365,25 +463,32 @@ class Manager:
         if not slug:
             return 400, {"ok": False, "message": "Give the app a name."}
         directory = str(engine.apps_dir() / slug)
-        with self._lock:
-            if directory in self.builds:
-                return 400, {"ok": False, "message": f'"{name}" is already being built.'}
-        if os.path.exists(directory):
-            return 400, {"ok": False, "message": f'An app directory named "{slug}" already exists.'}
         kick = engine.build_kickoff_prompt({
             "action": "build", "name": name, "requirement": body.get("requirement"),
             "blueprint": body.get("blueprint"), "port": body.get("port"),
         })
         if kick["kind"] == "error":
             return 400, {"ok": False, "message": kick["message"]}
-        engine.apps_dir().mkdir(parents=True, exist_ok=True)
         sid = session_id_for(directory)
-        self.sessions.ensure(sid, f"Agent App: {name}")
-        prompt = f"{kick['prompt']}\n\nCreate the app at `{directory}`: pass that directory to every agent-app command."
         entry = {"name": name, "dir": directory, "ended": False, "started": time.time()}
+        # Checked and claimed in one step: two quick submits of one name must
+        # not both start a build of the same directory.
         with self._lock:
+            if directory in self.builds:
+                return 400, {"ok": False, "message": f'"{name}" is already being built.'}
+            if os.path.exists(directory):
+                return 400, {"ok": False, "message": f'An app directory named "{slug}" already exists.'}
             self.builds[directory] = entry
             self.seeded.add(sid)
+        try:
+            engine.apps_dir().mkdir(parents=True, exist_ok=True)
+            self.sessions.ensure(sid, f"Agent App: {name}")
+        except Exception:
+            with self._lock:
+                self.builds.pop(directory, None)
+                self.seeded.discard(sid)
+            raise
+        prompt = f"{kick['prompt']}\n\nCreate the app at `{directory}`: pass that directory to every agent-app command."
 
         def done(_ok: bool) -> None:
             with self._lock:
@@ -428,14 +533,21 @@ class Manager:
             building = path in self.builds
         if not registered and not building:
             return 404, {"ok": False, "message": "unknown app"}
+        sid = session_id_for(path)
+        # The agent stops first: a turn still running would go on writing to,
+        # serving, or re-registering the app while it is being removed.
+        self.runner.cancel(sid, wait=2 * CANCEL_GRACE_S)
         if registered:
             engine.run_framework([path, "stop"])
             # `remove --yes` backs the app's data up outside the app before deleting it.
             result = engine.run_framework([path, "remove", "--yes"])
             if not result.ok:
                 return 500, {"ok": False, "message": (result.stderr or result.stdout).strip()}
-        sid = session_id_for(path)
-        self.runner.cancel(sid)
+        elif os.path.isdir(path) and Path(path).resolve().parent == engine.apps_dir().resolve():
+            # A build stopped before it registered the app. What it left is a
+            # partial scaffold in the directory this manager chose for it, and
+            # leaving it would refuse a rebuild under the same name.
+            shutil.rmtree(path, ignore_errors=True)
         with self._lock:
             self.builds.pop(path, None)
             self.seeded.discard(sid)
@@ -471,7 +583,7 @@ def build_router(manager: Manager) -> APIRouter:
     @r.get("/meta")
     @_guarded
     def meta() -> Any:
-        return {"ok": True, "blueprints": list(engine.FRAMEWORK_BLUEPRINTS), "build": engine.build_stamp(), "appsDir": str(engine.apps_dir())}
+        return manager.meta()
 
     @r.get("/apps")
     @_guarded
@@ -503,4 +615,34 @@ def build_router(manager: Manager) -> APIRouter:
     return r
 
 
-router = build_router(Manager.default())
+def dispatch(manager: Manager, method: str, path: str, query: str = "", body: Any = None) -> tuple[int, dict]:
+    """The same routes as `build_router`, for a host with no FastAPI app to
+    mount a router on (the hermes-webui backend). `path` is relative to
+    `/api/plugins/agent-app`."""
+    body = body if isinstance(body, dict) else {}
+    try:
+        if method == "GET" and path == "/meta":
+            return 200, manager.meta()
+        if method == "GET" and path == "/apps":
+            return 200, {"ok": True, "rows": manager.rows()}
+        if method == "GET" and path == "/session":
+            app = (parse_qs(query).get("app") or [""])[0]
+            return 200, manager.transcript(app)
+        if method == "POST" and path == "/build":
+            return manager.start_build(body)
+        if method == "POST" and path == "/session/send":
+            return manager.send(body)
+        if method == "POST" and path.startswith("/app/"):
+            verb = path[len("/app/"):]
+            if verb not in ("serve", "stop", "remove"):
+                return 404, {"ok": False, "message": "unknown endpoint"}
+            return manager.lifecycle(verb, str(body.get("path") or ""))
+        return 404, {"ok": False, "message": "unknown endpoint"}
+    except Exception as exc:
+        return 500, {"ok": False, "message": str(exc) or exc.__class__.__name__}
+
+
+# One manager per process: the dashboard mounts `router`, and the hermes-webui
+# backend dispatches to the same MANAGER.
+MANAGER = Manager.default()
+router = build_router(MANAGER) if APIRouter is not None else None

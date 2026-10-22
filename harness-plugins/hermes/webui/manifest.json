@@ -1,0 +1,8 @@
+{
+  "id": "agent-app",
+  "name": "Agent Apps",
+  "version": "0.1.0",
+  "description": "The Agent Apps tab of the agent-app Hermes plugin: one tab per Agent App, an embedded view of each running app, and its agent session beside it.",
+  "scripts": ["manager.js", "agent-apps.js"],
+  "stylesheets": ["manager.css", "agent-apps.css"]
+}

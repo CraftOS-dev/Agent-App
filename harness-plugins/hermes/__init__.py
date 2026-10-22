@@ -6,17 +6,20 @@
     shelling a real `agent-app` or `a2app` verb;
   - the six framework skills, as plugin skills (`agent-app:creator`, ...);
   - a system-prompt section that routes any app request to the owning skill,
-    which is how plugin skills are found at all (Hermes keeps them out of the
-    `<available_skills>` index and gives them no slash commands);
+    which is how the model finds plugin skills at all (Hermes keeps them out
+    of the `<available_skills>` index);
   - the `/agent-app <request>` command, which hands the request to the agent:
     `ctx.inject_message` in the classic CLI, a `pre_gateway_dispatch` rewrite
     on messaging platforms;
   - `hermes agent-app <args...>`, a passthrough to both CLIs;
   - the `hermes` route in `$A2APP_HOME/harnesses.json`, so
-    `agent-app <dir> bridge` can start Hermes when an app queues work.
+    `agent-app <dir> bridge` can start Hermes when an app queues work;
+  - inside hermes-webui only, the Agent Apps tab's loopback backend
+    (`webui_backend.py`), since the web UI mounts no plugin API.
 
 The Agent Apps dashboard tab lives beside this, in `dashboard/` (Hermes loads
-dashboard plugins in the dashboard process, not through `register`).
+dashboard plugins in the dashboard process, not through `register`), and its
+hermes-webui extension in `webui/`.
 """
 from __future__ import annotations
 
@@ -26,21 +29,24 @@ import os
 import re
 import sys
 
-from . import engine
+from . import engine, webui_backend
 
 logger = logging.getLogger(__name__)
 
 # How `agent-app <dir> bridge` starts Hermes when an app queues work: one
 # turn, run in the app's directory, then exit (`-Q` exits after answering
 # even on a TTY; `--cli` keeps a `display.interface: tui` default from taking
-# over a run nobody is watching). The framework has no built-in Hermes
-# profile, so without this entry the bridge cannot see Hermes. Dangerous
-# commands follow the user's `approvals.single_query_mode` (deny by default);
-# this route grants nothing on their behalf.
+# over a run nobody is watching). The prompt goes in on stdin, as the tab's
+# own turns send theirs: an argument is capped by the OS (128 KiB on Linux,
+# 32 KiB for a whole Windows command line) and a task's payload has no such
+# bound. The framework has no built-in Hermes profile, so without this entry
+# the bridge cannot see Hermes. Dangerous commands follow the user's
+# `approvals.single_query_mode` (deny by default); this route grants nothing
+# on their behalf.
 HERMES_PROFILE = {
     "id": "hermes",
     "name": "Hermes",
-    "routes": [{"mode": "headless", "command": "hermes", "args": ["--cli", "chat", "-Q", "-q", engine.PROMPT_PLACEHOLDER]}],
+    "routes": [{"mode": "headless", "command": "hermes", "args": ["--cli", "chat", "-Q", "--query-file", "-"], "input": "stdin"}],
 }
 
 # One line per skill for the routing section; the full descriptions are long
@@ -109,15 +115,25 @@ def guidance(skills: list[tuple[str, object, dict]], namespace: str, skills_home
     return "\n".join(lines)
 
 
+def agent_cwd() -> str | None:
+    """The calling session's working directory, so a relative `dir` means what
+    it means in the agent's terminal. A host running many sessions at once
+    (the gateway, the TUI, a web UI) keeps each one's directory per session;
+    TERMINAL_CWD in the environment is only right for a single-session CLI,
+    so it is the fallback for a Hermes without `agent.runtime_cwd`. A remote
+    terminal backend's path does not exist here, and is ignored."""
+    try:
+        from agent.runtime_cwd import resolve_agent_cwd
+
+        cwd = str(resolve_agent_cwd())
+    except Exception:
+        cwd = os.environ.get("TERMINAL_CWD") or ""
+    return cwd if cwd and os.path.isdir(cwd) else None
+
+
 def _tool_handler(tool: engine.Tool):
     def handler(args: dict, **_kw) -> str:
-        # A relative `dir` means what it means in the agent's terminal, whose
-        # working directory Hermes exports as TERMINAL_CWD (a remote terminal
-        # backend's path does not exist here, and is ignored).
-        cwd = os.environ.get("TERMINAL_CWD") or None
-        if cwd is not None and not os.path.isdir(cwd):
-            cwd = None
-        return tool.call(args if isinstance(args, dict) else {}, cwd=cwd).text()
+        return tool.call(args if isinstance(args, dict) else {}, cwd=agent_cwd()).text()
 
     return handler
 
@@ -218,4 +234,11 @@ def register(ctx) -> None:
         setup_fn=_cli_setup,
         handler_fn=_cli_run,
         description="Passthrough to agent-app (build/evolve verbs) and a2app (operate), routed by verb.",
+    )
+
+    # Inside hermes-webui, which never mounts a plugin API, the Agent Apps
+    # extension needs this plugin to serve the tab's routes itself. Started
+    # on its own thread, never here: see webui_backend.maybe_start.
+    webui_backend.start_in_background(
+        lambda info: logger.info("agent-app: Agent Apps backend for hermes-webui at %s", info["base"])
     )

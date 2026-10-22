@@ -149,7 +149,9 @@ def _resolve_shim(shim: str) -> list[str] | None:
     if not match:
         return None
     base = Path(shim).parent
-    script = base / match.group(1)
+    # The shim's path is written with backslashes; split it so it also joins
+    # correctly where `\` is not a separator (the tests run on every OS).
+    script = base.joinpath(*re.split(r"[\\/]+", match.group(1)))
     if not script.is_file():
         return None
     bundled = base / "node.exe"
@@ -557,7 +559,10 @@ def skills_dir() -> Path | None:
     staged = PLUGIN_ROOT / "skills"
     if (staged / "creator" / "SKILL.md").is_file():
         return staged
-    result = run_framework(["skills", "--path"], timeout=30)
+    # This runs inside `register()`, which Hermes abandons after 10s by default
+    # (`plugins.load_timeout_seconds`), and then nothing of the plugin loads.
+    # A CLI that has not answered in 5s gets no skills rather than no plugin.
+    result = run_framework(["skills", "--path"], timeout=5)
     candidate = Path(result.stdout.strip()) if result.ok and result.stdout.strip() else None
     if candidate is not None and (candidate / "creator" / "SKILL.md").is_file():
         return candidate

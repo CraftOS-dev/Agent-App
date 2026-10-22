@@ -16,6 +16,7 @@ that records what it was run with and writes a transcript.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -24,9 +25,11 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
@@ -50,13 +53,15 @@ console.log(JSON.stringify({ ok: true, bin: BIN, argv }));
 """
 
 FAKE_HERMES = """
-import json, os, sys, time
+import json, os, re, sys, time
 args = sys.argv[1:]
 message = sys.stdin.read()
 sid = args[args.index("--resume") + 1]
 record = {"argv": args, "cwd": os.getcwd(), "message": message, "start": time.time(),
-          "env": {k: os.environ.get(k) for k in ("HERMES_TUI", "HERMES_SESSION_KEY", "HERMES_GATEWAY_SESSION", "KEEP_ME")}}
-time.sleep(float(os.environ.get("FAKE_TURN_DELAY", "0")))
+          "env": {k: os.environ.get(k) for k in ("HERMES_TUI", "HERMES_SESSION_KEY", "HERMES_GATEWAY_SESSION", "HERMES_YOLO_MODE", "KEEP_ME")}}
+# A message may set its own turn length ("SLEEP=2 ..."); otherwise FAKE_TURN_DELAY.
+sleep = re.search(r"SLEEP=([0-9.]+)", message)
+time.sleep(float(sleep.group(1) if sleep else os.environ.get("FAKE_TURN_DELAY", "0")))
 record["end"] = time.time()
 with open(os.environ["FAKE_HERMES_CALLS"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record) + "\\n")
@@ -89,6 +94,25 @@ def load_plugin():
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@contextlib.contextmanager
+def fake_modules(modules: dict):
+    """Install modules in sys.modules for the block (None makes an import fail),
+    restoring whatever was there before."""
+    saved = {name: sys.modules.get(name, _MISSING) for name in modules}
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+_MISSING = object()
 
 
 def load_dashboard_api():
@@ -224,9 +248,22 @@ class PluginRegistration(unittest.TestCase):
         self.assertIn('"invalid_enum"', text)
         self.assertIn("rejected by the guard", text)
 
-    def test_a_relative_dir_resolves_in_the_agents_terminal(self) -> None:
+    def test_a_relative_dir_resolves_in_the_calling_sessions_directory(self) -> None:
+        # A multi-session host keeps each session's directory per session;
+        # TERMINAL_CWD then holds some other session's, and must lose.
+        session_dir = self.box.dir / "session"
+        session_dir.mkdir()
         os.environ["TERMINAL_CWD"] = str(self.box.dir)
-        self.call("agent_app_get", dir=".", entity="deals", id="D1")
+        fake = types.ModuleType("agent.runtime_cwd")
+        fake.resolve_agent_cwd = lambda: session_dir
+        with fake_modules({"agent.runtime_cwd": fake}):
+            self.call("agent_app_get", dir=".", entity="deals", id="D1")
+        self.assertEqual(Path(self.box.recorded()[-1]["cwd"]).resolve(), session_dir.resolve())
+
+    def test_without_runtime_cwd_a_relative_dir_resolves_in_the_terminal(self) -> None:
+        os.environ["TERMINAL_CWD"] = str(self.box.dir)
+        with fake_modules({"agent.runtime_cwd": None}):  # a Hermes that predates it
+            self.call("agent_app_get", dir=".", entity="deals", id="D1")
         self.assertEqual(Path(self.box.recorded()[-1]["cwd"]).resolve(), self.box.dir.resolve())
 
     def test_missing_cli_is_reported_with_the_install_hint(self) -> None:
@@ -286,7 +323,10 @@ class PluginRegistration(unittest.TestCase):
         self.assertEqual(doc, {"version": 1, "harnesses": [self.plugin.HERMES_PROFILE]})
         route = self.plugin.HERMES_PROFILE["routes"][0]
         self.assertEqual(route["command"], "hermes")
-        self.assertEqual(route["args"].count("{prompt}"), 1)
+        # The prompt goes in on stdin (no OS cap on its size), so no argument carries it.
+        self.assertEqual(route["input"], "stdin")
+        self.assertEqual(route["args"][-2:], ["--query-file", "-"])
+        self.assertNotIn("{prompt}", " ".join(route["args"]))
 
 
 @unittest.skipIf(NODE is None, "node is required for the fake framework CLIs")
@@ -440,7 +480,7 @@ class DashboardApi(unittest.TestCase):
         fake_hermes.write_text(FAKE_HERMES, encoding="utf-8")
         os.environ.update({"FAKE_STORE": str(self.store), "FAKE_HERMES_CALLS": str(self.hermes_calls), "HERMES_BIN": str(fake_hermes)})
         # What a desktop or Chat-tab session leaves in the dashboard process.
-        os.environ.update({"HERMES_TUI": "1", "HERMES_SESSION_KEY": "leaked", "HERMES_GATEWAY_SESSION": "1", "KEEP_ME": "yes"})
+        os.environ.update({"HERMES_TUI": "1", "HERMES_SESSION_KEY": "leaked", "HERMES_GATEWAY_SESSION": "1", "HERMES_YOLO_MODE": "1", "KEEP_ME": "yes"})
         self.api = load_dashboard_api()
         self.manager = self.api.Manager(self.api.TurnRunner(self.box.dir / "data"), FakeSessions(self.store))
         app = FastAPI()
@@ -498,7 +538,7 @@ class DashboardApi(unittest.TestCase):
         self.assertIn('Build a new Agent App named "Acme CRM"', turn["message"])
         self.assertIn("**creator** skill", turn["message"])
         self.assertIn(f"Create the app at `{path}`", turn["message"])
-        self.assertEqual(turn["env"], {"HERMES_TUI": None, "HERMES_SESSION_KEY": None, "HERMES_GATEWAY_SESSION": None, "KEEP_ME": "yes"})
+        self.assertEqual(turn["env"], {"HERMES_TUI": None, "HERMES_SESSION_KEY": None, "HERMES_GATEWAY_SESSION": None, "HERMES_YOLO_MODE": None, "KEEP_ME": "yes"})
         self.assertEqual(self.manager.sessions.ensured, [(sid, "Agent App: Acme CRM")])
 
         session = self.client.get("/api/plugins/agent-app/session", params={"app": path}).json()
@@ -546,6 +586,79 @@ class DashboardApi(unittest.TestCase):
         log = self.box.dir / "data" / "logs" / f"{self.api.session_id_for(str(app_dir))}.log"
         self.assertIn("no API key configured", log.read_text(encoding="utf-8"))
 
+    def test_a_cancelled_session_never_runs_two_turns_at_once(self) -> None:
+        # The killed turn's thread is slow to notice (as a Hermes that handles
+        # SIGTERM gracefully would be); new work sent meanwhile must still run
+        # one turn at a time.
+        app_dir = self.box.dir / "crm"
+        app_dir.mkdir()
+        runner, sid = self.manager.runner, self.api.session_id_for(str(app_dir))
+        real_turn = runner._turn
+
+        def slow_to_return(sid_, state, message, cwd):
+            ok = real_turn(sid_, state, message, cwd)
+            if message.startswith("SLEEP=30"):
+                time.sleep(0.8)
+            return ok
+
+        runner._turn = slow_to_return
+        runner.submit(sid, "SLEEP=30 A", str(app_dir))
+        deadline = time.time() + 10
+        while runner._sessions.get(sid) is None or runner._sessions[sid].proc is None:
+            self.assertLess(time.time(), deadline, "the first turn never started")
+            time.sleep(0.05)
+        runner.cancel(sid)
+        runner.submit(sid, "SLEEP=1 B", str(app_dir))
+        runner.submit(sid, "SLEEP=1 C", str(app_dir))
+        time.sleep(1.2)
+        self.wait_idle(str(app_dir))
+        turns = {t["message"].split()[1]: t for t in self.turns()}
+        self.assertEqual(sorted(turns), ["B", "C"], "the cancelled turn was stopped; both new ones ran")
+        self.assertLessEqual(turns["B"]["end"], turns["C"]["start"], "turns on one session never overlap")
+
+    def test_turns_do_not_inherit_the_hosts_session_or_approval_state(self) -> None:
+        env = self.api.turn_env({
+            "HERMES_YOLO_MODE": "1", "HERMES_SESSION_KEY": "k", "HERMES_UI_SESSION_ID": "u",
+            "HERMES_CRON_SESSION": "1", "HERMES_BROWSER_CONTROL_PRINCIPAL": "p",
+            "HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_GATEWAY_SESSION": "1", "HERMES_EXEC_ASK": "1",
+            "HERMES_HOME": "/h", "KEEP_ME": "yes",
+        })
+        self.assertEqual(env, {"HERMES_HOME": "/h", "KEEP_ME": "yes"})
+
+    def test_delete_stops_the_turn_before_removing_the_app(self) -> None:
+        app_dir = self.box.dir / "crm"
+        app_dir.mkdir()
+        self.box.set_registry([{"id": "crm", "name": "CRM", "path": str(app_dir), "status": "stopped"}])
+        sid = self.api.session_id_for(str(app_dir))
+        self.client.post("/api/plugins/agent-app/session/send", json={"path": str(app_dir), "name": "CRM", "text": "SLEEP=60 evolve it"})
+        deadline = time.time() + 10
+        while self.manager.runner._sessions.get(sid) is None or self.manager.runner._sessions[sid].proc is None:
+            self.assertLess(time.time(), deadline, "the turn never started")
+            time.sleep(0.05)
+        proc = self.manager.runner._sessions[sid].proc
+        started = time.time()
+        r = self.client.post("/api/plugins/agent-app/app/remove", json={"path": str(app_dir)})
+        self.assertEqual(r.json(), {"ok": True})
+        self.assertLess(time.time() - started, 30)
+        self.assertIsNotNone(proc.poll(), "the agent's turn is gone before the app is removed")
+        self.assertEqual([c["argv"] for c in self.box.recorded()[-2:]], [[str(app_dir), "stop"], [str(app_dir), "remove", "--yes"]])
+        self.assertFalse(self.manager.runner.busy(sid))
+
+    def test_deleting_a_build_before_it_registers_clears_its_directory(self) -> None:
+        os.environ["FAKE_TURN_DELAY"] = "60"
+        r = self.client.post("/api/plugins/agent-app/build", json={"name": "Acme CRM", "requirement": "Track deals."})
+        path = Path(r.json()["path"])
+        path.mkdir(parents=True)  # what the agent's scaffold step would have written
+        (path / "package.json").write_text("{}", encoding="utf-8")
+        r = self.client.post("/api/plugins/agent-app/app/remove", json={"path": str(path)})
+        self.assertEqual(r.json(), {"ok": True})
+        self.assertFalse(path.exists(), "a partial build would refuse a rebuild under the same name")
+        self.assertEqual(self.client.get("/api/plugins/agent-app/apps").json()["rows"], [])
+        os.environ["FAKE_TURN_DELAY"] = "0"
+        again = self.client.post("/api/plugins/agent-app/build", json={"name": "Acme CRM", "requirement": "Track deals."})
+        self.assertEqual(again.status_code, 200, again.text)
+        self.wait_idle(str(path))
+
     def test_lifecycle_shells_agent_app(self) -> None:
         app_dir = str(self.box.dir / "crm")
         unknown = self.client.post("/api/plugins/agent-app/app/serve", json={"path": app_dir})
@@ -564,9 +677,212 @@ class DashboardApi(unittest.TestCase):
         self.assertNotEqual(sid("/x/crm"), sid("/y/crm"))
         self.assertRegex(sid("/x/Ünïcode app"), r"^agent-app-[A-Za-z0-9_-]+$")
 
-    def test_hermes_is_started_by_the_running_interpreter(self) -> None:
+    def test_inside_hermes_venv_hermes_is_started_by_the_running_interpreter(self) -> None:
         os.environ.pop("HERMES_BIN", None)
-        self.assertEqual(self.api.hermes_argv(), [sys.executable, "-m", "hermes_cli.main"])
+        with unittest.mock.patch.object(sys, "base_prefix", sys.prefix + "-base"):
+            self.assertEqual(self.api.hermes_argv(), [sys.executable, "-m", "hermes_cli.main"])
+
+    def test_a_host_without_hermes_venv_starts_the_hermes_launcher(self) -> None:
+        # hermes-webui imports Hermes into a bare interpreter, which cannot run
+        # `-m hermes_cli.main` in a child.
+        os.environ.pop("HERMES_BIN", None)
+        bindir = self.box.dir / "bin"
+        bindir.mkdir()
+        launcher = bindir / ("hermes.exe" if os.name == "nt" else "hermes")
+        launcher.write_text("", encoding="utf-8")
+        launcher.chmod(0o755)
+        os.environ["PATH"] = str(bindir)
+        with unittest.mock.patch.object(sys, "base_prefix", sys.prefix):
+            self.assertEqual(Path(self.api.hermes_argv()[0]).resolve(), launcher.resolve())
+
+
+def load_module(name: str, path: Path):
+    sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class WebuiBackend(unittest.TestCase):
+    """The loopback backend the plugin starts inside hermes-webui."""
+
+    TOKEN = "t" * 43
+
+    def setUp(self) -> None:
+        self.mod = load_module("agent_app_webui_backend_under_test", PLUGIN / "webui_backend.py")
+        self.calls: list[tuple] = []
+
+        def dispatch(method, path, query, body):
+            self.calls.append((method, path, query, body))
+            return 200, {"ok": True, "path": path}
+
+        self.backend = self.mod.Backend(dispatch, self.TOKEN, self.mod.allowed_origins({"HERMES_WEBUI_PORT": "8787"}))
+        self.port = self.backend.server.server_address[1]
+
+    def tearDown(self) -> None:
+        self.backend.stop()
+
+    def request(self, method: str, path: str, *, origin: str | None = "http://127.0.0.1:8787", token: str | None = TOKEN,
+                host: str | None = None, body: bytes | None = None) -> tuple[int, dict, dict]:
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {"Host": host or f"127.0.0.1:{self.port}"}
+        if origin is not None:
+            headers["Origin"] = origin
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=headers)
+        res = conn.getresponse()
+        raw = res.read()
+        conn.close()
+        return res.status, {k.lower(): v for k, v in res.getheaders()}, (json.loads(raw) if raw else {})
+
+    def test_serves_the_tab_routes_to_the_web_uis_origin(self) -> None:
+        status, headers, payload = self.request("GET", "/api/plugins/agent-app/apps")
+        self.assertEqual((status, payload), (200, {"ok": True, "path": "/apps"}))
+        self.assertEqual(headers["access-control-allow-origin"], "http://127.0.0.1:8787")
+        status, _, _ = self.request("POST", "/api/plugins/agent-app/build", body=b'{"name": "CRM"}')
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls[-1], ("POST", "/build", "", {"name": "CRM"}))
+        self.request("GET", "/api/plugins/agent-app/session?app=%2Fa%2Fcrm")
+        self.assertEqual(self.calls[-1][:3], ("GET", "/session", "app=%2Fa%2Fcrm"))
+
+    def test_a_local_tool_without_an_origin_still_needs_the_token(self) -> None:
+        self.assertEqual(self.request("GET", "/api/plugins/agent-app/meta", origin=None)[0], 200)
+        self.assertEqual(self.request("GET", "/api/plugins/agent-app/meta", origin=None, token=None)[0], 401)
+
+    def test_refuses_a_wrong_token_another_origin_and_a_rebinding_host(self) -> None:
+        status, headers, _ = self.request("GET", "/api/plugins/agent-app/apps", token="nope")
+        self.assertEqual(status, 401)
+        self.assertIn("access-control-allow-origin", headers, "the page can read a 401 and re-read runtime.json")
+        status, headers, _ = self.request("GET", "/api/plugins/agent-app/apps", origin="https://evil.example")
+        self.assertEqual(status, 403)
+        self.assertNotIn("access-control-allow-origin", headers)
+        self.assertEqual(self.request("GET", "/api/plugins/agent-app/apps", host=f"evil.example:{self.port}")[0], 403)
+        self.assertEqual(self.calls, [], "nothing refused reached the manager")
+
+    def test_preflight_is_answered_only_for_the_web_ui(self) -> None:
+        status, headers, _ = self.request("OPTIONS", "/api/plugins/agent-app/build", token=None)
+        self.assertEqual(status, 204)
+        self.assertIn("Authorization", headers["access-control-allow-headers"])
+        self.assertEqual(self.request("OPTIONS", "/api/plugins/agent-app/build", token=None, origin="https://evil.example")[0], 403)
+
+    def test_rejects_a_body_that_is_not_json_and_paths_outside_the_api(self) -> None:
+        self.assertEqual(self.request("POST", "/api/plugins/agent-app/build", body=b"{nope")[0], 400)
+        self.assertEqual(self.request("GET", "/etc/passwd")[0], 404)
+
+    def test_starts_only_in_the_web_ui_server(self) -> None:
+        checkout = Path(tempfile.mkdtemp(prefix="webui-"))
+        try:
+            (checkout / "api").mkdir()
+            (checkout / "api" / "extensions.py").write_text("", encoding="utf-8")
+            (checkout / "server.py").write_text("", encoding="utf-8")
+            self.assertTrue(self.mod.in_webui_server([str(checkout / "server.py")]))
+            self.assertFalse(self.mod.in_webui_server(["/usr/bin/hermes", "--cli", "chat"]))
+            self.assertFalse(self.mod.in_webui_server([str(PLUGIN / "server.py")]), "some other server.py")
+            with unittest.mock.patch.dict(os.environ, {"AGENT_APP_WEBUI_BACKEND": "0"}):
+                self.assertFalse(self.mod.in_webui_server([str(checkout / "server.py")]))
+        finally:
+            shutil.rmtree(checkout, ignore_errors=True)
+
+
+@unittest.skipIf(NODE is None, "node is required for the fake framework CLIs")
+class WebuiStart(unittest.TestCase):
+    """maybe_start() end to end: the real Manager behind the real backend."""
+
+    def setUp(self) -> None:
+        self.box = Sandbox()
+        self.state = self.box.dir / "webui-state"
+        (self.state / "extensions" / "agent-app").mkdir(parents=True)
+        (self.state / "extensions" / "agent-app" / "manifest.json").write_text("{}", encoding="utf-8")
+        self.checkout = self.box.dir / "hermes-webui"
+        (self.checkout / "api").mkdir(parents=True)
+        (self.checkout / "api" / "extensions.py").write_text("", encoding="utf-8")
+        (self.checkout / "server.py").write_text("", encoding="utf-8")
+        os.environ.update({"HERMES_WEBUI_STATE_DIR": str(self.state), "HERMES_WEBUI_PORT": "8787", "HERMES_HOME": str(self.box.dir / "hermes-home")})
+        os.environ.pop("HERMES_WEBUI_EXTENSION_DIR", None)
+        self.mod = load_module("agent_app_webui_backend_start", PLUGIN / "webui_backend.py")
+
+    def tearDown(self) -> None:
+        holder = sys.modules.pop(self.mod._HOLDER, None)
+        if holder is not None:
+            holder.backend.stop()
+        sys.modules.pop("hermes_agent_app_plugin_api", None)
+        self.box.close()
+
+    def test_publishes_the_backend_to_the_extension_and_serves_the_manager(self) -> None:
+        import urllib.request
+
+        with fake_modules({"api.extensions": None}):  # not inside a real web UI: resolve the managed dir itself
+            with unittest.mock.patch.object(sys, "argv", [str(self.checkout / "server.py")]):
+                info = self.mod.maybe_start()
+                self.assertIs(self.mod.maybe_start(), info, "a second load reuses the running backend")
+        runtime = json.loads((self.state / "extensions" / "agent-app" / "runtime.json").read_text(encoding="utf-8"))
+        self.assertEqual(runtime["base"], info["base"])
+        self.assertGreaterEqual(len(runtime["token"]), 32)
+        req = urllib.request.Request(runtime["base"] + "/api/plugins/agent-app/meta", headers={"Authorization": "Bearer " + runtime["token"]})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            meta = json.loads(res.read())
+        self.assertTrue(meta["ok"])
+        self.assertIn("blueprint-react-node", meta["blueprints"])
+        self.assertEqual(Path(meta["appsDir"]).resolve(), (self.box.home / "apps").resolve())
+
+    def test_register_never_waits_for_the_backend(self) -> None:
+        # The web UI loads plugins midway through its own imports and gives
+        # register() 10s; a backend start that blocks (an import waiting on
+        # the web UI) must not hold the plugin load.
+        plugin = load_plugin()
+        release = threading.Event()
+        started = threading.Event()
+
+        def blocked_start():
+            started.set()
+            release.wait(30)
+            return None
+
+        try:
+            with unittest.mock.patch.object(sys, "argv", [str(self.checkout / "server.py")]), \
+                    unittest.mock.patch.object(plugin.webui_backend, "maybe_start", blocked_start):
+                t = time.time()
+                plugin.register(FakeContext())
+                self.assertLess(time.time() - t, 5, "register() returned while the backend was still starting")
+                self.assertTrue(started.wait(10), "the backend start ran on its own thread")
+        finally:
+            release.set()
+
+    def test_does_nothing_without_the_extension(self) -> None:
+        shutil.rmtree(self.state / "extensions")
+        with fake_modules({"api.extensions": None}), unittest.mock.patch.object(sys, "argv", [str(self.checkout / "server.py")]):
+            self.assertIsNone(self.mod.maybe_start())
+
+
+class WebuiInstall(unittest.TestCase):
+    def test_installs_beside_other_extensions_and_records_itself(self) -> None:
+        build = load_module("agent_app_build_under_test", PLUGIN / "scripts" / "build.py")
+        tmp = Path(tempfile.mkdtemp(prefix="aa-build-"))
+        try:
+            build.DIST = tmp / "dist"
+            build.stage()
+            state = tmp / "webui"
+            state.mkdir()
+            other = {"version": "1.2.0", "files": ["app.js"], "installed_at": "2026-01-01T00:00:00Z"}
+            (state / "extension-install-manifest.json").write_text(json.dumps({"version": 1, "installed": {"other": other}}), encoding="utf-8")
+            target = build.install_webui(state)
+            self.assertEqual(sorted(p.name for p in target.iterdir()), sorted(build.WEBUI_FILES))
+            record = json.loads((state / "extension-install-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["installed"]["other"], other, "another extension's record is kept")
+            mine = record["installed"]["agent-app"]
+            self.assertIn("runtime.json", mine["files"], "the web UI's Uninstall removes the runtime file too")
+            manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["scripts"], ["manager.js", "agent-apps.js"], "the manager loads before the glue")
+            self.assertEqual((target / "manager.js").read_text(encoding="utf-8"), (PLUGIN / "dashboard" / "manager.js").read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 @unittest.skipIf(NODE is None, "node is required to syntax-check the page")
@@ -592,6 +908,19 @@ class DashboardPage(unittest.TestCase):
         """)
         out = subprocess.run([NODE, "-e", probe], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(out.stdout), [["agent-app", "function"]])
+
+    def test_without_the_dashboard_sdk_the_page_offers_mount_for_another_host(self) -> None:
+        page = PLUGIN / "dashboard" / "manager.js"
+        glue = PLUGIN / "webui" / "agent-apps.js"
+        subprocess.run([NODE, "--check", str(glue)], check=True)
+        probe = textwrap.dedent(f"""
+            globalThis.window = {{}};
+            globalThis.location = {{ protocol: "http:", hostname: "127.0.0.1" }};
+            require({json.dumps(str(page))});
+            console.log(typeof window.__AGENT_APP_MANAGER__.mount);
+        """)
+        out = subprocess.run([NODE, "-e", probe], capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout.strip(), "function")
 
 
 if __name__ == "__main__":

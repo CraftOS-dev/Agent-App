@@ -1,0 +1,57 @@
+/*
+ * Agent Apps inside hermes-webui: size the manager (manager.css) to the web
+ * UI's plugin page view, and map its colour tokens onto the web UI's theme
+ * variables so the tab follows whichever theme is active.
+ */
+
+/* While the Agent Apps view is showing (`.layout.aa-active`, set by
+   agent-apps.js), it gets the whole main area: it has its own tab strip and
+   session panel, so the left sidebar (still holding the previous view's list)
+   and the workspace panel's edge toggle make way, the plugin view's header
+   goes (the app title bar names the view), and its body drops its padding.
+   The sidebar and edge toggle stay at phone widths, where the sidebar is the
+   navigation drawer. The web UI's own sidebar-collapsed preference is not
+   touched. */
+.layout.aa-active #mainPlugin > .main-view-header {
+  display: none;
+}
+@media (min-width: 641px) {
+  .layout.aa-active > .sidebar:not(.mobile-open),
+  .layout.aa-active > .workspace-panel-edge-toggle,
+  .layout.aa-active > .rightpanel {
+    display: none;
+  }
+}
+.layout.aa-active #mainPlugin .main-view-body {
+  padding: 0;
+}
+
+#pluginPageContainer.aa-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.aa.aa-webui {
+  --aa-fg: var(--text);
+  --aa-muted: var(--muted);
+  --aa-border: var(--border);
+  --aa-border-strong: var(--border2, color-mix(in srgb, var(--text) 24%, transparent));
+  --aa-base: var(--bg);
+  --aa-card: var(--surface);
+  --aa-primary: var(--accent);
+  --aa-primary-fg: var(--bg);
+  --aa-ring: var(--accent);
+  --aa-ok: var(--success);
+  --aa-warn: var(--warning);
+  --aa-danger: var(--error);
+  --aa-radius: var(--radius-md, 8px);
+  --aa-radius-sm: var(--radius-sm, 4px);
+  --aa-font: var(--font-ui, system-ui, sans-serif);
+  --aa-mono: var(--font-mono, ui-monospace, monospace);
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}

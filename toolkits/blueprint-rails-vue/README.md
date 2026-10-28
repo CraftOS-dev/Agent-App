@@ -6,9 +6,9 @@ Layout:
 
 | Path | Ownership | Role |
 |---|---|---|
-| `config/application.rb`, `config/routes.rb`, `config/puma.rb` | system-owned (hash-locked) | the minimal Rails app: action_controller only, `public/` served with no-cache headers, loopback bind, headless boot (no credentials ritual) |
-| `app/controllers/a2app_controller.rb` | system-owned (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap, identity's `appVersion` fingerprint, the watcher and account-page routes |
-| `lib/a2app_adapter.rb` | system-owned (hash-locked) | the served surface (protocol 0.2: accounts, credentials, device sign-in, the user ceiling) + pure rules (parity with `@a2app/rules`) + the SQLite store + `--selftest` |
+| `config/application.rb`, `config/routes.rb`, `config/puma.rb` | system-owned (hash-locked) | the minimal Rails app: action_controller only, one catch-all route into the controller, the adapter's Host check in front of every path, request bodies never parsed or logged by Rails, loopback bind, headless boot (no credentials ritual) |
+| `app/controllers/a2app_controller.rb` | system-owned (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap, every error in the protocol's envelope, and everything else served as the View (`public/`, the watcher, the account page) with ETag validators; identity's `appVersion` fingerprint |
+| `lib/a2app_adapter.rb` | system-owned (hash-locked) | the served surface (protocol 0.2: accounts, credentials, device sign-in, the user ceiling) + pure rules (parity with `@a2app/rules`) + the SQLite store, where records and all adapter state persist (tasks, events, approvals, idempotency keys, audit) + the View's static server + `--selftest` |
 | `a2app-update.js` | system-owned (hash-locked) | the View's update watcher, served at `/_a2app/update.js` |
 | `a2app-account.html` | system-owned (hash-locked) | the framework's account page (sign in, invites, people, connected agents), served at `/_a2app/account`; the same file in every blueprint |
 | `lib/a2app_schema.rb` | agent-owned | the data model + operations — edit this to evolve the app; `describe`/`schemaVersion` derive from it |
@@ -25,8 +25,8 @@ The View is served from a build on disk, so a promote is live server-side the mo
 
 Two system-owned pieces close that, and neither needs anything from the app author:
 
-- **Rails serves `public/` with `Cache-Control: no-cache`** (via `config.public_file_server.headers` in `config/application.rb`). A plain reload always revalidates and gets changed files; an unchanged file costs a conditional round trip.
-- **`a2app-update.js`, served at `/_a2app/update.js` by a controller action,** polls identity's `appVersion` — a content fingerprint of the served View (`public/**` + the schema + the watcher itself), which moves for changes `schemaVersion` is blind to — and reloads (or offers a reload) when the code the tab is running has been superseded.
+- **The View is served with `Cache-Control: no-cache` and an ETag** (the adapter's `StaticView`, called by the controller; Rails' own static file server is off). A plain reload always revalidates and gets changed files; an unchanged file costs a bodyless 304.
+- **`a2app-update.js`, served at `/_a2app/update.js` beside the View,** polls identity's `appVersion` — a content fingerprint of the served View (`public/**` + the schema + the watcher and the account page), which moves for changes `schemaVersion` is blind to — and reloads (or offers a reload) when the code the tab is running has been superseded.
 
 The View loads the watcher through one runtime import; keep it when you rewrite the View:
 

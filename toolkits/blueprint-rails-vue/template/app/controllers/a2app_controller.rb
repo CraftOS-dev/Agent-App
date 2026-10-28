@@ -1,9 +1,12 @@
 # Rails wiring (SYSTEM-OWNED — hash-locked in the ownership canon).
 #
-# Translates the Rack request into the adapter's `dispatch(method, path,
-# headers, body, query)` and renders what comes back. The adapter owns the
-# protocol; this controller only moves bytes. An agent evolves the app by
-# editing `lib/a2app_schema.rb` and the View in `ui/` — never this file.
+# Every request the app serves comes here (config/routes.rb): the adapter
+# answers its own routes — `dispatch(method, path, headers, body, query)` —
+# and everything else is the built View, served from public/ by the
+# adapter's StaticView with the framework's two pages beside it. The adapter
+# owns the protocol; this controller only moves bytes. An agent evolves the
+# app by editing `lib/a2app_schema.rb` and the View in `ui/` — never this
+# file.
 class A2appController < ActionController::Base
   # No Rails CSRF here, deliberately. Rails' tokens protect its own
   # cookie-authenticated HTML forms; this is an API adapter surface, and the
@@ -14,77 +17,93 @@ class A2appController < ActionController::Base
   # authenticate with the x-a2app-token header a foreign page cannot read. A
   # Rails CSRF check would only 422 the app's own View.
   skip_forgery_protection
+  # The body is the adapter's to read (read_body); Rails' params are unused.
+  wrap_parameters false
 
   # A protocol write is tiny; anything larger is a mistake or an attack.
   # The cap is enforced BEFORE parsing — an unauthenticated caller must never
   # be able to make the app parse an arbitrary amount of memory. Same cap and
-  # envelope as @a2app/adapter-core's Node transport and the python blueprint.
+  # envelope as @a2app/adapter-core's Node transport.
   MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024
 
-  # /api/** and /.well-known/a2app.json — every A2App route (identity,
-  # describe, records, operations, tasks/events, accounts, credentials,
-  # sign-in) goes through the adapter's own router, Host check first. A reply
-  # may set a header of its own: the session cookie.
+  # An exception anywhere in a request is answered in the protocol's own
+  # envelope, never with a Rails error page. Errors raised before this
+  # controller runs (a path Rails cannot decode) reach the same answer
+  # through config.exceptions_app.
+  rescue_from StandardError, with: :adapter_error
+
   def handle
     body = nil
     if %w[POST PATCH PUT].include?(request.request_method)
       body, too_large = read_body
-      return render json: too_large[1], status: too_large[0] if too_large
+      if too_large
+        # The client may still be uploading: answer, then close.
+        response.headers["connection"] = "close"
+        return render json: A2appAdapter::Js.dump(too_large), status: 413
+      end
     end
-    status, payload, headers = self.class.adapter.dispatch(
-      request.request_method, request.path, a2app_headers, body, request.query_parameters
+    reply = self.class.adapter.dispatch(
+      request.request_method, request.path, self.class.a2app_headers(request.env), body, request.query_string
     )
+    return serve_view if reply.nil?
+    status, payload, headers = reply
     (headers || {}).each { |name, value| response.headers[name] = value }
-    render json: payload, status: status
-  end
-
-  # /_a2app/account — the framework's account page: sign in, accept an
-  # invite, people (owner), the agents acting for you, approving an agent's
-  # sign-in. The same file in every blueprint, served from the project root;
-  # it speaks only the adapter's JSON routes. Answered only on the app's own
-  # hosts, like every adapter route.
-  def account_page
-    refused = self.class.adapter.host_refusal(a2app_headers)
-    return render json: refused[1], status: refused[0] if refused
-    response.headers["Cache-Control"] = "no-cache"
-    send_file Rails.root.join("a2app-account.html"), type: "text/html; charset=utf-8", disposition: "inline"
-  end
-
-  # /_a2app/update.js — the system-owned update watcher, served from the
-  # project root (it is NOT part of the built View: the View is the agent's to
-  # rewrite entirely, the watcher is not). no-cache so a promote is picked up
-  # on the next probe, not whenever a heuristic cache expires.
-  def update_watcher
-    response.headers["Cache-Control"] = "no-cache"
-    send_file Rails.root.join("a2app-update.js"),
-              type: "text/javascript; charset=utf-8", disposition: "inline"
+    render json: A2appAdapter::Js.dump(payload), status: status
   end
 
   class << self
     # The adapter is built once per process and shared across Puma's threads —
-    # the SQLite store serializes its own access, and the adapter itself keeps
-    # no per-request state.
+    # the SQLite store serializes its own access, and the adapter guards the
+    # little state it keeps.
     def adapter
       ADAPTER_LOCK.synchronize { @adapter ||= build_adapter }
     end
 
-    # identity's `appVersion`: a fingerprint of everything a browser tab is
-    # actually running — the built View (public/**, sorted paths + contents),
-    # the agent-owned schema (an operation's description changes what the app
-    # tells an agent, yet moves neither schemaVersion nor the View bytes), the
-    # update watcher and the account page, salted with manifest.appVersion so
-    # an author can move the marker by hand. Recomputed at most once per
-    # second: every open tab polls identity, and hashing the whole View per
-    # probe would make the watcher the app's main workload.
-    def app_version
-      VERSION_LOCK.synchronize do
-        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        if @app_version.nil? || now - @app_version_at >= 1.0
-          @app_version = compute_app_version
-          @app_version_at = now
-        end
-        @app_version
+    # The built View in public/, plus the framework's own pages at their
+    # aliases: the update watcher an open tab imports at runtime (it is NOT
+    # part of the View: the View is the agent's to rewrite entirely, the
+    # watcher is not) and the account page (sign in, invites, people, the
+    # agents acting for you). Its version — everything a browser tab is
+    # actually running, plus the agent-owned schema (an operation's
+    # description changes what the app tells an agent, yet moves neither
+    # schemaVersion nor the View bytes), salted with manifest.appVersion — is
+    # identity's `appVersion`.
+    def view
+      ADAPTER_LOCK.synchronize do
+        @view ||= A2appAdapter::StaticView.new(
+          Rails.root.join("public").to_s,
+          aliases: {
+            "/_a2app/update.js" => Rails.root.join("a2app-update.js").to_s,
+            "/_a2app/account" => Rails.root.join("a2app-account.html").to_s,
+          },
+          fingerprint_paths: [Rails.root.join("lib", "a2app_schema.rb").to_s],
+          version_salt: manifest["appVersion"].to_s
+        )
       end
+    end
+
+    # config.exceptions_app: an exception raised outside the controller (a
+    # path Rails cannot decode into route parameters) answered as
+    # adapter-core answers any exception.
+    def exception_reply(env)
+      error = env["action_dispatch.exception"]
+      payload = { "a2app" => true, "ok" => false, "code" => "adapter_error", "message" => error&.message.to_s }
+      [500, { "content-type" => "application/json; charset=utf-8" }, [A2appAdapter::Js.dump(payload)]]
+    end
+
+    # The request headers the adapter routes on, in the lower-cased dashed
+    # form it expects (host, origin, x-a2app-token, idempotency-key, …).
+    def a2app_headers(env)
+      out = {}
+      env.each do |key, value|
+        next unless key.is_a?(String)
+        if key.start_with?("HTTP_")
+          out[key[5..].downcase.tr("_", "-")] = value
+        elsif key == "CONTENT_TYPE"
+          out["content-type"] = value
+        end
+      end
+      out
     end
 
     private
@@ -107,9 +126,9 @@ class A2appController < ActionController::Base
         app_name: manifest["name"],
         entities: A2appSchema::ENTITIES,
         operations: A2appSchema::OPERATIONS,
-        # Durable store: records, idempotency keys, credentials and accounts
-        # in SQLite inside the lifecycle dataDir. Seeded only when this boot
-        # CREATED the file.
+        # Durable store: records and all adapter state (credentials, accounts,
+        # tasks, events, approvals, idempotency keys, audit) in SQLite inside
+        # the lifecycle dataDir. Seeded only when this boot CREATED the file.
         store: A2appAdapter::SqliteStore.new(File.join(data_dir, "db.sqlite"), A2appSchema::SEED),
         # The app's own .agent-token is its admin credential (spec/v0_2/auth.md §2.3).
         token: agent_token,
@@ -134,7 +153,7 @@ class A2appController < ActionController::Base
         # lib/a2app_schema.rb.
         events: A2appSchema::EVENTS,
         env: ENV["A2APP_ENV"],
-        app_version: -> { app_version }
+        app_version: -> { view.version }
       )
     end
 
@@ -150,51 +169,32 @@ class A2appController < ActionController::Base
       end
       token
     end
-
-    def compute_app_version
-      digest = Digest::SHA256.new
-      digest.update(manifest["appVersion"].to_s)
-      pub = Rails.root.join("public").to_s
-      if Dir.exist?(pub)
-        Dir.glob("**/*", base: pub).sort.each do |rel|
-          full = File.join(pub, rel)
-          next unless File.file?(full)
-          digest.update(rel)
-          digest.update(File.binread(full))
-        end
-      end
-      [Rails.root.join("lib", "a2app_schema.rb"), Rails.root.join("a2app-update.js"),
-       Rails.root.join("a2app-account.html")].each do |extra|
-        digest.update(File.binread(extra)) if File.exist?(extra)
-      end
-      "av_" + digest.hexdigest[0, 16]
-    end
   end
 
-  ADAPTER_LOCK = Mutex.new
-  VERSION_LOCK = Mutex.new
+  ADAPTER_LOCK = Monitor.new
 
   private
 
-  # The A2App headers the adapter routes on, in the lower-cased dashed form it
-  # expects (origin, x-a2app-token, idempotency-key, x-a2app-approval, …).
-  def a2app_headers
-    out = {}
-    request.headers.env.each do |key, value|
-      next unless key.is_a?(String)
-      if key.start_with?("HTTP_")
-        out[key[5..].downcase.tr("_", "-")] = value
-      elsif key == "CONTENT_TYPE"
-        out["content-type"] = value
-      end
-    end
-    out
+  # A path outside the adapter's namespaces: a file of the View, or one of
+  # the framework's pages, or the View's own 404.
+  def serve_view
+    status, headers, body = self.class.view.serve(request.request_method, request.path,
+                                                  self.class.a2app_headers(request.env))
+    headers.each { |name, value| response.headers[name] = value }
+    self.status = status
+    self.response_body = body || ""
   end
 
-  # Parse the request body under the cap. Returns [body, nil], or
-  # [nil, [status, envelope]] when the body is too large. Bytes are counted as
-  # they arrive from rack.input rather than trusting Content-Length, so a
-  # client that lies about the length gains nothing.
+  def adapter_error(error)
+    logger.error("#{error.class}: #{error.message}\n  #{Array(error.backtrace).first(8).join("\n  ")}")
+    payload = { "a2app" => true, "ok" => false, "code" => "adapter_error", "message" => error.message }
+    render json: A2appAdapter::Js.dump(payload), status: 500
+  end
+
+  # Parse the request body under the cap. Returns [body, nil] — nil when
+  # there was none — or [nil, envelope] when it is too large. Bytes are
+  # counted as they arrive from rack.input rather than trusting
+  # Content-Length, so a client that lies about the length gains nothing.
   def read_body
     input = request.body
     size = 0
@@ -203,23 +203,25 @@ class A2appController < ActionController::Base
       break if chunk.empty?
       size += chunk.bytesize
       if size > MAX_REQUEST_BODY_BYTES
-        return [nil, [413, {
+        return [nil, {
           "a2app" => true, "ok" => false, "code" => "payload_too_large",
           "message" => "Request body exceeds the #{MAX_REQUEST_BODY_BYTES}-byte limit.",
           "limitBytes" => MAX_REQUEST_BODY_BYTES,
-        }]]
+        }]
       end
       chunks << chunk
     end
-    raw = chunks.join
-    return [{}, nil] if raw.strip.empty?
+    # Read as UTF-8, a malformed byte as U+FFFD, as Node reads a body.
+    text = chunks.join.force_encoding(Encoding::UTF_8).scrub
+    return [nil, nil] if A2appAdapter::Js.trim(text).empty?
     begin
-      [JSON.parse(raw), nil]
+      # As JavaScript's JSON.parse: the last of a repeated key wins.
+      [JSON.parse(text, allow_duplicate_key: true), nil]
     rescue JSON::ParserError
       # Hand the guard something it can reject by its own rules, rather than
       # raising into a 500 that tells the caller nothing. Same envelope as
       # adapter-core's parser.
-      [{ "__unparsed__" => raw.dup.force_encoding(Encoding::UTF_8).scrub }, nil]
+      [{ "__unparsed__" => text }, nil]
     end
   end
 end

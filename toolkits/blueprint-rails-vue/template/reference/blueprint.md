@@ -48,17 +48,17 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, `public/`, credentials, framework state, Rails runtime dirs. Extend for your own artifacts. |
 | `Gemfile` | build | the backend's gems (rails, puma, sqlite3). Add your HTTP client here when you call external APIs. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
-| `config/application.rb` | SYSTEM (hash-locked) | the minimal Rails application: action_controller only (NO ActiveRecord), eager-loaded `lib/`, `public/` file server with no-cache headers, headless secret_key_base. Never edit. |
-| `config/routes.rb` | SYSTEM (hash-locked) | the routes: the discovery document, the update watcher, the account page, and the `/api/**` catch-all into the adapter. Never edit. |
+| `config/application.rb` | SYSTEM (hash-locked) | the minimal Rails application: action_controller only (NO ActiveRecord), eager-loaded `lib/`, the adapter's Host check in front of every path, request bodies never parsed or logged by Rails, errors in the protocol's envelope, headless secret_key_base. Never edit. |
+| `config/routes.rb` | SYSTEM (hash-locked) | one catch-all route: every path and verb goes to the controller. Never edit. |
 | `config/puma.rb` | SYSTEM (hash-locked) | the launch contract: PORT (manifest fallback 8096), loopback bind (`A2APP_HOST` to override), single mode. Never edit. |
-| `app/controllers/a2app_controller.rb` | SYSTEM (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap before parsing, identity's `appVersion` fingerprint, the watcher and account-page routes. Never edit. |
-| `lib/a2app_adapter.rb` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
+| `app/controllers/a2app_controller.rb` | SYSTEM (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap before parsing, any error answered `adapter_error`; every other path is the View — `public/`, the watcher and the account page — served with ETag validators; identity's `appVersion` fingerprint. Never edit. |
+| `lib/a2app_adapter.rb` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store (records, and every table of adapter state) + the View's static server + `--selftest`. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `config/boot.rb` · `config/environment.rb` · `config.ru` | build | standard Rails boot chain (bundler setup → application → rackup). Leave them alone. |
 | `scripts/check_ops.rb` | gate | the "operations resolve" gate step. Leave it alone. |
 | `scripts/promote_check.rb` | lifecycle | run by `agent-app promote` after the mandatory backup: refuses to orphan an entity that still holds data. Leave it alone. |
-| `public/` | build output | the compiled View (`npm --prefix ui run build`). Git-ignored; served by Rails. Never edit by hand. |
+| `public/` | build output | the compiled View (`npm --prefix ui run build`). Git-ignored; served by the app. Never edit by hand. |
 | `data/` | runtime | the live SQLite database (git-ignored, created on first boot). Never edit by hand; never commit. |
 
 SYSTEM files are hashed in `.a2app/system-hashes.json`; the gate fails the build
@@ -78,8 +78,13 @@ never edit the locked original.
   to the schema and it is simply available; existing rows keep their stored
   values.
 - **The View is served BUILT.** `npm --prefix ui run build` compiles
-  `ui/index.html` + `ui/src/` into `public/`; Rails serves `public/` with
-  `Cache-Control: no-cache`. A source edit does nothing until the next build.
+  `ui/index.html` + `ui/src/` into `public/`; the app serves `public/` with
+  `Cache-Control: no-cache` and an ETag. A source edit does nothing until the
+  next build.
+- **The adapter's state is durable too.** Tasks, events, approval and
+  idempotency keys, credentials, accounts and the audit log live in the same
+  SQLite file, in tables of their own: a restart loses no queued work, no
+  event cursor and no pending approval.
 
 ## Schema — entities & fields
 
@@ -168,6 +173,13 @@ OPERATION_RUNNERS = {
   with `all`/`any`/`not`. Never a natural-language rule.
 - **Flags:** `destructive => true` (requires human approval), `readOnly =>
   true` (no side effects), `idempotent => true` (safe to repeat).
+- **Arguments are guarded like a record write:** a missing required
+  parameter, an undeclared one or an ill-typed value is refused `400` before
+  the runner runs (and before a person is asked to approve anything).
+- **Refusing:** a runner that cannot do what was asked raises
+  `A2appAdapter::OperationError.new(code, message, status = 400, extra = nil)`
+  — the caller gets that status and code, with `extra`'s fields beside them.
+  Anything else a runner raises is a `500 operation_failed`.
 - The gate step **"operations resolve"** (`ruby scripts/check_ops.rb`) fails
   the build if any declared operation has no runner lambda.
 
@@ -359,10 +371,12 @@ agent-app <dir> promote    # requires the gate pass; backup, scripts/promote_che
 Toolkit gate steps (from `a2app.toolkit.json`): **"ruby syntax + adapter
 self-test"** (`ruby -c` on the adapter, the schema and the controller, then
 `ruby lib/a2app_adapter.rb --selftest` — the selftest covers the rules parity,
-the SQLite store (durability across a reopen, seed-once, idempotency keys, the
-filter grammar) AND the auth layer: password hashes interchangeable with
-adapter-core's, codes and cookies, the credential ceiling and its refusals,
-record ownership) and **"operations resolve"** (`ruby scripts/check_ops.rb`).
+the SQLite store (durability across a reopen, seed-once, the filter grammar,
+paging), the auth layer (password hashes interchangeable with adapter-core's,
+codes and cookies, the credential ceiling and its refusals, record ownership,
+device sign-in's confirmation code), JavaScript's reading of values and RFC
+8785 approval keys, operations and the task lifecycle, a restart that keeps
+tasks, events, approval and idempotency keys, and the View's static serving) and **"operations resolve"** (`ruby scripts/check_ops.rb`).
 `lifecycle.dataDir` is `data/`; `lifecycle.promote` is
 `bundle exec ruby scripts/promote_check.rb`.
 

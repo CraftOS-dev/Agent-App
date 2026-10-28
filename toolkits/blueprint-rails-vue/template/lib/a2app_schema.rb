@@ -128,7 +128,9 @@ module A2appSchema
   # read from the store is a COPY: mutate it, then put_record() it back, or
   # the change never happened. store.trigger(type, payload, capability)
   # emits a declared event (see "request-triage" below); a task it queues is
-  # done by an agent acting as the caller.
+  # done by an agent acting as the caller. A runner that cannot do what was
+  # asked raises A2appAdapter::OperationError.new(code, message, status) —
+  # the caller gets that status and code; anything else it raises is a 500.
   OPERATION_RUNNERS = {
     "clear-done" => lambda do |_args, ctx, store|
       removed = 0

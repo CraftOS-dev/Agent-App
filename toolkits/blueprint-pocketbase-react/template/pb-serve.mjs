@@ -213,6 +213,11 @@ if (migrateMode) {
       // View should be able to read a response. The hooks also refuse a foreign
       // Origin outright — this keeps the browser from even seeing the answer.
       `--origins=http://127.0.0.1:${port},http://localhost:${port}`,
+      // The access middleware in pb/pb_hooks wraps every request, so each open
+      // realtime connection holds a hook runtime for its whole life. The
+      // default pool is 15; past it PocketBase builds a throwaway runtime per
+      // request. 40 leaves room for a View that subscribes in several tabs.
+      "--hooksPool=40",
       // Live must never hot-load an unverified edit; dev wants exactly that.
       `--hooksWatch=${env === "dev"}`,
     ],

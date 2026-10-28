@@ -113,6 +113,20 @@ try {
     check("…or with a wrong one", wrong.status, 401);
     const realtime = await http("GET", `${base}/api/realtime`, { headers: { Origin: "http://evil.example" }, timeoutMs: 1500 });
     check("a foreign origin cannot open realtime", realtime.status, 403);
+    const firstId = (await http("GET", records)).json.items[0].id;
+    check("a program cannot PATCH without the token", (await http("PATCH", `${records}/${firstId}`, { json: { title: "x" } })).status, 401);
+    check("…or DELETE", (await http("DELETE", `${records}/${firstId}`)).status, 401);
+    check("a wrong token is refused even for a read", (await http("GET", records, { headers: { "X-A2App-Token": "nope" } })).status, 401);
+    check("a foreign origin cannot fetch files", (await http("GET", `${base}/api/files/tasks/${firstId}/x.png`, { headers: { Origin: "http://evil.example" } })).status, 403);
+    check("batch writes need the token", (await http("POST", `${base}/api/batch`, { json: { requests: [] } })).status, 401);
+    check("identity answers no rebound Host", (await rawGet("/api/_a2app", { Host: `evil.example:${port}` })).status, 403);
+    check("…nor does describe", (await rawGet("/api/_a2app/describe", { Host: `evil.example:${port}` })).status, 403);
+    const su = JSON.parse(readFileSync(join(dir, ".superuser"), "utf8"));
+    const login = await http("POST", `${base}/api/collections/_superusers/auth-with-password`, { json: { identity: su.email, password: su.password } });
+    check("the superuser can sign in (an auth route)", login.status, 200);
+    const asOwner = await http("POST", records, { headers: { Authorization: login.json?.token }, json: { title: "by the owner", status: "todo" } });
+    check("…and write without the agent token (the dashboard)", asOwner.status, 200);
+    await http("DELETE", `${records}/${asOwner.json?.id}`, { headers: { Authorization: login.json?.token } });
     check("a program can read", (await http("GET", records)).status, 200);
     check("the View (own origin) can write", (await http("POST", records, { headers: own, json: { title: "from the view", status: "todo" } })).status, 200);
     check("the agent token can write", (await http("POST", records, { headers: agent, json: { title: "from the agent", status: "todo" } })).status, 200);
@@ -154,6 +168,10 @@ try {
     check("a keyed call runs", once.status, 200);
     const again = await http("POST", `${base}/api/ops/request-triage`, { headers, json: { task: second.id } });
     check("…and its replay is refused", [again.status, again.json?.code], [409, "duplicate_request"]);
+    const boom = { ...agent, "Idempotency-Key": "e2e-key-2" };
+    const thrown = [];
+    for (let i = 0; i < 2; i++) thrown.push((await http("POST", `${base}/api/ops/explode`, { headers: boom, json: {} })).status);
+    check("a call that threw does not use up its key", thrown, [500, 500]);
   }
 
   console.log("queue");
@@ -191,7 +209,8 @@ try {
     writeFileSync(opsJs, "module.exports = {{ broken");
     await restart();
     const write = await http("PATCH", `${records}/${welcome.id}`, { headers: own, json: { title: "edited" } });
-    check("client writes are paused, not unguarded", [write.status, write.json?.code], [503, "app_code_unavailable"]);
+    check("client writes are paused, not unguarded", write.status, 503);
+    ok("…with the code", /app_code_unavailable/.test(write.json?.message ?? ""));
     ok("…saying why", /operations\.js could not be loaded/.test(write.json?.message ?? ""));
     check("reads still work", (await http("GET", records)).status, 200);
     writeFileSync(opsJs, opsSource);
@@ -218,7 +237,8 @@ try {
   }
 } finally {
   await stop();
-  rmSync(work, { recursive: true, force: true });
+  // data.db can stay locked for a moment after the process is killed (Windows).
+  rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 
 console.log(`\npocketbase e2e: ${passed} passed, ${failures.length} failed`);
@@ -238,8 +258,8 @@ async function start() {
   server.stdout.on("data", (d) => (log += d));
   server.stderr.on("data", (d) => (log += d));
   for (let i = 0; i < 120; i++) {
-    const res = await http("GET", `${base}/api/_a2app`, { timeoutMs: 500 }).catch(() => null);
-    if (res?.status === 200) return;
+    const res = await http("GET", `${base}/api/_a2app`, { timeoutMs: 500 });
+    if (res.status === 200) return;
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`PocketBase did not come up on ${base}:\n${log}`);
@@ -256,10 +276,11 @@ async function stop() {
     /* already gone */
   }
   for (let i = 0; i < 40; i++) {
-    const res = await http("GET", `${base}/api/_a2app`, { timeoutMs: 250 }).catch(() => null);
-    if (!res) return;
+    const res = await http("GET", `${base}/api/_a2app`, { timeoutMs: 250 });
+    if (res.status === 0) return;
     await new Promise((r) => setTimeout(r, 250));
   }
+  throw new Error(`PocketBase on ${base} did not stop`);
 }
 
 async function restart() {
@@ -271,6 +292,9 @@ async function tasks() {
   return (await http("GET", `${base}/api/_a2app/tasks`)).json?.tasks ?? [];
 }
 
+/** A request that never answers (an open realtime stream, a server that is
+ *  down) comes back as status 0 rather than throwing, so it fails a check
+ *  instead of ending the run. */
 async function http(method, url, { headers = {}, json, timeoutMs = 5000 } = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -289,6 +313,8 @@ async function http(method, url, { headers = {}, json, timeoutMs = 5000 } = {}) 
       /* not JSON */
     }
     return { status: res.status, headers: res.headers, json: parsed };
+  } catch {
+    return { status: 0, headers: new Headers(), json: null };
   } finally {
     clearTimeout(timer);
   }

@@ -80,9 +80,10 @@ routerAdd("GET", "/api/_a2app/context", (e) => require(`${__hooks}/_a2app_impl.j
 
 // PocketBase serves records, realtime, files and batch itself, outside the
 // adapter's routes. This middleware puts the adapter's host/origin/credential
-// rule in front of them (see nativeGate in _a2app_impl.js). It is a router
-// middleware rather than the onRecord*Request hooks because those events do not
-// expose the request's Host header to the JS runtime.
+// rule in front of them, and the host/origin half in front of the adapter's
+// own routes (see nativeGate in _a2app_impl.js). One middleware covers every
+// one of those paths, and unlike the onRecord*Request events it can read the
+// request's Host header, which the DNS-rebinding check needs.
 routerUse((e) => require(`${__hooks}/_a2app_impl.js`).nativeGate(e));
 
 /* ----------------------------------------------------------------- guard */

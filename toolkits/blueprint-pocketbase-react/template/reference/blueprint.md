@@ -199,13 +199,16 @@ For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
 - `GET /api/_a2app/tasks/<id>` — follow work queued for an agent.
 - `GET /api/_a2app` — identity (app name, versions).
 
-The adapter applies one access rule to its own routes and to PocketBase's
-(records, realtime, files, batch): only a loopback `Host`; a browser `Origin`
-other than the app's own is refused (403); the app's own View passes; a signed-in
-superuser (the dashboard) passes. On a single-user app a program with no
-`Origin` may read, and a write needs the agent token (`.agent-token`, sent as
-`X-A2App-Token`). On a multi-user app PocketBase's collection rules decide.
-`pb-serve.mjs` also limits CORS to the app's own origin.
+Every route answers only on a loopback `Host`, and a browser `Origin` other
+than the app's own is refused (403). On PocketBase's own routes (records,
+realtime, files, batch) the app's own View passes and so does a signed-in
+superuser (the dashboard); on a single-user app a program with no `Origin` may
+read, and a write needs the agent token (`.agent-token`, sent as
+`X-A2App-Token`); on a multi-user app PocketBase's collection rules decide, so
+replace the starter's public (`""`) rules before switching `authMode`. The
+adapter's routes (operations, tasks, describe's record levels) take the agent
+token or the app's own View, as described above. `pb-serve.mjs` also limits
+CORS to the app's own origin.
 
 Render back what the server **stored**, never what you sent; page large lists;
 design the loading/empty/error states, not just the happy path.
@@ -231,17 +234,22 @@ events: [{ type: "task.needs_triage" }],
 
 runners: {
   "request-triage": (args, _ctx, a2app) => {
-    const task = a2app.app.findRecordById("tasks", args.task);
+    let task;
+    try {
+      task = a2app.app.findRecordById("tasks", String(args.task));
+    } catch (_missing) {
+      return { ok: false, reason: "no such task" };
+    }
     const previous = task.getString("agentTask");
     const current = previous ? a2app.task(previous) : null;
     if (current && !["completed", "failed", "canceled"].includes(current.status)) {
-      return { ok: true, queued: current.id, alreadyQueued: true }; // one open run per record
+      return { ok: true, task: task.id, queued: current.id, alreadyQueued: true }; // one open run per record
     }
     const payload = previous ? { task: task.id, previous } : { task: task.id };
     const { taskId } = a2app.trigger("task.needs_triage", payload, "triage");
     task.set("agentTask", taskId);
     a2app.app.save(task);
-    return { ok: true, queued: taskId };
+    return { ok: true, task: task.id, queued: taskId };
   },
 },
 ```
@@ -282,8 +290,9 @@ an agent reading the record, can follow the work with
 `GET /api/_a2app/tasks/{id}` until it is done: `submitted`, `working` (with the
 agent's `progress.step`), then `completed` (`result.summary`) or `failed`
 (`reason`). On a single-user app the View needs no credential for that read; on
-a multi-user app it answers 401 without the agent token, so have the agent write
-its progress onto the record instead. A 404 means the task is gone.
+a multi-user app it answers 401 unless the View's user is signed in (or the
+caller has the agent token), so have the agent write its progress onto the
+record if the View cannot read the task. A 404 means the task is gone.
 
 **Declare that field read-only.** An agent that saves a record it read a
 minute earlier would otherwise write back the old task id. PocketBase has no

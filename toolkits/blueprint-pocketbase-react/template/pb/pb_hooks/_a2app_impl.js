@@ -208,6 +208,9 @@ function describe(e, segments) {
   }
   if (segments.length === 2) return e.json(200, entityLevel(moduleName, entityName, def));
 
+  // From here describe serves record VALUES, so the caller is checked as for
+  // any other read of records.
+  if (authorize(e, false) === null) return;
   const recordId = segments[2];
   let record = null;
   try {
@@ -587,7 +590,8 @@ function guard(e) {
     if (code.problem !== null) {
       // Fail closed: which fields are read-only is declared in operations.js,
       // so while it cannot load, a client write could overwrite one unnoticed.
-      return fail(e, 503, "app_code_unavailable", `Writes are paused: pb/pb_hooks/operations.js could not be loaded (${code.problem}).`);
+      // Thrown, not written: inside a batch only an error rolls the batch back.
+      throw new ApiError(503, `Writes are paused (app_code_unavailable): pb/pb_hooks/operations.js could not be loaded (${code.problem}).`, {});
     }
     rules.markReadOnly(fields, code.readOnly[col.name]);
   }
@@ -878,10 +882,16 @@ function authorize(e, isWrite) {
  *   multi-user  PocketBase's own collection rules decide from here: that is what
  *               they are for once the app has real users.
  *   single-user a program (no Origin) may read records; writing one needs the
- *               agent token. Auth endpoints (sign-in, password reset) carry
- *               their own credentials and only get the host and origin checks.
+ *               agent token, and a wrong token is refused even for a read.
+ *               Auth endpoints (sign-in, password reset) carry their own
+ *               credentials and only get the host and origin checks.
  *
- * Every other path (the adapter's routes, the static View) passes untouched.
+ * The adapter's own routes get the host and origin checks here too (identity
+ * and describe would otherwise answer a rebound Host); their handlers decide
+ * the credential with `authorize`. The static View passes untouched.
+ *
+ * This middleware wraps the whole request, so a realtime connection holds a
+ * hook runtime for as long as it is open; pb-serve.mjs sizes the pool for it.
  */
 function nativeGate(e) {
   const method = String(e.request.method || "GET").toUpperCase();
@@ -892,6 +902,7 @@ function nativeGate(e) {
   else if (path === "/api/realtime" || path.indexOf("/api/files/") === 0) kind = "read";
   else if (path === "/api/batch") kind = "write";
   else if (path.indexOf("/api/collections/") === 0) kind = "auth";
+  else if (path === "/api/_a2app" || path.indexOf("/api/_a2app/") === 0 || path.indexOf("/api/ops/") === 0) kind = "adapter";
   if (kind === null) return e.next();
 
   const refusal = refuseHost(e) || (originOf(e) === "foreign" ? FOREIGN_ORIGIN : null) || credentialRefusal(e, kind);
@@ -900,6 +911,7 @@ function nativeGate(e) {
 }
 
 function credentialRefusal(e, kind) {
+  if (kind === "read" && agentToken(e) === "wrong") return tokenRefusal("wrong");
   if (kind !== "write" || e.hasSuperuserAuth() || originOf(e) === "own") return null;
   const manifest = readManifest();
   if (manifest && manifest.authMode === "multi-user") return null;
@@ -1169,7 +1181,13 @@ function runOperation(e, name) {
         trigger: (type, payload, capability) => triggerWith(tx, env, type, payload, capability),
         task: (id) => {
           const found = loadTask(tx.db(), String(id));
-          return found ? rules.taskWire(found) : null;
+          if (!found) return null;
+          // A claim abandoned since the last poll is settled here, so a dead
+          // run is not reported as open. (sweep() would open a second
+          // transaction and wait on this one forever.)
+          const swept = rules.sweepTask(found, Date.now(), rules.QUEUE.TASK_TIMEOUT_MS, rules.QUEUE.TASK_MAX_DELIVERIES);
+          if (swept) saveTask(tx.db(), swept);
+          return rules.taskWire(swept || found);
         },
         error: operationError,
       };

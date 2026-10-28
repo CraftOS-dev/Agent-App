@@ -26,8 +26,12 @@ says "per your stack", `reference/blueprint.md` is the answer.
    skip scaffolding.
 2. **No project yet** → `agent-app <dir> scaffold --blueprint <id>` scaffolds the
    framework files, the adapter, and the ownership canon. Pick `authMode` from
-   requirements: `none` (personal local tool — default) or `multi-user`
-   (accounts).
+   requirements, with `--auth-mode`: `none` (one person's tool — the default) or
+   `multi-user` (several people, each signing in: a team CRM, a shared tracker).
+   Choose `multi-user` whenever more than one person will use the app; adding it
+   later means deciding whose every existing record is. A multi-user app gets
+   sign-in, invites and *Connected agents* from the adapter — write no auth code
+   of your own. `agent-app <dir> owner` prints the first owner's setup link.
 
 ## The ownership rule (the gate enforces this)
 
@@ -148,7 +152,15 @@ migration that has been applied** (after any successful launch): the filename is
 its identity in the live database; renaming one makes every boot re-run its
 "new" replacement into the existing schema and the app cannot start. Fixing a
 migration's mistake = writing a NEW migration that alters the collection. Match
-the app's `authMode`: open data rules for `none`; owner-scoped for `multi-user`.
+the app's `authMode`. On `multi-user`, decide per entity whose records it holds:
+a person's own data is scoped to the signed-in person, so members see only their
+records and owners see all; shared reference data is readable by anyone signed
+in. Nothing is ever readable without signing in. Your stack's
+`reference/blueprint.md` says how: an `ownedBy` field the adapter fills, or, on
+PocketBase, collection rules on `@request.auth.id`. **Never leave a public
+(`""`) rule on a multi-user app**: the gate reads the running app as a stranger
+and fails any entity it can read. Operation runners get the caller as
+`ctx.principal` and `ctx.role` and hold themselves to the same rule.
 (Migration API, seeding, relation fields: see `reference/blueprint.md`.)
 
 **Schema** — every entity also names the `module` it lives in, and may carry a
@@ -252,9 +264,9 @@ takes seconds to minutes. A button that fires a toast and then goes quiet
 leaves the person staring at a screen that shows no sign anything is happening.
 Store the queue task id the trigger returns on the record, and have the View
 follow it (`GET /api/_a2app/tasks/{id}`, same origin, polled at its
-`pollAfterMs` only while unfinished). That read needs no credential on a
-single-user app only. On a multi-user app it answers 401, so there, have the
-agent write its progress onto the record and render that instead. Render
+`pollAfterMs` only while unfinished). It needs no credential: on a single-user
+app the View is trusted, and on a multi-user app the person's session makes the
+read. The agent that runs the task acts as the person who queued it. Render
 every state, where the person asked:
 
 - `submitted` — waiting to be picked up, with elapsed time. After ~20 s with no

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { verifySystemHashes } from "./canon.js";
 import { validateFrameworkFiles } from "./frameworkFiles.js";
 import { DESCRIBE_BUDGET_CHARS } from "@a2app/rules";
+import { A2AppClient, fetchEntityIndex } from "@a2app/sdk";
 import { describeOverruns, walkDescribeBudget } from "./budget.js";
 import { clientFor, type Manifest, type Project } from "./project.js";
 import { runShell } from "./shell.js";
@@ -188,5 +189,63 @@ export async function runBudgetGate(project: Project): Promise<BudgetGateResult>
     };
   }
   log.ok(`${step} — ${report.checked} level(s)`);
+  return { errors: [], unchecked: [] };
+}
+
+/**
+ * Who a multi-user app answers (spec/v0_2/auth.md §4, §9), checked on the
+ * running app the way a stranger would meet it: sign-in must be on, and no
+ * entity may be readable by a request with no session and no credential. That
+ * covers a backend's own record routes too, where a public access rule would
+ * hand anyone the data whatever the adapter does.
+ *
+ * Reads only. A write probe could create a record, and the gate does not change
+ * the app it checks.
+ */
+export async function runAccessGate(project: Project): Promise<BudgetGateResult> {
+  if (project.manifest.authMode !== "multi-user") return { errors: [], unchecked: [] };
+  const step = "multi-user access (sign-in on, nothing readable without it)";
+  const unchecked = (reason: string): BudgetGateResult => {
+    log.warn(`UNCHECKED: ${step} — ${reason}`);
+    return { errors: [], unchecked: [{ step, reason }] };
+  };
+
+  let admin;
+  try {
+    admin = await clientFor(project);
+  } catch (err) {
+    return unchecked(err instanceof Error ? err.message : "could not build a client for the app");
+  }
+  const stranger = new A2AppClient({ baseUrl: admin.baseUrl, token: null, agentName: "agent-app validate" });
+
+  const problems: string[] = [];
+  try {
+    if ((await admin.identity()) === null) return unchecked("the app is not running — run `serve` first");
+    const session = await stranger.request("GET", "/api/_a2app/session");
+    const code = (session.json as { code?: unknown } | null)?.code;
+    if (session.status !== 401 || code !== "sign_in_required") {
+      problems.push(
+        `sign-in is not on: GET /api/_a2app/session with no session answered ${session.status}` +
+          `${typeof code === "string" ? ` ${code}` : ""}, not 401 sign_in_required.`,
+      );
+    }
+    for (const entity of (await fetchEntityIndex(admin)).keys()) {
+      const res = await stranger.listRecords(entity, { perPage: 1 });
+      if (res.ok) {
+        problems.push(
+          `anyone can read "${entity}" without signing in (GET /api/collections/${entity}/records answered ` +
+            `${res.status}): its access rules must require a signed-in person.`,
+        );
+      }
+    }
+  } catch (err) {
+    return unchecked(err instanceof Error ? err.message : String(err));
+  }
+
+  if (problems.length > 0) {
+    log.error(`${step} failed`);
+    return { errors: [{ step, message: problems.join("\n") }], unchecked: [] };
+  }
+  log.ok(step);
   return { errors: [], unchecked: [] };
 }

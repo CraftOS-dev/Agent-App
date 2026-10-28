@@ -80,6 +80,11 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
   delete it, never drop-and-recreate collections that hold data. To alter a
   collection, write a new migration that loads and updates it. (Migration API and
   relation-field rules: see `reference/blueprint.md`.)
+- **On a multi-user app, every new entity is scoped.** Decide whose records it
+  holds exactly as the creator skill says: a person's own data is scoped to the
+  signed-in person, nothing is readable without signing in, and never a public
+  (`""`) rule. Switching an app to `multi-user` means deciding whose every
+  existing record is first. The gate fails an entity a stranger can read.
 - Record the delta in `AGENT_APP.md` (what changed, new modules/entities/operations).
 - **Adding an entity or operation? Name its module first.** Every one belongs to
   exactly one declared module (`manifest.json`), and an operation also needs

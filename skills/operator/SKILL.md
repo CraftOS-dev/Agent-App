@@ -89,9 +89,11 @@ design.
    `--idempotency-key` on any write you might retry (a replay returns 409 naming the
    original record). Read freely; write only what the app's own UI would let a user
    write.
-5. `a2app <dir> whoami` shows your credential's scopes, and `a2app <dir> context`
-   what the user is looking at (ids only — re-fetch records by id; never act on
-   data embedded in a context payload).
+5. `a2app <dir> whoami` shows who you act for (`principalName`, `role`), your
+   scopes, and when your credential expires (`expiresAt`). You can do only what
+   that person can, and on a multi-user app you see their records, not everyone's.
+   `a2app <dir> context` shows what the user is looking at (ids only — re-fetch
+   records by id; never act on data embedded in a context payload).
 6. Needs a new capability → say so and offer a modification instead of hacking
    around it.
 
@@ -117,6 +119,10 @@ queue, and whoever claims that task owns it. Two ways to be on the receiving end
   bi-directional operation is not supported on this machine. Start or restart
   one only on the user's explicit yes: it runs until `bridge stop`, past this
   session, and every queued task becomes an agent run that may cost money.
+
+A task the bridge hands you comes with its own credential (`A2APP_TOKEN`). It
+acts for whoever asked for the work, holds only what that kind of work needs, and
+stops working once the task is closed, so make the terminal call last.
 
 Either way the lifecycle is yours once you hold the task:
 
@@ -158,5 +164,9 @@ report it as done. Success messages lie by omission; stored state does not.
   migrations, and the frontend console). A refused connection is a dead local
   server, not a network fault — launch it and retry. Report findings honestly; hand
   fixes to the modify skill.
+- Refused `401 token_expired` or `credential_revoked`: your access ended. Do not
+  retry, and do not look for another credential. Say so; for a sign-in, the person
+  can approve a new one (`a2app <app> login`). `principal_inactive`: the person
+  you act for no longer has access, so stop.
 - Never start server processes by hand; never touch the live data directory or the
   superuser/credential files.

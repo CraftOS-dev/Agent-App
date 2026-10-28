@@ -244,6 +244,12 @@ something — nothing is queued and no agent is ever handed it.
 - **Send ids.** The agent re-reads the record; a copy in the payload is stale by
   the time it is read, and prose there is an instruction the app does not get to
   give.
+- **The agent acts as whoever asked.** The task records the runner's caller,
+  and the bridge runs the agent with a credential for that person: it sees and
+  changes only what they could, and dies when the task ends. Say what the work
+  needs in `schema.capabilities` — `{ triage: { scopes: ["data:tasks:read",
+  "data:tasks:write"] } }` — and the credential holds no more; a capability left
+  out gets `*`, still within that person's reach.
 - An operation runner is the only firing point this blueprint offers. Record
   creation and updates go through system-owned code, so "fire when a record is
   created" is not available — model it as an operation the UI or an agent calls.

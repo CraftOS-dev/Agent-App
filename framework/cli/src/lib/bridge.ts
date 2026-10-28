@@ -45,12 +45,19 @@
  * SHELL and an argument array. `serve` uses a shell because it runs a trusted
  * manifest string; nothing here is trusted, and a shell would turn a record's
  * title into a command line.
+ *
+ * THE AGENT ACTS AS WHOEVER ASKED. The bridge holds the app's admin credential,
+ * and an unattended run with it would have the owner's full power whoever
+ * clicked "Ask an agent". So each run gets the task's own credential (spec/
+ * v0_2/auth.md §6.2): it acts for the person who queued the task, holds what the
+ * capability needs, and dies with the task. An app that issues none (protocol
+ * 0.1) is run as before.
  */
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { A2AppClient, Task } from "@a2app/sdk";
+import { PROTOCOL_VERSION, type A2AppClient, type Task } from "@a2app/sdk";
 import type { HarnessProfile, Route } from "./harness.js";
 import { PROMPT_PLACEHOLDER, launchSpec, resolveOnPath } from "./harness.js";
 import { fetchWithTimeout, pollHealth } from "./net.js";
@@ -285,6 +292,7 @@ async function deliverHttp(
   prompt: string,
   task: Task,
   ctx: PromptContext,
+  credential: TaskCredential | null,
   timeoutMs: number,
 ): Promise<Delivery> {
   const started = Date.now();
@@ -298,10 +306,12 @@ async function deliverHttp(
       },
       body: JSON.stringify({
         a2app: true,
-        protocol: "0.1",
+        protocol: PROTOCOL_VERSION,
         app: { id: ctx.appId, name: ctx.appName, ref: ctx.appRef },
         task,
         prompt,
+        // What the harness runs this task's agent with, as A2APP_TOKEN.
+        ...(credential !== null ? { credential: { token: credential.token, expiresAt: credential.expiresAt } } : {}),
       }),
     });
     const body = tail(await res.text().catch(() => ""));
@@ -351,6 +361,7 @@ async function deliverHeadless(
   route: Extract<Route, { mode: "headless" }>,
   prompt: string,
   cwd: string,
+  credential: TaskCredential | null,
   timeoutMs: number,
   onHeartbeat: () => Promise<boolean>,
   heartbeatMs: number = HEARTBEAT_MS,
@@ -385,11 +396,15 @@ async function deliverHeadless(
       cwd: route.cwd !== undefined && route.cwd !== "app" ? route.cwd : cwd,
       shell: false,
       stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
-      // The harness must not inherit the app's agent credential through the
-      // environment: it reads `.agent-token` through the CLI, from the app's own
-      // directory, which is a narrower grant than an env var every grandchild
-      // process would also see.
-      env: { ...process.env, A2APP_AGENT: `bridge:${route.command}` },
+      // The task's own credential, never the bridge's: every `a2app` command
+      // the agent runs presents it, and it is dead once the task is. An app that
+      // issues none leaves the harness to read the app's credential through the
+      // CLI, as before.
+      env: {
+        ...process.env,
+        A2APP_AGENT: `bridge:${route.command}`,
+        ...(credential !== null ? { A2APP_TOKEN: credential.token } : {}),
+      },
       // The bridge runs with no console of its own, so on Windows every
       // console-mode child would otherwise be given a fresh, visible one — a
       // terminal popping up in front of the user for each delivered task.
@@ -531,6 +546,29 @@ export interface BridgeContext {
   /** null means every capability; otherwise only these are delivered */
   capabilities: string[] | null;
   dryRun: boolean;
+  /** Whether the app issues task credentials (protocol 0.2 and later). */
+  taskCredentials: boolean;
+}
+
+/** The credential one task's run presents (spec/v0_2/auth.md §6.2). */
+interface TaskCredential {
+  token: string;
+  credentialId: string;
+  expiresAt: string;
+}
+
+/** Ask the app for this task's credential, or say why it gave none. */
+async function issueTaskCredential(ctx: BridgeContext, task: Task): Promise<TaskCredential | { refused: string }> {
+  const res = await ctx.client.request("POST", `/api/_a2app/tasks/${encodeURIComponent(task.id)}/credential`, {
+    agentName: `bridge:${ctx.profile.id}`,
+  });
+  const body = res.json as { token?: unknown; credential?: { credentialId?: unknown; expiresAt?: unknown }; code?: unknown } | null;
+  const { token } = body ?? {};
+  const { credentialId, expiresAt } = body?.credential ?? {};
+  if (res.ok && typeof token === "string" && typeof credentialId === "string" && typeof expiresAt === "string") {
+    return { token, credentialId, expiresAt };
+  }
+  return { refused: `HTTP ${res.status}${typeof body?.code === "string" ? ` ${body.code}` : ""}` };
 }
 
 function parseTasks(json: unknown): Task[] {
@@ -551,6 +589,35 @@ function parseTasks(json: unknown): Task[] {
  * So the task is re-read first, and only a still-open task is closed here.
  */
 export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<Delivery> {
+  if (!ctx.taskCredentials) return runAndSettle(ctx, task, null);
+
+  const issued = await issueTaskCredential(ctx, task);
+  if ("refused" in issued) {
+    // Never fall back to the bridge's own credential: that is the owner's
+    // whole reach, for work somebody else asked for.
+    await ctx.client.completeTask(task.id, { status: "failed", reason: "task_credential_refused" });
+    return {
+      ok: false,
+      completes: true,
+      code: "task_credential_refused",
+      detail: `the app issued no credential for this task (${issued.refused}), so nothing was run`,
+      ms: 0,
+    };
+  }
+  try {
+    return await runAndSettle(ctx, task, issued);
+  } finally {
+    // A headless run is over when it exits, so its credential is handed back
+    // now rather than left alive until the task ends or the hour runs out (a
+    // run killed for a lost claim leaves its task open). A run handed over HTTP
+    // is still going, and keeps it.
+    if (ctx.route.mode === "headless") {
+      await ctx.client.request("DELETE", `/api/_a2app/credentials/${encodeURIComponent(issued.credentialId)}`).catch(() => null);
+    }
+  }
+}
+
+async function runAndSettle(ctx: BridgeContext, task: Task, credential: TaskCredential | null): Promise<Delivery> {
   const prompt = renderPrompt(task, ctx.prompt);
 
   // Say who has it, in the app, before the run starts. A person watching the app
@@ -579,6 +646,7 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
         ctx.route,
         prompt,
         ctx.project.dir,
+        credential,
         ctx.route.timeoutMs ?? ctx.taskTimeoutMs,
         heartbeat,
         ctx.heartbeatMs,
@@ -586,7 +654,7 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
       break;
     case "inbound":
     case "gateway":
-      delivery = await deliverHttp(ctx.route, prompt, task, ctx.prompt, 30_000);
+      delivery = await deliverHttp(ctx.route, prompt, task, ctx.prompt, credential, 30_000);
       break;
     case "subscribe":
       delivery = {

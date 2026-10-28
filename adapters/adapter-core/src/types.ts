@@ -270,6 +270,12 @@ export interface A2AppConfig {
    * (record ownership still applies). An inactive principal has none.
    */
   permissionsOf?: (principal: PrincipalInfo) => string[];
+  /**
+   * What the agent taking each capability's tasks needs, as scopes (spec/v0_2/
+   * auth.md §6.2). A task's credential holds these, limited by what the person
+   * who queued it may do; a capability not listed here gets `*`.
+   */
+  capabilities?: Record<string, { scopes: string[] }>;
   /** the adapter-owned state store. When omitted, the core builds a durable
    *  {@link import("./store.js").FileStateStore} if `storePath` is given, else an
    *  in-memory store (fast, but non-conforming for idempotency across a restart).

@@ -41,11 +41,11 @@ All issue the same kind of credential.
 |---|---|---|
 | Device code (§7) | the person, on the account page | the approving person |
 | `POST /api/_a2app/credentials` | a manager (§2.4), for CI or a harness with no browser | the manager, or anyone if the manager is an owner |
-| Task credential (§6.2) | the admin credential (the bridge) | whoever queued the task |
+| Task credential (§6.2) | an owner manager: the bridge, with the admin credential | whoever queued the task |
 
 ### 2.3 The admin credential
 
-The app's own `.agent-token` file holds the **admin credential**: principal `owner`, scopes `*`, no expiry, `credentialId` `cred_local`. It is seeded at boot from the file, is never listed, and cannot be revoked through the API (delete or rotate the file). Framework tooling on the app's host uses it (minting, invites, the bridge). On a `multi-user` app it is never handed to an agent harness (§6.2).
+The app's own `.agent-token` file holds the **admin credential**: principal `owner`, scopes `*`, no expiry, `credentialId` `cred_local`. It is seeded at boot from the file, is never listed, and cannot be revoked through the API (delete or rotate the file). Framework tooling on the app's host uses it (minting, invites, the bridge). It is never handed to an agent harness (§6.2).
 
 ### 2.4 Managers
 
@@ -108,14 +108,14 @@ A trigger fired by an operation records the operation's principal as `task.reque
 
 ### 6.2 Task credentials
 
-`POST /api/_a2app/tasks/{id}/credential` (admin credential only) issues a credential with:
+`POST /api/_a2app/tasks/{id}/credential {agentName?}` (owner manager; the bridge uses the admin credential) issues a credential with:
 
 - **principal:** `task.request.principal` (or `owner`);
 - **scopes:** what the app declares the capability needs (`capabilities: { <name>: { scopes } }`, else `*`), always limited by §3;
 - **`task`:** the task id;
 - **`expiresAt`:** at most 1 hour.
 
-It is refused `credential_revoked` once the task is `completed`, `failed` or `canceled`. The bridge runs every harness with such a credential in `A2APP_TOKEN`, and never with the admin credential.
+The credential is refused `credential_revoked` once the task is `completed`, `failed` or `canceled`, and none is issued for such a task (`409 task_not_claimable`) or for a principal no longer active (`401 principal_inactive`). The bridge runs every harness with such a credential, never with the admin credential: as `A2APP_TOKEN` for a process it starts, and as `credential.token` in the body it posts to an HTTP route.
 
 ## 7. Device-code sign-in (RFC 8628 shape)
 
@@ -159,7 +159,7 @@ The issued credential acts for the approving manager's principal, with the appro
 | `POST /api/_a2app/credentials {agentName, scopes, expiresIn?, principal?}` | manager | `issued-credential` |
 | `DELETE /api/_a2app/credentials/{id}` | manager, or that credential | `{ revoked }` |
 | `POST /api/_a2app/auth/device` · `GET/POST /api/_a2app/auth/device/{userCode}` · `POST /api/_a2app/auth/token` | §7 | §7 |
-| `POST /api/_a2app/tasks/{id}/credential` | admin credential | `issued-credential` |
+| `POST /api/_a2app/tasks/{id}/credential` | owner manager | `issued-credential` |
 
 The session, invite and user routes exist only on `multi-user` apps; elsewhere they answer `404 not_multi_user`.
 

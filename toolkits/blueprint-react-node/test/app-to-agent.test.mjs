@@ -51,6 +51,11 @@ const callee = /trigger:\s*\([^)]*\)\s*=>\s*([A-Za-z_$][\w$]*)\.trigger\(/.exec(
 const instance = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*createA2App\(/.exec(server)?.[1];
 ok("server.mjs creates the adapter with createA2App", Boolean(instance));
 check("…and the runner's trigger calls that same binding", callee, instance);
+// The agent that takes a task acts as whoever asked (spec/v0_2/auth.md §6), so
+// the trigger records the runner's caller, and the adapter learns what each
+// capability's agent needs.
+ok("…recording the runner's caller as who asked", /trigger:[\s\S]*?principal:\s*ctx\.principal/.test(server));
+ok("…and passes the declared capabilities to the adapter", /capabilities:\s*schema\.capabilities/.test(server));
 
 /* ------------------------------------------- every fired type is declared */
 
@@ -91,6 +96,8 @@ if (typeof runner === "function") {
   // A capability is what turns an event into WORK. Without one the app has only
   // announced something, and no agent will ever be handed it.
   ok("…naming a capability, or nothing is queued at all", Boolean(calls[0]?.capability));
+  // Its agent holds only what this says, so the example says what triage needs.
+  ok("…whose scopes the schema declares", (schema.capabilities?.[calls[0]?.capability]?.scopes ?? []).length > 0);
   // Ids, not prose and not a copy of the record: the agent re-reads the record
   // itself, so an embedded copy would be stale by the time it is read, and
   // embedded prose would be an instruction the app does not get to give.

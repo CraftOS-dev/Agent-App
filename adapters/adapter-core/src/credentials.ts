@@ -18,6 +18,8 @@ import type { A2AppReply, A2AppRequest, Grant, PrincipalInfo } from "./types.js"
 export const DEFAULT_EXPIRES_SECONDS = 30 * 24 * 60 * 60;
 export const MIN_EXPIRES_SECONDS = 60;
 export const MAX_EXPIRES_SECONDS = 365 * 24 * 60 * 60;
+/** A task credential's lifetime (spec §6.2); its task ending kills it sooner. */
+export const TASK_CREDENTIAL_SECONDS = 60 * 60;
 
 /** A credential as listed: never its token or the token's hash. */
 export function credentialWire(g: Grant, principalName: string | null): Record<string, unknown> {
@@ -60,6 +62,13 @@ export function mintCredential(store: StateStore, now: Date, input: MintInput): 
   };
   store.putGrant(grant);
   return { token, grant };
+}
+
+/** The optional agent name a caller gave a credential, checked. */
+export function parseAgentName(value: unknown): string | null | { problem: string } {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim() === "" || value.length > 100) return { problem: "agentName is 1–100 characters." };
+  return value.trim();
 }
 
 /**
@@ -134,14 +143,13 @@ export function createCredentialRoutes(deps: CredentialDeps) {
     }
     const info = deps.principalInfo(principal);
     if (!info || !info.active) return err(400, "usage", `"${principal}" is not an active account of this app.`);
-    if (body.agentName !== undefined && (typeof body.agentName !== "string" || body.agentName.trim() === "" || body.agentName.length > 100)) {
-      return err(400, "usage", "agentName is 1–100 characters.");
-    }
+    const agentName = parseAgentName(body.agentName);
+    if (agentName !== null && typeof agentName === "object") return err(400, "usage", agentName.problem);
     const parsed = parseGrantRequest(body, deps.declaredScopes());
     if ("problem" in parsed) return err(400, "usage", parsed.problem);
     const { token, grant } = mintCredential(store, deps.now(), {
       principal,
-      agentName: typeof body.agentName === "string" ? body.agentName.trim() : null,
+      agentName,
       scopes: parsed.scopes,
       expiresInSeconds: parsed.expiresInSeconds,
     });

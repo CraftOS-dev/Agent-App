@@ -114,12 +114,20 @@ export const schema = {
   // about.
   events: [{ type: "task.needs_triage" }],
 
+  // What the agent taking each capability's tasks may do, as scopes. The bridge
+  // runs it with a credential that acts for the person who asked, holds only
+  // these, and dies with the task — so an agent asked to triage cannot do more
+  // than triage, nor more than that person could. A capability left out gets
+  // `*`, still within the person's own reach.
+  capabilities: { triage: { scopes: ["data:tasks:read", "data:tasks:write"] } },
+
   // Runner signature: (args, ctx, { store, trigger }) => jsonable result. `ctx` is
   // who is calling ({ credentialId, agentName, principal, role }). `store` is the
   // SQLite-backed record store — list(entity) · get(entity, id) · put(entity,
   // record) · remove(entity, id). Writes are durable when the call returns;
   // there is no separate persist() step on this stack. `trigger(type, payload,
-  // capability?)` emits a declared event (see `request-triage` below).
+  // capability?)` emits a declared event (see `request-triage` below); a task it
+  // queues is done by an agent acting as the caller.
   operationRunners: {
     "clear-done": (_args, ctx, { store }) => {
       let removed = 0;

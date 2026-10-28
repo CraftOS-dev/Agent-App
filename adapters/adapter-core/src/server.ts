@@ -37,7 +37,7 @@ import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, t
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import { hostnameOf, isLoopbackName } from "./network.js";
 import { ACCOUNT_URL, createAccountRoutes, type Manager } from "./accounts.js";
-import { createCredentialRoutes } from "./credentials.js";
+import { createCredentialRoutes, credentialWire, mintCredential, parseAgentName, TASK_CREDENTIAL_SECONDS } from "./credentials.js";
 import { createDeviceRoutes } from "./device.js";
 import { hashSecret, parseCookies, type AccountRow, type SessionRow } from "./auth.js";
 import {
@@ -98,6 +98,10 @@ export interface A2App {
     type: string;
     payload: Record<string, unknown>;
     capability?: string;
+    /** Who asked for the work: the caller of the operation that fires this
+     *  (`ctx.principal`). Omitted for work the app queues on its own. The agent
+     *  that takes the task acts as this principal (spec/v0_2/auth.md §6). */
+    principal?: string | null;
     dedupKey?: string;
   }): { eventId: string; taskId: string | null };
   readonly store: StateStore;
@@ -253,6 +257,11 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   // that omits real capability while answering 200.
   {
     const problems = modelProblems({ binding, operations, modules: config.modules, conventions });
+    const declared = allScopes();
+    for (const [capability, { scopes }] of Object.entries(config.capabilities ?? {})) {
+      const unknown = scopes.filter((s) => s !== "*" && !declared.has(s));
+      if (unknown.length > 0) problems.push(`capability "${capability}" needs scopes this app does not declare: ${unknown.join(", ")}`);
+    }
     if (problems.length > 0) {
       throw new Error(
         `A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - ${problems.join("\n  - ")}`,
@@ -1162,7 +1171,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       app: t.app,
       event: t.event,
       status: t.status,
-      request: t.request,
+      request: { ...t.request, principal: t.request.principal ?? null },
       claim: t.claim,
       progress: t.progress,
       result: t.result,
@@ -1279,6 +1288,30 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         store.saveTask(task);
         writeAudit(ctx, `task:cancel`, taskId, "ok");
         return ok(taskWire(task));
+      }
+      case "credential": {
+        // What the bridge runs the task's harness with (spec §6.2): the person
+        // who queued it, the capability's scopes, and no life past the task.
+        const manager = managerOf(req, { write: true });
+        if ("status" in manager) return manager;
+        if (manager.role !== "owner") return err(403, "not_a_manager", "Only an owner issues a task's credential.");
+        if (TERMINAL_TASK.has(task.status)) {
+          return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} already reached ${task.status}.`);
+        }
+        const principal = task.request.principal ?? OWNER.id;
+        const info = principalInfo(principal);
+        if (!info?.active) return err(401, "principal_inactive", "The person who queued this task is no longer active.");
+        const agentName = parseAgentName(body.agentName);
+        if (agentName !== null && typeof agentName === "object") return err(400, "usage", agentName.problem);
+        const { token, grant } = mintCredential(store, now(), {
+          principal,
+          agentName,
+          scopes: config.capabilities?.[task.request.capability]?.scopes ?? ["*"],
+          expiresInSeconds: TASK_CREDENTIAL_SECONDS,
+          task: task.id,
+        });
+        writeAudit(ctx, `task:credential`, taskId, "ok");
+        return ok({ a2app: true, token, credential: credentialWire(grant, info.name) }, 201);
       }
       default:
         return err(404, "usage", `Unknown task action "${action}".`);
@@ -1439,6 +1472,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
           event: ev.id,
           capability: input.capability,
           payload: input.payload,
+          principal: input.principal ?? null,
           // Dedup is keyed on the OCCURRENCE, not on the event record: the same
           // trigger firing twice must make one task (section 6.2). `ev.id` is
           // freshly minted per emit, so defaulting to it deduplicates nothing.
@@ -1448,7 +1482,14 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
           dedupKey:
             input.dedupKey ??
             sha256Prefixed(
-              canonicalize({ type: input.type, capability: input.capability, payload: input.payload ?? null }),
+              // Who asked is part of the occurrence: the same request from two
+              // people is two tasks, each run as the person who asked.
+              canonicalize({
+                type: input.type,
+                capability: input.capability,
+                payload: input.payload ?? null,
+                ...(input.principal ? { principal: input.principal } : {}),
+              }),
             ),
         });
         taskId = task.id;

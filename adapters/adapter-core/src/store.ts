@@ -56,7 +56,9 @@ export interface StoredTask {
   app: string;
   event: string | null;
   status: "submitted" | "working" | "input-required" | "completed" | "failed" | "canceled";
-  request: { capability: string; payload?: Record<string, unknown> };
+  /** `principal`: who queued it (spec/v0_2/auth.md §6.1); null for work the
+   *  app queued on its own. Absent on tasks stored before 0.2. */
+  request: { capability: string; payload?: Record<string, unknown>; principal?: string | null };
   claim: { credentialId: string; principal: string; claimedAt: string } | null;
   progress: { step: string | null; percent: number | null };
   result: Record<string, unknown> | null;
@@ -108,6 +110,7 @@ export interface StateStore {
     event: string | null;
     capability: string;
     payload?: Record<string, unknown>;
+    principal?: string | null;
     dedupKey?: string | null;
   }): StoredTask;
   getTask(id: string): StoredTask | null;
@@ -318,6 +321,7 @@ export class InMemoryStateStore implements StateStore {
     event: string | null;
     capability: string;
     payload?: Record<string, unknown>;
+    principal?: string | null;
     dedupKey?: string | null;
   }): StoredTask {
     if (input.dedupKey) {
@@ -333,7 +337,11 @@ export class InMemoryStateStore implements StateStore {
       app: this.app,
       event: input.event,
       status: "submitted",
-      request: input.payload === undefined ? { capability: input.capability } : { capability: input.capability, payload: input.payload },
+      request: {
+        capability: input.capability,
+        ...(input.payload === undefined ? {} : { payload: input.payload }),
+        principal: input.principal ?? null,
+      },
       claim: null,
       progress: { step: null, percent: 0 },
       result: null,

@@ -45,8 +45,7 @@ import { chooseRoute, harnessesPath, loadHarnesses, selectProfile, type RungRepo
 import { readDevRecord } from "../lib/instance.js";
 import { withLock } from "../lib/lock.js";
 import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
-import { loadProject, UsageError, type Project } from "../lib/project.js";
-import { connect } from "../lib/target.js";
+import { clientFor, loadProject, UsageError, type Project } from "../lib/project.js";
 import { log } from "../lib/log.js";
 import {
   agentWorkLine,
@@ -359,11 +358,13 @@ async function start(args: string[], app: string, project: Project): Promise<num
   }
 
   // ---- foreground: this process is the bridge ----
-  const { client, target } = await connect(app);
+  // The app's admin credential: the bridge claims tasks and asks for each
+  // one's credential, and hands the harness only the latter.
+  const client = await clientFor(project);
   const identity = await client.identity();
   if (identity === null) {
     throw new UsageError(
-      `${project.manifest.name} is not answering at ${target.baseUrl}. A bridge polls a RUNNING app — ` +
+      `${project.manifest.name} is not answering at ${client.baseUrl}. A bridge polls a RUNNING app — ` +
         `launch it first: ${appCommand(app, "serve")}`,
     );
   }
@@ -373,7 +374,7 @@ async function start(args: string[], app: string, project: Project): Promise<num
   // and every request would look perfectly successful while it did.
   if (identity.app?.id !== project.manifest.id) {
     throw new UsageError(
-      `${target.baseUrl} is answering as "${identity.app?.id ?? "an app with no id"}", but this directory is ` +
+      `${client.baseUrl} is answering as "${identity.app?.id ?? "an app with no id"}", but this directory is ` +
         `"${project.manifest.id}". Refusing to take work from an app that is not the one addressed — ` +
         `something else is holding that port.`,
     );
@@ -427,6 +428,7 @@ async function start(args: string[], app: string, project: Project): Promise<num
     taskTimeoutMs,
     capabilities: capabilities.length > 0 ? capabilities : null,
     dryRun,
+    taskCredentials: identity.protocol !== "0.1",
   };
 
   let stop = false;

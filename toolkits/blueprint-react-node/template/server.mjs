@@ -247,7 +247,10 @@ const binding = {
     return runner(args, ctx, {
       store,
       /** Emit a declared event, and enqueue a task when `capability` is given. */
-      trigger: (type, payload, capability) => a2app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}) }),
+      // The caller is who asked for the work, so the agent that takes the task
+      // acts as them (spec/v0_2/auth.md §6).
+      trigger: (type, payload, capability) =>
+        a2app.trigger({ type, payload: payload ?? {}, ...(capability ? { capability } : {}), principal: ctx.principal }),
     });
   },
 };
@@ -346,6 +349,8 @@ const a2app = createA2App(binding, {
   // to is fixed by its author, in code they own, rather than by whatever a
   // caller passes at the moment of firing.
   events: schema.events ?? [],
+  // What each capability's agent may do (spec/v0_2/auth.md §6.2).
+  capabilities: schema.capabilities ?? {},
   // Modules are declared in the manifest and are what describe's root level
   // lists; every entity and operation names one.
   modules: manifest.modules,

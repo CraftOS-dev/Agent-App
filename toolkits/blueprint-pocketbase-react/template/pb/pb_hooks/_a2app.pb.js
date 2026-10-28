@@ -76,6 +76,15 @@ routerAdd("POST", "/api/_a2app/tasks/{id}/{action}", (e) =>
 routerAdd("GET", "/api/_a2app/events", (e) => require(`${__hooks}/_a2app_impl.js`).listEvents(e));
 routerAdd("GET", "/api/_a2app/context", (e) => require(`${__hooks}/_a2app_impl.js`).context(e));
 
+/* ------------------------------------------- access to PocketBase's own routes */
+
+// PocketBase serves records, realtime, files and batch itself, outside the
+// adapter's routes. This middleware puts the adapter's host/origin/credential
+// rule in front of them (see nativeGate in _a2app_impl.js). It is a router
+// middleware rather than the onRecord*Request hooks because those events do not
+// expose the request's Host header to the JS runtime.
+routerUse((e) => require(`${__hooks}/_a2app_impl.js`).nativeGate(e));
+
 /* ----------------------------------------------------------------- guard */
 
 // Validate the RAW submitted body before PocketBase coerces it, on both create

@@ -9,6 +9,6 @@
   "scripts": {
     "build": "echo \"blueprint — nothing to build yet\" && exit 0",
     "typecheck": "echo \"blueprint — nothing to typecheck yet\" && exit 0",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node test/e2e.mjs"
   }
 }

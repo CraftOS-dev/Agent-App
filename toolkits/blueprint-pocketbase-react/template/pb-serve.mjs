@@ -209,6 +209,10 @@ if (migrateMode) {
       migrationsDir,
       "--publicDir",
       publicDir,
+      // PocketBase answers CORS for every origin by default; only the app's own
+      // View should be able to read a response. The hooks also refuse a foreign
+      // Origin outright — this keeps the browser from even seeing the answer.
+      `--origins=http://127.0.0.1:${port},http://localhost:${port}`,
       // Live must never hot-load an unverified edit; dev wants exactly that.
       `--hooksWatch=${env === "dev"}`,
     ],

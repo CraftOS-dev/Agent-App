@@ -48,9 +48,8 @@ Declared in `operations.json`, run by the same-named runner in
  that holds data.
 - The design system lives in `ui/public/tokens.css` (kit sheet: foundation →
  semantic bridge); components consume ONLY semantic tokens. Shared pieces
- (Icon, `useToast`, `useConfirm` — never `window.confirm`, `AgentTask.jsx` for
- work queued for an agent) live in `ui/src/`; compose them, never re-implement
- per screen.
+ (Icon, `useToast`, `useConfirm` — never `window.confirm`) live in `ui/src/`;
+ compose them, never re-implement per screen.
 - The View is served BUILT: `npm --prefix ui run build` → `pb/pb_public/`.
  Editing `ui/src/` changes nothing a browser sees until the next build.
 

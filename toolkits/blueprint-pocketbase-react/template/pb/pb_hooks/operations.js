@@ -14,7 +14,7 @@
  *
  *   args   the guarded arguments, as plain JS.
  *   ctx    who is calling: { credentialId, agentName, principal }.
- *   a2app  { app, trigger, error }:
+ *   a2app  { app, trigger, task, error }:
  *          app      the PocketBase app to read and write through —
  *                   `a2app.app.findRecordById(...)`, `a2app.app.save(record)`.
  *                   It is a TRANSACTION: everything the runner writes, and every
@@ -25,6 +25,9 @@
  *                   a capability is named, queue a task for an agent. Returns
  *                   { eventId, taskId }. An event type missing from `events`
  *                   below is refused.
+ *          task     (id) — a queued task as the agent sees it ({ id, status,
+ *                   … }), or null if there is no such task. Read in the same
+ *                   transaction, so it is current.
  *          error    (status, code, message) — `throw a2app.error(409, "already_done",
  *                   "…")` refuses with your own status and code.
  *
@@ -89,19 +92,27 @@ module.exports = {
     // here can widen what the agent may do: the payload is data on the other
     // side, and the capability names the kind of work, not a command.
     //
-    // Identical triggers dedupe to ONE task, even after it has finished, so
-    // asking again with the same payload would hand back the old failure.
-    // Naming the previous task makes each request a new occurrence. The View
-    // disables the control while a run is open, so a double click cannot queue
-    // two.
+    // One open run per record. While the record's last task is unfinished,
+    // asking again hands back that task instead of queuing a second run — a
+    // double click, a retry, or the agent itself asking from inside the run
+    // (#24) all land on the work already in progress. Once it has finished, or
+    // is gone, a new ask is a new run.
     //
-    // The task id goes on the record so the View can show the work until it is
-    // done (ui/src/AgentTask.jsx). The validate gate checks that it does.
+    // Identical triggers dedupe to ONE task, even after it has finished, so the
+    // payload names the previous task to make the new ask a new occurrence.
+    //
+    // The task id goes on the record (`agentTask`), so whoever looks at the
+    // record — the View, or an agent — can follow the work with
+    // GET /api/_a2app/tasks/{id}.
     "request-triage": (args, _ctx, a2app) => {
       const task = findTask(a2app, args.task);
       if (!task) return { ok: false, reason: "no such task" };
-      const payload = { task: task.id };
       const previous = task.getString("agentTask");
+      const current = previous ? a2app.task(previous) : null;
+      if (current && FINISHED.indexOf(current.status) === -1) {
+        return { ok: true, task: task.id, queued: current.id, alreadyQueued: true };
+      }
+      const payload = { task: task.id };
       if (previous) payload.previous = previous;
       const fired = a2app.trigger("task.needs_triage", payload, "triage");
       task.set("agentTask", fired.taskId);
@@ -110,6 +121,9 @@ module.exports = {
     },
   },
 };
+
+/** A queue task in one of these states will not move again. */
+const FINISHED = ["completed", "failed", "canceled"];
 
 function findTask(a2app, id) {
   try {

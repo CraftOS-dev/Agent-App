@@ -582,7 +582,15 @@ function guard(e) {
   // Fields the app declares read-only are written by its own runners, never by
   // a client. The PocketBase dashboard is the exception: a signed-in superuser
   // is the owner editing by hand, and the dashboard sends every field on save.
-  if (!e.hasSuperuserAuth()) rules.markReadOnly(fields, readOnlyDeclared()[col.name]);
+  if (!e.hasSuperuserAuth()) {
+    const code = appCode();
+    if (code.problem !== null) {
+      // Fail closed: which fields are read-only is declared in operations.js,
+      // so while it cannot load, a client write could overwrite one unnoticed.
+      return fail(e, 503, "app_code_unavailable", `Writes are paused: pb/pb_hooks/operations.js could not be loaded (${code.problem}).`);
+    }
+    rules.markReadOnly(fields, code.readOnly[col.name]);
+  }
 
   // The raw submitted data (before coercion).
   const info = e.requestInfo();
@@ -735,6 +743,7 @@ function ensureStore(app) {
     // again, or a client holding an old cursor would skip the new event.
     "CREATE TABLE IF NOT EXISTS _a2app_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, body TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS _a2app_approvals (key TEXT PRIMARY KEY, expires INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS _a2app_idempotency (scope TEXT NOT NULL, key TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (scope, key))",
   ];
   for (let i = 0; i < statements.length; i++) app.db().newQuery(statements[i]).execute();
 }
@@ -831,46 +840,119 @@ function readOnlyDeclared() {
  *               write always needs one; a read needs one on a multi-user app.
  */
 function authorize(e, isWrite) {
-  const host = String(e.request.host || "").toLowerCase();
-  const name = host.indexOf("[") === 0 ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
-  const loopback = name === "localhost" || name === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
-  if (!loopback) {
-    fail(e, 403, "forbidden_host", `Refused: this app answers only on its own host, not "${host}".`);
-    return null;
-  }
+  const hostRefusal = refuseHost(e);
+  if (hostRefusal) return deny(e, hostRefusal);
 
   const manifest = readManifest();
   const multiUser = !!manifest && manifest.authMode === "multi-user";
 
-  const origin = header(e, "Origin");
-  if (origin !== "") {
-    if (origin.toLowerCase() !== `http://${host}`) {
-      fail(e, 403, "forbidden_origin", "Refused: request Origin is not this app's own.");
-      return null;
-    }
+  const origin = originOf(e);
+  if (origin === "foreign") return deny(e, FOREIGN_ORIGIN);
+  if (origin === "own") {
     if (!multiUser) return { credentialId: "ui", agentName: null, principal: "owner" };
     if (e.auth) return { credentialId: "ui", agentName: null, principal: String(e.auth.id) };
   }
 
+  const token = agentToken(e);
+  if (token === "valid") {
+    return { credentialId: LOCAL_GRANT.credentialId, agentName: LOCAL_GRANT.agentName, principal: LOCAL_GRANT.principal };
+  }
+  if (isWrite || multiUser || token === "wrong") {
+    // A token that does not match is refused even for a read: an agent holding
+    // a stale credential should learn so, not be served as anonymous.
+    return deny(e, tokenRefusal(token));
+  }
+  return { credentialId: "anonymous", agentName: null, principal: "owner" };
+}
+
+/**
+ * The same rule in front of PocketBase's OWN routes — records, realtime, file
+ * downloads, batch — which never pass through `authorize`. Without it the
+ * starter's public collection rules ("" = anyone) meant any web page open in
+ * the owner's browser could read, create and delete records, and any local
+ * process could write without the agent token.
+ *
+ *   host        loopback only, as above (DNS rebinding).
+ *   origin      a foreign browser origin is refused; the app's own View passes.
+ *   superuser   a signed-in superuser (the PocketBase dashboard) passes.
+ *   multi-user  PocketBase's own collection rules decide from here: that is what
+ *               they are for once the app has real users.
+ *   single-user a program (no Origin) may read records; writing one needs the
+ *               agent token. Auth endpoints (sign-in, password reset) carry
+ *               their own credentials and only get the host and origin checks.
+ *
+ * Every other path (the adapter's routes, the static View) passes untouched.
+ */
+function nativeGate(e) {
+  const method = String(e.request.method || "GET").toUpperCase();
+  if (method === "OPTIONS") return e.next(); // CORS preflight: --origins answers it
+  const path = String(e.request.url.path || "");
+  let kind = null;
+  if (/^\/api\/collections\/[^/]+\/records(\/|$)/.test(path)) kind = method === "GET" || method === "HEAD" ? "read" : "write";
+  else if (path === "/api/realtime" || path.indexOf("/api/files/") === 0) kind = "read";
+  else if (path === "/api/batch") kind = "write";
+  else if (path.indexOf("/api/collections/") === 0) kind = "auth";
+  if (kind === null) return e.next();
+
+  const refusal = refuseHost(e) || (originOf(e) === "foreign" ? FOREIGN_ORIGIN : null) || credentialRefusal(e, kind);
+  if (refusal) return fail(e, refusal.status, refusal.code, refusal.message, refusal.extra);
+  return e.next();
+}
+
+function credentialRefusal(e, kind) {
+  if (kind !== "write" || e.hasSuperuserAuth() || originOf(e) === "own") return null;
+  const manifest = readManifest();
+  if (manifest && manifest.authMode === "multi-user") return null;
+  const token = agentToken(e);
+  return token === "valid" ? null : tokenRefusal(token);
+}
+
+const FOREIGN_ORIGIN = { status: 403, code: "forbidden_origin", message: "Refused: request Origin is not this app's own." };
+
+/** A refusal if the Host is not a loopback name, else null. A page on evil.com
+ *  whose DNS re-resolves to 127.0.0.1 sends no Origin on a GET, but its Host
+ *  header still says evil.com. */
+function refuseHost(e) {
+  const host = String(e.request.host || "").toLowerCase();
+  const name = host.indexOf("[") === 0 ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+  const loopback = name === "localhost" || name === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
+  if (loopback) return null;
+  return { status: 403, code: "forbidden_host", message: `Refused: this app answers only on its own host, not "${host}".` };
+}
+
+/** "none" (a program, or a same-origin GET), "own" (this app's View) or "foreign". */
+function originOf(e) {
+  const origin = header(e, "Origin");
+  if (origin === "") return "none";
+  return origin.toLowerCase() === `http://${String(e.request.host || "").toLowerCase()}` ? "own" : "foreign";
+}
+
+/** "none", "valid" or "wrong": the agent token from `.agent-token`, sent as X-A2App-Token. */
+function agentToken(e) {
   const presented = header(e, "X-A2App-Token") || header(e, "X-LUI-Token");
+  if (presented === "") return "none";
   let expected = "";
   try {
     expected = toString($os.readFile(`${__hooks}/../../${TOKEN_FILE}`)).trim();
   } catch (_none) {
     expected = ""; // no credential minted: nothing can match it
   }
-  if (presented !== "" && expected !== "" && $security.equal(presented, expected)) {
-    return { credentialId: LOCAL_GRANT.credentialId, agentName: LOCAL_GRANT.agentName, principal: LOCAL_GRANT.principal };
-  }
-  if (isWrite || multiUser || presented !== "") {
-    // A token that does not match is refused even for a read: an agent holding
-    // a stale credential should learn so, not be served as anonymous.
-    fail(e, 401, "agent_token_required",
-      presented !== "" ? "The agent credential presented is not this app's." : "This write requires an agent credential.",
-      { how: CREDENTIAL_HINT });
-    return null;
-  }
-  return { credentialId: "anonymous", agentName: null, principal: "owner" };
+  return expected !== "" && $security.equal(presented, expected) ? "valid" : "wrong";
+}
+
+function tokenRefusal(token) {
+  return {
+    status: 401,
+    code: "agent_token_required",
+    message: token === "wrong" ? "The agent credential presented is not this app's." : "This write requires an agent credential.",
+    extra: { how: CREDENTIAL_HINT },
+  };
+}
+
+/** Write a refusal from `authorize` and return null, which tells the caller to stop. */
+function deny(e, refusal) {
+  fail(e, refusal.status, refusal.code, refusal.message, refusal.extra);
+  return null;
 }
 
 /* ----------------------------------------------------------------- store */
@@ -1018,6 +1100,13 @@ function runOperation(e, name) {
     });
   }
 
+  // Idempotency, as adapter-core: a retried call carrying a key that already
+  // ran is a 409, not a second run. Checked before approval so a replay never
+  // mints a key; checked again inside the run's transaction, where it counts.
+  const idemKey = header(e, "Idempotency-Key");
+  const idemScope = `op:${name}`;
+  if (idemKey !== "" && idempotencySeen($app.db(), idemScope, idemKey)) return duplicateRequest(e, name);
+
   if (decl.destructive) {
     const key = $security.sha256(rules.approvalText(name, args));
     const provided = header(e, "X-A2App-Approval") || header(e, "X-LUI-Approval");
@@ -1060,11 +1149,28 @@ function runOperation(e, name) {
   // its fields, so the runner's own failure is caught inside and carried out.
   let result = null;
   let thrown = null;
+  let duplicate = false;
   try {
     $app.runInTransaction((tx) => {
+      if (idemKey !== "") {
+        if (idempotencySeen(tx.db(), idemScope, idemKey)) {
+          duplicate = true;
+          return;
+        }
+        tx.db().newQuery("DELETE FROM _a2app_idempotency WHERE created < {:cutoff}")
+          .bind({ cutoff: Date.now() - IDEMPOTENCY_TTL_MS })
+          .execute();
+        tx.db().newQuery("INSERT INTO _a2app_idempotency (scope, key, created) VALUES ({:scope}, {:key}, {:now})")
+          .bind({ scope: idemScope, key: idemKey, now: Date.now() })
+          .execute();
+      }
       const a2app = {
         app: tx,
         trigger: (type, payload, capability) => triggerWith(tx, env, type, payload, capability),
+        task: (id) => {
+          const found = loadTask(tx.db(), String(id));
+          return found ? rules.taskWire(found) : null;
+        },
         error: operationError,
       };
       try {
@@ -1077,6 +1183,7 @@ function runOperation(e, name) {
   } catch (err) {
     if (thrown === null) thrown = err;
   }
+  if (duplicate) return duplicateRequest(e, name);
   if (thrown !== null) {
     if (thrown && thrown.a2appOperationError) {
       return fail(e, thrown.status, thrown.code, thrown.message, thrown.extra);
@@ -1087,6 +1194,18 @@ function runOperation(e, name) {
     a2app: true, ok: true, operation: name,
     result: result === undefined ? null : JSON.parse(JSON.stringify(result)),
   });
+}
+
+/** How long an operation's Idempotency-Key is remembered. A retry comes within
+ *  seconds; a day covers a harness that retries after being restarted. */
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+function idempotencySeen(db, scope, key) {
+  return rows(db, "SELECT key FROM _a2app_idempotency WHERE scope = {:scope} AND key = {:key}", { scope: scope, key: key }, { key: "" }).length > 0;
+}
+
+function duplicateRequest(e, name) {
+  return fail(e, 409, "duplicate_request", "This idempotency key already ran this operation.", { operation: name });
 }
 
 /** What a runner throws to refuse with its own status and code:
@@ -1174,6 +1293,7 @@ function operationMethod(e) {
 
 module.exports = {
   identity: identity, describe: describe, guard: guard, deleteGuard: deleteGuard,
+  nativeGate: nativeGate,
   ensureStore: ensureStore, runOperation: runOperation, trigger: trigger,
   listTasks: listTasks, getTask: getTask, taskAction: taskAction,
   listEvents: listEvents, context: context, operationMethod: operationMethod,

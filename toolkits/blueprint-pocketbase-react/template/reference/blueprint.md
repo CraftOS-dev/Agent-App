@@ -41,7 +41,7 @@ that work until it is done. Replace all three with your own.
 | `reference/tasks.md` | **YOURS** | the build ledger — one task per feature/quality item, ticked as you complete it. |
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `pb/pb_data`, credentials, the binary, and the built View (`pb/pb_public/`). Extend as needed. |
-| `ui/index.html` · `ui/src/**` | **YOURS** | the React View source: App, shared pieces (Icon, `useToast`, `useConfirm`, `api`, formatting, `AgentTask.jsx`). Compiled into `pb/pb_public/` by the pipeline build. |
+| `ui/index.html` · `ui/src/**` | **YOURS** | the React View source: App, shared pieces (Icon, `useToast`, `useConfirm`, `api`, formatting). Compiled into `pb/pb_public/` by the pipeline build. |
 | `ui/public/tokens.css` · `ui/public/ui.css` | **YOURS** | the kit design-token sheet + component styles, copied through the build verbatim. Re-point token values; keep the names stable. |
 | `ui/vite.config.js` · `ui/package.json` | build | the View build: React plugin, output to `../pb/pb_public`, dev-server proxy to the running app. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
@@ -143,7 +143,9 @@ a single-user app, or the agent's `.agent-token`; a `readOnly` operation also
 answers an uncredentialled caller on a single-user app), and for a `destructive`
 operation answers **428 + an `approvalKey`** until the call is repeated with
 that key in `X-A2App-Approval`. The key is content-addressed — this operation
-with these exact arguments — and good once.
+with these exact arguments — and good once. A call carrying an
+`Idempotency-Key` that already ran is refused with 409 `duplicate_request`
+instead of running twice.
 
 A runner receives `(args, ctx, a2app)`:
 
@@ -153,6 +155,8 @@ A runner receives `(args, ctx, a2app)`:
   rather than `$app`, and keep slow outbound calls out of runners — the
   transaction holds the database's write lock until you return.
 - `a2app.trigger(type, payload, capability)` — see **App→agent triggers**.
+- `a2app.task(id)` — a queued task as the agent sees it (`{ id, status, … }`),
+  or `null`. Read inside the same transaction, so it is current.
 - `a2app.error(status, code, message)` — `throw` it to refuse with your own
   status and code. Anything else a runner throws is `operation_failed`.
 
@@ -189,14 +193,19 @@ For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
 `/api` proxied to the running app. The View talks to PocketBase's records API:
 
 - `GET/POST/PATCH/DELETE /api/collections/<entity>/records` — the same records
-  the agent operates. Same-origin browser writes are fine; the guard validates
-  every create/update.
-- `POST /api/ops/<name>` — run a declared operation (the starter's "Ask an
-  agent" calls `request-triage`). Same-origin, so no credential on a
-  single-user app.
-- `GET /api/_a2app/tasks/<id>` — follow work queued for an agent (what
-  `AgentTask.jsx` polls).
+  the agent operates. The guard validates every create/update.
+- `POST /api/ops/<name>` — run a declared operation. Same-origin, so no
+  credential on a single-user app.
+- `GET /api/_a2app/tasks/<id>` — follow work queued for an agent.
 - `GET /api/_a2app` — identity (app name, versions).
+
+The adapter applies one access rule to its own routes and to PocketBase's
+(records, realtime, files, batch): only a loopback `Host`; a browser `Origin`
+other than the app's own is refused (403); the app's own View passes; a signed-in
+superuser (the dashboard) passes. On a single-user app a program with no
+`Origin` may read, and a write needs the agent token (`.agent-token`, sent as
+`X-A2App-Token`). On a multi-user app PocketBase's collection rules decide.
+`pb-serve.mjs` also limits CORS to the app's own origin.
 
 Render back what the server **stored**, never what you sent; page large lists;
 design the loading/empty/error states, not just the happy path.
@@ -223,8 +232,12 @@ events: [{ type: "task.needs_triage" }],
 runners: {
   "request-triage": (args, _ctx, a2app) => {
     const task = a2app.app.findRecordById("tasks", args.task);
-    const payload = { task: task.id };
-    if (task.getString("agentTask")) payload.previous = task.getString("agentTask");
+    const previous = task.getString("agentTask");
+    const current = previous ? a2app.task(previous) : null;
+    if (current && !["completed", "failed", "canceled"].includes(current.status)) {
+      return { ok: true, queued: current.id, alreadyQueued: true }; // one open run per record
+    }
+    const payload = previous ? { task: task.id, previous } : { task: task.id };
     const { taskId } = a2app.trigger("task.needs_triage", payload, "triage");
     task.set("agentTask", taskId);
     a2app.app.save(task);
@@ -247,6 +260,10 @@ something — nothing is queued and no agent is ever handed it.
   key, even after the task has finished, so asking again with the same payload
   hands back the old task. Put the previous task id in the payload (as above) to
   ask again for real.
+- **One open run per record.** Check the record's last task with `a2app.task`
+  and hand it back while it is unfinished (as above). Otherwise a double click,
+  a retry, or the agent itself asking from inside its run queues a second run
+  for the same record.
 - **Outside an operation** — a record hook or a cron job in your own
   `pb/pb_hooks/<name>.pb.js` — call
   ``require(`${__hooks}/_a2app_impl.js`).trigger(type, payload, capability)``
@@ -259,40 +276,18 @@ or a harness polling `a2app <dir> tasks next --wait`. A claimed task with no
 update for 60 s goes back to the queue; after 5 deliveries it fails as
 `redelivery_exhausted`.
 
-**Show the queued work in the View — with `ui/src/AgentTask.jsx`.** An agent run
-takes seconds to minutes, so the control that queued it has to show where it is
-until it is done. Keep the returned `taskId` on the record (a text field the
-runner sets and the app declares read-only, like the starter's `agentTask`),
-then render it:
-
-```jsx
-import { AgentTaskBadge, AgentTaskPanel } from "./AgentTask.jsx";
-
-<AgentTaskBadge taskId={rec.agentTask} />          // in the list row, beside the title
-<AgentTaskPanel taskId={rec.agentTask}             // full width: under the row, or on the record's screen
-  onSettled={reloadRecord} onRetry={askAgain} retrying={asking} />
-```
-
-The panel follows `GET /api/_a2app/tasks/{id}` while the run is unfinished and
-renders every state the creator skill lists: waiting with elapsed time (and "no
-agent is listening" after ~20 s), the agent's step and running time, the
-`result.summary` in its own readable block, and the failure `reason` with "Ask
-again". `useAgentTask(id)` gives you the same state to disable a control while a
-run is open. The starter's "Ask an agent" button is the worked example.
-
-Never put the result in a title cell or a narrow column. It is prose of any
-length, and the panel is where it goes.
-
-On a single-user app (`authMode: "none"`) the View needs no credential for the
-task read. **On a multi-user app it answers 401** to a caller without the agent
-token. There, have the agent write its progress onto the record and pass it as
-`progress={{ status, step, summary, reason }}`; the panel and badge render it the
-same way. A 404 means the task is gone, so the indicator disappears.
+**Keep the task id on the record.** An agent run takes seconds to minutes. Put
+the returned `taskId` on the record (the starter's `agentTask`), so the View, or
+an agent reading the record, can follow the work with
+`GET /api/_a2app/tasks/{id}` until it is done: `submitted`, `working` (with the
+agent's `progress.step`), then `completed` (`result.summary`) or `failed`
+(`reason`). On a single-user app the View needs no credential for that read; on
+a multi-user app it answers 401 without the agent token, so have the agent write
+its progress onto the record instead. A 404 means the task is gone.
 
 **Declare that field read-only.** An agent that saves a record it read a
-minute earlier would otherwise write back the old task id, and the View would
-stop showing the run in progress. PocketBase has no read-only flag for a field,
-so declare it in `operations.js`:
+minute earlier would otherwise write back the old task id. PocketBase has no
+read-only flag for a field, so declare it in `operations.js`:
 
 ```js
 readOnly: { tasks: ["agentTask"] },
@@ -302,11 +297,9 @@ Describe then publishes it as `readOnly`, and a client write to it (the View,
 an agent, the records API) is refused with `read_only_field`, as on the other
 stacks. Your runners still set it through `a2app.app.save()`, which does not pass
 through the request guard, and the owner can still edit it in the PocketBase
-dashboard.
-
-**`validate` checks this.** Its "agent work shown in the View" step fails an
-app whose code queues work (`trigger(…)` with a capability) when no View code
-renders the component or reads `/api/_a2app/tasks/`.
+dashboard. If `operations.js` cannot be loaded, client writes are refused with
+503 `app_code_unavailable` until it is fixed, rather than letting a read-only
+field be overwritten unnoticed.
 
 ## Build, run, gate
 
@@ -327,7 +320,7 @@ renders the component or reads `/api/_a2app/tasks/`.
 
 ```bash
 agent-app <dir> dev        # boot the candidate on a hidden port: fresh DB from your migration chain, prints the dev URL
-agent-app <dir> validate   # framework files → build → hooks syntax + rules self-test → operations resolve → agent work shown in the View → ownership canon → describe budget (on dev)
+agent-app <dir> validate   # framework files → build → hooks syntax + rules self-test → operations resolve → ownership canon → describe budget (on dev)
 agent-app <dir> serve      # launch LIVE as a managed, health-polled background process; prints the URL
 agent-app <dir> promote    # requires the gate pass; backup, `pb-serve.mjs --migrate` applies new migrations to live, destroys dev
 ```

@@ -88,6 +88,12 @@ export interface BridgeRecord {
   mode: string;
   intervalMs: number;
   startedAt: string;
+  /** The app URL this bridge takes work from, fixed at startup, so a bridge
+   *  watching a dev instance is never mistaken for one serving the live app.
+   *  Absent from records written by older versions. */
+  baseUrl?: string;
+  /** the only capabilities it delivers (`--capability`); absent means all */
+  capabilities?: string[];
   /** pid of a gateway this bridge started, so `stop` can take it down too */
   gatewayPid?: number;
 }
@@ -111,13 +117,17 @@ export function readBridgeRecord(dir: string): BridgeRecord | null {
   if (!existsSync(file)) return null;
   try {
     const raw = readJsonFile<Partial<BridgeRecord>>(file);
-    if (typeof raw.pid !== "number") return null;
+    if (typeof raw.pid !== "number" || !Number.isInteger(raw.pid) || raw.pid <= 1) return null;
     return {
       pid: raw.pid,
-      harness: raw.harness ?? "unknown",
-      mode: raw.mode ?? "unknown",
-      intervalMs: raw.intervalMs ?? DEFAULT_INTERVAL_MS,
-      startedAt: raw.startedAt ?? "",
+      harness: typeof raw.harness === "string" ? raw.harness : "unknown",
+      mode: typeof raw.mode === "string" ? raw.mode : "unknown",
+      intervalMs: typeof raw.intervalMs === "number" && raw.intervalMs > 0 ? raw.intervalMs : DEFAULT_INTERVAL_MS,
+      startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
+      ...(typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
+      ...(Array.isArray(raw.capabilities) && raw.capabilities.every((c) => typeof c === "string")
+        ? { capabilities: raw.capabilities }
+        : {}),
       ...(typeof raw.gatewayPid === "number" ? { gatewayPid: raw.gatewayPid } : {}),
     };
   } catch {
@@ -796,17 +806,6 @@ export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: 
     }
     if (stopped()) break;
     await sleepUntilStopped(intervalMs, stopped);
-  }
-}
-
-/** How many tasks are waiting right now — used by `bridge` status. */
-export async function countWaiting(client: A2AppClient): Promise<number | null> {
-  try {
-    const res = await client.pollTasks("submitted");
-    if (!res.ok) return null;
-    return parseTasks(res.json).length;
-  } catch {
-    return null;
   }
 }
 

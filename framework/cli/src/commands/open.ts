@@ -40,7 +40,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { loadProject, readAgentToken } from "../lib/project.js";
 import { hasFlag } from "../lib/args.js";
-import { countViewers, identifyApp } from "../lib/net.js";
+import { appPort, countViewers, identifyApp } from "../lib/net.js";
 import { log } from "../lib/log.js";
 
 /** How the URL was surfaced. `none` still printed it. */
@@ -173,7 +173,7 @@ export async function openUrl(url: string, printOnly: boolean): Promise<OpenOutc
 
 export async function run(args: string[], app: string): Promise<number> {
   const project = loadProject(app);
-  const port = project.manifest.port ?? 8090;
+  const port = appPort(project.manifest);
   const url = project.baseUrl;
 
   // Never open a URL that is not answering. A stale serve.json outlives a crashed

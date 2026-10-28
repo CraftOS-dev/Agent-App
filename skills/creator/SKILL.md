@@ -240,11 +240,12 @@ says whether yours does and how to reach it. If it does not, handle the event
 with plain code and record the limitation in `reference/requirements.md` rather
 than inventing a mechanism.
 
-Nothing is delivered until someone is listening: the user runs
-`agent-app <dir> bridge start` (the framework triggers their harness) or their
-harness polls `a2app <dir> tasks next --wait`. Say so when you ship a feature
-that queues work, or it will look broken. `agent-app <dir> bridge` reports
-whether this machine can reach a harness at all.
+Nothing is delivered until someone is listening: a bridge
+(`agent-app <dir> bridge start`, which launches the user's harness for each
+task) or their harness polling `a2app <dir> tasks next --wait`. A bridge starts
+agent runs on the user's machine, so it is theirs to switch on — see step 6 of
+**Finish** below. `agent-app <dir> bridge` reports whether one is running, which
+harness a start would launch, and how many tasks are waiting.
 
 **The UI that queues work must show that work until it is done.** An agent run
 takes seconds to minutes. A button that fires a toast and then goes quiet
@@ -323,6 +324,29 @@ someone leave the screen and come back.
    manifest pipeline as a managed background process, polls health, and prints
    the URL — open it, see **Showing the app to the user** below. Never start a
    server by hand.
+6. **Agent work: ask before leaving a bridge running.** Only for an app that
+   queues agent work (an operation calls `trigger(…)` with a capability). After
+   promote + serve, run `agent-app <dir> bridge`.
+   - A bridge already running with `agentWork.bridgeTarget` `"live"`: say so in
+     the handoff.
+   - Any other state (a stale or wrong-target bridge, work not picked up):
+     tell the user what `bridge` says. A printed fix that starts or restarts a
+     bridge needs the same explicit yes as below — never run it on your own.
+   - No bridge: **ask the user, and wait for an explicit yes in this
+     conversation** — earlier approval of the build is not approval of this.
+     Tell them: which harness it will launch (the profile id `bridge` names);
+     that it runs in the background until `agent-app <dir> bridge stop`, after
+     this session ends and even after `agent-app <dir> stop`; and that every
+     queued task starts an agent run, which may cost money.
+   - On a yes: `agent-app <dir> bridge start`, then `agent-app <dir> bridge` to
+     confirm it is running.
+   - Without one: give them that exact command and say that queued tasks wait
+     in the app until a bridge or their own harness picks them up.
+
+   A subscribe-only harness has no bridge: `bridge start` prints the listen
+   command to hand over instead. `bridge start` refuses to run in the
+   background while a dev instance is up; `--once` and `--foreground` are for
+   trying a change on dev, not for the handoff.
 
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU

@@ -30,10 +30,11 @@ import { portInUse, register } from "../lib/registry.js";
 import { readDevRecord } from "../lib/instance.js";
 import { dataDir } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
-import { identifyApp, pollHealth } from "../lib/net.js";
+import { appPort, identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
+import { agentWorkLine, appCommand, inspectAgentWork, printLine } from "../lib/delivery.js";
 
 function readServe(file: string): { pid: number } | null {
   try {
@@ -46,7 +47,7 @@ function readServe(file: string): { pid: number } | null {
 export async function run(args: string[], app: string): Promise<number> {
   const project = loadProject(app);
   const pipeline = project.manifest.pipeline;
-  const port = project.manifest.port ?? 8090;
+  const port = appPort(project.manifest);
   const healthUrl = `${project.baseUrl}${pipeline?.health ?? "/api/_a2app"}`;
   // `--open` is a hand-off to a person, so it runs only once the app is healthy —
   // never before, or the browser races the server and lands on a refused port.
@@ -86,6 +87,9 @@ export async function run(args: string[], app: string): Promise<number> {
       if (servingId === project.manifest.id) {
         const prev = readServe(servePath);
         log.ok(`already serving on ${project.baseUrl}${prev ? ` (pid ${prev.pid})` : ""}`);
+        // The port just answered as this app, so the check need not ask again.
+        const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl, { identityVerified: true });
+        printLine(agentWorkLine(agentWork, app));
         const shown = await show();
         log.raw(
           JSON.stringify(
@@ -96,6 +100,7 @@ export async function run(args: string[], app: string): Promise<number> {
               url: project.baseUrl,
               pid: prev?.pid ?? null,
               alreadyRunning: true,
+              agentWork,
               ...shown,
             },
             null,
@@ -201,11 +206,16 @@ export async function run(args: string[], app: string): Promise<number> {
         "\n",
     );
     log.ok(`serving "${project.manifest.name}" on ${project.baseUrl} (pid ${pid})`);
+    // Queued agent work needs a bridge, which outlives this app and is never
+    // started from here: starting agent runs is the user's call. Say whether
+    // one is running, and what to type when one is needed.
+    const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl);
+    printLine(agentWorkLine(agentWork, app));
     // A relaunch after a code change is the moment a tab opened earlier goes
     // stale, and the person looking at it has no way to know. The View's update
     // watcher tells them; say so here so the loop is visible from the terminal
     // too, and so `--open` is not mistaken for "everyone now has the new build".
-    if (!wantOpen) log.info(`show it to someone: agent-app ${app} open`);
+    if (!wantOpen) log.info(`show it to someone: ${appCommand(app, "open")}`);
     // A dev instance alongside a fresh live serve means an evolve is open, and
     // the caller is at a fork with exactly two exits. Name them — a warning
     // that states the fact without the decision is how this state gets missed.
@@ -213,15 +223,15 @@ export async function run(args: string[], app: string): Promise<number> {
     if (dev !== null) {
       log.warn(
         `a dev instance is still up (port ${dev.port}) and operate commands target IT, not this live app.\n` +
-          `  Done with the change?   agent-app ${app} promote   (stop live first; destroys the dev instance)\n` +
-          `  Abandoning the change?  agent-app ${app} stop --dev`,
+          `  Done with the change?   ${appCommand(app, "promote")}   (stop live first; destroys the dev instance)\n` +
+          `  Abandoning the change?  ${appCommand(app, "stop --dev")}`,
       );
     }
     log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");
     const shown = await show();
     log.raw(
       JSON.stringify(
-        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, ...shown },
+        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, agentWork, ...shown },
         null,
         2,
       ),

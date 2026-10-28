@@ -79,6 +79,29 @@ agent-app <dir> bridge start --foreground   # run the loop here; Ctrl-C stops af
 agent-app <dir> bridge stop
 ```
 
+**Is queued work being picked up?** `serve`, `bridge` and `list` tell you for a
+running app: whether a bridge is running for it, and how many tasks wait in its
+queue. When tasks wait and nothing will take them, they print the command that
+starts a bridge — they never start one, since each task becomes an agent run.
+The same facts are in their JSON as `agentWork` (`bridge`: `running` · `stale` ·
+`none`, `bridgeTarget`, `tasksWaiting`, `queuesAgentWork`).
+
+- A bridge runs until `bridge stop`. `agent-app <dir> stop` leaves it up, and it
+  picks work up again when the app is served again.
+- `bridge start` will not start a background bridge while a dev instance is up
+  (it would take work from dev). Use `--once` or `--foreground` to try a change
+  on dev.
+- A running bridge that leaves work it takes waiting well past its poll
+  interval, with nothing in hand, is reported as not picking work up (its pid
+  may belong to another process after a reboot). Work for capabilities a
+  `--capability` bridge skips is reported too.
+- An app counts as queueing agent work once its queue holds a task, in any
+  status; one that has never queued anything is not flagged. `list` reads only
+  the waiting tasks, so it marks an app only while work waits or a bridge is
+  recorded. The queue is read with the app's own credential, after the port has
+  answered as that app. A harness polling the queue from elsewhere is not
+  visible here.
+
 Flags: `--harness <id>`, `--interval <ms>` (default 5000), `--task-timeout <ms>` (default 15 min), `--capability <name>` (repeatable — deliver only these).
 
 **Harness profiles** live in `$A2APP_HOME/harnesses.json` (`~/.a2app/harnesses.json`). `claude`, `codex`, `gemini` and `aider` are built in; an entry with the same `id` replaces a built-in outright rather than merging into it, so what the file says is what runs.

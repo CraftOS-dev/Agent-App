@@ -41,7 +41,7 @@ import { verifySystemHashes } from "../lib/canon.js";
 import { clearDevRecord, devJsonPath, mintDevBootDir, readDevRecord, stopDevInstance, sweepDevBootDirs } from "../lib/instance.js";
 import { dataDir, dataFingerprint, lifecycleCommand, lifecycleLock } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
-import { freeEphemeralPort, identifyApp, pollHealth } from "../lib/net.js";
+import { appPort, freeEphemeralPort, identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { loadProject } from "../lib/project.js";
 import { runShell } from "../lib/shell.js";
@@ -121,7 +121,7 @@ export async function run(_args: string[], app: string): Promise<number> {
     // its data directory unheld and mutable — prove it did not touch live data.
     const prepare = lifecycleCommand(project.dir, "dev");
     if (prepare !== null) {
-      const liveServing = (await identifyApp(project.manifest.port ?? 8090)) === project.manifest.id;
+      const liveServing = (await identifyApp(appPort(project.manifest))) === project.manifest.id;
       const before = liveServing ? null : dataFingerprint(project.dir);
       log.step(`prepare (lifecycle.dev): ${prepare}`);
       try {

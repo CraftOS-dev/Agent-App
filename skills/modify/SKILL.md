@@ -137,6 +137,18 @@ agent-app <dir> open       # and show it to the user (see below)
 `promote` applies migrations and launches NOTHING, so a change is not in front of
 the user until you serve again. Do not end a modify at `promote`.
 
+**Agent work.** When the change adds or changes a feature that queues agent
+work, or the user asks about agent work, finish with the creator skill's step
+6 after promote + serve: run `agent-app <dir> bridge`, and leave a bridge
+running only on the user's explicit yes in this conversation, after telling
+them which harness it launches, that it runs until `agent-app <dir> bridge stop`
+(beyond this session and `stop`), and that each queued task starts an agent run
+that may cost money. Without a yes, give them the command and say tasks will
+wait. Skip this for unrelated changes. A bridge you ran with `--once` or
+`--foreground` against dev is a test, not the handoff: stop a `--foreground`
+one (Ctrl+C, or kill it) as soon as the test ends, and never leave it running
+in the background.
+
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU
 decide which of these you are:

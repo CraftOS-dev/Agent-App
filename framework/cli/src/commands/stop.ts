@@ -15,9 +15,10 @@ import { lifecycleLock } from "../lib/lifecycle.js";
 import { loadProject } from "../lib/project.js";
 import { register } from "../lib/registry.js";
 import { withLock } from "../lib/lock.js";
-import { identifyApp } from "../lib/net.js";
-import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
+import { appPort, identifyApp } from "../lib/net.js";
+import { killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
 import { log } from "../lib/log.js";
+import { appCommand, inspectLocalBridge } from "../lib/delivery.js";
 
 /**
  * `stop --dev`: tear down the DEV instance (abandoning the candidate) and
@@ -57,14 +58,27 @@ export async function run(args: string[], app: string): Promise<number> {
   if (readDevRecord(project.dir) !== null) {
     log.info(
       `a dev instance is also recorded and keeps running.\n` +
-        `  Promoting the change?   agent-app ${app} promote   (destroys the dev instance itself)\n` +
-        `  Abandoning the change?  agent-app ${app} stop --dev`,
+        `  Promoting the change?   ${appCommand(app, "promote")}   (destroys the dev instance itself)\n` +
+        `  Abandoning the change?  ${appCommand(app, "stop --dev")}`,
     );
   }
   const serveLock = join(project.dir, ".a2app", "serve.lock");
 
   return withLock(serveLock, async () => {
     const servePath = join(project.dir, ".a2app", "serve.json");
+    // A bridge is not part of the app's process tree and `stop` leaves it up:
+    // it picks work up again when the app is back. Say so, or a person who
+    // stopped "the app" believes nothing of it is still running.
+    const reportStopped = (stopped: number | null): void => {
+      const bridge = inspectLocalBridge(project.dir);
+      if (bridge.running !== null) {
+        log.info(
+          `the bridge (pid ${bridge.running.pid}) keeps running and picks up tasks again once the app is back. ` +
+            `Stop it: ${appCommand(app, "bridge stop")}`,
+        );
+      }
+      log.raw(JSON.stringify({ ok: true, stopped, bridge }, null, 2));
+    };
 
     const clearRecord = async (): Promise<void> => {
       rmSync(servePath, { force: true });
@@ -75,7 +89,7 @@ export async function run(args: string[], app: string): Promise<number> {
           id: project.manifest.id,
           name: project.manifest.name,
           path: project.dir,
-          ...(project.manifest.port !== undefined ? { port: project.manifest.port } : {}),
+          port: appPort(project.manifest),
         });
       } catch {
         /* best effort */
@@ -84,7 +98,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
     if (!existsSync(servePath)) {
       log.info("not serving (no .a2app/serve.json)");
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
@@ -100,28 +114,22 @@ export async function run(args: string[], app: string): Promise<number> {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1) {
       log.warn(`serve.json has no usable pid — clearing the record without killing anything.`);
       await clearRecord();
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
     // PID-reuse guard: only kill when we can confirm THIS app is the one on its
-    // port. If it is not answering as itself, the recorded pid is stale or has
-    // been reused by an unrelated process — clear the record, never kill it.
-    const appPort = project.manifest.port;
-    if (appPort !== undefined) {
-      const servingId = await identifyApp(appPort);
-      if (servingId !== project.manifest.id) {
-        log.info(
-          `this app is not answering on port ${appPort} (recorded pid ${pid}) — clearing a stale serve record without killing.`,
-        );
-        await clearRecord();
-        log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
-        return 0;
-      }
-    } else if (!isPidAlive(pid)) {
-      log.info(`recorded process (pid ${pid}) is not running — clearing stale record.`);
+    // port — the port `serve` bound, even when the manifest names none. If it is
+    // not answering as itself, the recorded pid is stale or has been reused by
+    // an unrelated process — clear the record, never kill it.
+    const port = appPort(project.manifest);
+    const servingId = await identifyApp(port);
+    if (servingId !== project.manifest.id) {
+      log.info(
+        `this app is not answering on port ${port} (recorded pid ${pid}) — clearing a stale serve record without killing.`,
+      );
       await clearRecord();
-      log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
+      reportStopped(null);
       return 0;
     }
 
@@ -143,7 +151,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
     await clearRecord();
     log.ok(`stopped (pid ${pid})`);
-    log.raw(JSON.stringify({ ok: true, stopped: pid }, null, 2));
+    reportStopped(pid);
     return 0;
   });
 }

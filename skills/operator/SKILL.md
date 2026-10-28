@@ -114,7 +114,9 @@ queue, and whoever claims that task owns it. Two ways to be on the receiving end
   that watches the queue and starts your harness when work appears. Check what
   it would do first with `agent-app <dir> bridge` — it names the route it found
   (an inbound endpoint, your headless CLI, a gateway) or says plainly that
-  bi-directional operation is not supported on this machine.
+  bi-directional operation is not supported on this machine. Start or restart
+  one only on the user's explicit yes: it runs until `bridge stop`, past this
+  session, and every queued task becomes an agent run that may cost money.
 
 Either way the lifecycle is yours once you hold the task:
 

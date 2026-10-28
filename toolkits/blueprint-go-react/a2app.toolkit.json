@@ -7,12 +7,14 @@
     "manifest.json",
     "main.go",
     "a2app_adapter.go",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "adapterPaths": [
     "main.go",
     "a2app_adapter.go",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "gate": [
     {

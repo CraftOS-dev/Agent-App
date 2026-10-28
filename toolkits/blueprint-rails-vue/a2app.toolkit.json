@@ -10,12 +10,14 @@
     "config/puma.rb",
     "app/controllers/a2app_controller.rb",
     "lib/a2app_adapter.rb",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "adapterPaths": [
     "app/controllers/a2app_controller.rb",
     "lib/a2app_adapter.rb",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "gate": [
     {

@@ -6,11 +6,13 @@
   "systemPaths": [
     "manifest.json",
     "a2app_adapter.py",
-    "main.py"
+    "main.py",
+    "a2app-account.html"
   ],
   "adapterPaths": [
     "a2app_adapter.py",
-    "main.py"
+    "main.py",
+    "a2app-account.html"
   ],
   "gate": [
     {

@@ -7,12 +7,14 @@
     "manifest.json",
     "src/main.rs",
     "src/a2app_adapter.rs",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "adapterPaths": [
     "src/main.rs",
     "src/a2app_adapter.rs",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "gate": [
     {

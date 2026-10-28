@@ -307,12 +307,15 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   /** Rate gate. Keyed by credential token (or same-origin UI / anonymous). Over
    *  the limit answers 429 `rate_limited` before any work. */
   function rateGate(req: A2AppRequest, cls: RouteClass): A2AppReply | null {
-    const caller = req.headers["x-a2app-token"] ?? req.headers["x-lui-token"] ?? (req.headers["origin"] ? "origin:" + req.headers["origin"] : "anon");
+    // A token is a secret and the audit ring is persisted, so the caller is
+    // keyed by the token's hash, never the token.
+    const token = req.headers["x-a2app-token"] ?? req.headers["x-lui-token"];
+    const caller = token ? "token:" + hashSecret(token) : req.headers["origin"] ? "origin:" + req.headers["origin"] : "anon";
     const decision = limiter.check(caller, cls);
     if (decision.allowed) return null;
     // A rate-limit refusal happens before credential resolution, but it must stay
-    // traceable — record the caller key (token/origin/anon) and route class in the
-    // bounded audit ring so a flood is visible after the fact.
+    // traceable — record the caller key (token hash/origin/anon) and route class
+    // in the bounded audit ring so a flood is visible after the fact.
     writeAudit({ credentialId: caller, agentName: null, principal: null }, `rate:${cls}`, null, "rejected", ERROR_CODES.RATE_LIMITED);
     return err(429, ERROR_CODES.RATE_LIMITED, `Rate limit exceeded (${decision.limit} per window). Slow down and retry.`, {
       retryAfterSeconds: decision.retryAfterSeconds,

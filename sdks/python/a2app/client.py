@@ -9,6 +9,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -42,7 +43,15 @@ class A2AppClient:
         self.base_url = base_url.rstrip("/")
         self._token = token
         self._agent_name = agent_name
-        self._auth_token = auth_token
+        if auth_token is not None:
+            # 0.1 sent a second, user token as Authorization. Since 0.2 the
+            # agent's own credential says who it acts for; the argument is
+            # ignored for one release, then removed.
+            warnings.warn(
+                "auth_token is ignored since protocol 0.2: the credential (token) says who the agent acts for",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     # ----------------------------------------------------------- low level
 
@@ -59,8 +68,6 @@ class A2AppClient:
         }
         if self._token is not None:
             headers["X-A2App-Token"] = self._token
-        if self._auth_token is not None:
-            headers["Authorization"] = self._auth_token
         if extra_headers:
             headers.update(extra_headers)
 

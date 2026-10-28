@@ -170,10 +170,9 @@ The environment wins, so a credential handed to you for this run beats whatever
 the machine remembers. Keep the file `chmod 600` — it holds bearer tokens, and
 the CLI will say so if it is readable by anyone else.
 
-On a multi-user app the acting user's own token goes alongside it, as
-`authToken` in the same entry or `A2APP_AUTH_TOKEN` in the environment. It is the
-user's, handed to you the same way — never assembled from a password, and never
-from a credential you were given for a different app.
+On a multi-user app the credential alone says who you act for: the person who
+approved it. There is no second, user token to send alongside it, and never a
+password.
 
 The owner mints scopes from this grammar:
 

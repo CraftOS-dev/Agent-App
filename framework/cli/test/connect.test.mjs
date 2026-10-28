@@ -161,7 +161,7 @@ await withHome(async () => {
 
 await withHome(async (home) => {
   const origin = "https://app.example.com";
-  check("no credential when there is no store", credentialFor(origin, null).token, null);
+  check("no credential when there is no store", credentialFor(origin, null), null);
 
   writeFileSync(
     join(home, "credentials.json"),
@@ -175,21 +175,21 @@ await withHome(async (home) => {
     }),
   );
 
-  check("a bare origin entry is found", credentialFor(origin, null).token, "bare-origin-token");
-  check("an appId entry wins over a bare one", credentialFor(origin, "specific").token, "app-specific-token");
-  check("an unrelated origin is never used", credentialFor("https://nope.example.com", null).token, null);
+  check("a bare origin entry is found", credentialFor(origin, null), "bare-origin-token");
+  check("an appId entry wins over a bare one", credentialFor(origin, "specific"), "app-specific-token");
+  check("an unrelated origin is never used", credentialFor("https://nope.example.com", null), null);
   check(
     "an unknown appId falls back to the bare origin entry",
-    credentialFor(origin, "unknown").token,
+    credentialFor(origin, "unknown"),
     "bare-origin-token",
   );
 
   // The environment is how a harness hands an agent one app for one run, so it
   // has to beat whatever the machine happens to remember.
   process.env.A2APP_TOKEN = "env-token";
-  check("A2APP_TOKEN wins over the store", credentialFor(origin, "specific").token, "env-token");
+  check("A2APP_TOKEN wins over the store", credentialFor(origin, "specific"), "env-token");
   delete process.env.A2APP_TOKEN;
-  check("removing it falls back to the store", credentialFor(origin, "specific").token, "app-specific-token");
+  check("removing it falls back to the store", credentialFor(origin, "specific"), "app-specific-token");
 });
 
 /* ------------------------------------------------- the identity gate */

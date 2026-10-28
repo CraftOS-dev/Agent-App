@@ -16,7 +16,9 @@
  * being a rule an agent has to keep and becomes one it cannot break.
  */
 import { A2AppClient } from "@a2app/sdk";
-import { clientFor, isRemoteAddress, loadProject, UsageError, type Project } from "./project.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { isRemoteAddress, loadProject, operateTarget, readAgentToken, UsageError, type Project } from "./project.js";
 import { credentialFor, originOf, pinAppId, pinnedAppId } from "./remote.js";
 import { homePath } from "./home.js";
 import { log } from "./log.js";
@@ -187,17 +189,38 @@ export async function verifyRemote(client: A2AppClient, target: RemoteTarget): P
  * before checking what answered has already acted on an unknown app.
  */
 export async function clientForTarget(target: Target): Promise<A2AppClient> {
-  if (target.kind === "local") return clientFor(target.project);
+  if (target.kind === "local") return localClient(target.project);
 
-  const { token, authToken } = credentialFor(target.origin, target.expectedAppId, (m) => log.warn(m));
-  const client = new A2AppClient({
-    baseUrl: target.baseUrl,
-    token,
-    agentName: process.env["A2APP_AGENT"] ?? "a2app-cli",
-    authToken,
-  });
+  const token = credentialFor(target.origin, target.expectedAppId, (m) => log.warn(m));
+  const client = new A2AppClient({ baseUrl: target.baseUrl, token, agentName: process.env["A2APP_AGENT"] ?? "a2app-cli" });
   await verifyRemote(client, target);
   return client;
+}
+
+/**
+ * A client for an app on this machine, with the credential found the same way
+ * as for a remote one (spec/v0_2/auth.md §11): `A2APP_TOKEN`, then the
+ * credential `a2app <app> login` stored for the live app, then the app's own
+ * `.agent-token`. A stored credential belongs to the live app's store, so a dev
+ * candidate — a fresh store of its own — is reached with the app's own token.
+ */
+async function localClient(project: Project): Promise<A2AppClient> {
+  if (existsSync(join(project.dir, ".principal"))) {
+    log.warn(
+      `${join(project.dir, ".principal")} is ignored since 0.2 and holds a password: delete it. ` +
+        `An agent signs in with \`a2app <app> login\`, approved by the person it acts for.`,
+    );
+  }
+  const route = await operateTarget(project);
+  const delegated =
+    route.env === "live"
+      ? credentialFor(originOf(project.baseUrl), project.manifest.id, (m) => log.warn(m))
+      : process.env["A2APP_TOKEN"]?.trim() || null;
+  return new A2AppClient({
+    baseUrl: route.baseUrl,
+    token: delegated ?? readAgentToken(project.dir),
+    agentName: process.env["A2APP_AGENT"] ?? "a2app-cli",
+  });
 }
 
 /** Resolve and connect in one step — what every operate command does. */

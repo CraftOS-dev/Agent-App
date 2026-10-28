@@ -33,7 +33,8 @@ export interface StoredCredential {
   /** optional: distinguishes two apps served from one origin */
   appId?: string;
   token: string;
-  /** optional: the acting user's own auth token on a multi-user app */
+  /** Removed in 0.2 and ignored (with a warning): an agent's own credential
+   *  says who it acts for. */
   authToken?: string;
   /** set by `a2app <app> login`: which credential this is, who it acts for,
    *  and when it stops working */
@@ -115,27 +116,30 @@ export function readCredentials(warn?: (message: string) => void): StoredCredent
 }
 
 /**
- * The credential to present to `origin`, and the acting user's token with it.
+ * The credential to present to `origin` (spec/v0_2/auth.md §11), or null.
  *
  * Precedence is environment first, store second: `A2APP_TOKEN` is how a harness
- * hands an agent one app for one run, and it must win over whatever the machine
- * happens to remember. Within the store, an entry naming this `appId` beats a
- * bare origin entry, so two apps behind one hostname stay distinguishable.
+ * hands an agent one app for one run (the bridge's task credential), and it
+ * must win over whatever the machine happens to remember. Within the store, an
+ * entry naming this `appId` beats a bare origin entry, so two apps behind one
+ * hostname stay distinguishable.
+ *
+ * The credential alone says who the agent acts for. The 0.1 second token —
+ * `A2APP_AUTH_TOKEN`, or `authToken` in an entry — is ignored, with a warning,
+ * for this release.
  */
-export function credentialFor(
-  origin: string,
-  appId: string | null,
-  warn?: (message: string) => void,
-): { token: string | null; authToken: string | null } {
-  const envToken = process.env["A2APP_TOKEN"];
-  const envAuth = process.env["A2APP_AUTH_TOKEN"];
-  if (envToken && envToken.trim() !== "") {
-    return { token: envToken.trim(), authToken: envAuth?.trim() || null };
+export function credentialFor(origin: string, appId: string | null, warn?: (message: string) => void): string | null {
+  if (process.env["A2APP_AUTH_TOKEN"] !== undefined) {
+    warn?.("A2APP_AUTH_TOKEN is ignored since 0.2: the agent's own credential (a2app <app> login) says who it acts for.");
   }
+  const envToken = process.env["A2APP_TOKEN"]?.trim();
+  if (envToken) return envToken;
   const entries = readCredentials(warn).filter((c) => c.origin === origin);
   const match = (appId !== null ? entries.find((c) => c.appId === appId) : undefined) ?? entries.find((c) => !c.appId);
-  if (!match) return { token: null, authToken: envAuth?.trim() || null };
-  return { token: match.token, authToken: match.authToken ?? envAuth?.trim() ?? null };
+  if (match?.authToken !== undefined) {
+    warn?.(`credentials.json: authToken for ${origin} is ignored since 0.2; remove it.`);
+  }
+  return match?.token ?? null;
 }
 
 /**

@@ -152,43 +152,18 @@ export async function operateTarget(project: Project): Promise<{ baseUrl: string
   return { baseUrl: dev.url, env: "dev" };
 }
 
-/** Build an A2App client for a running project, routed to the dev instance
- *  while one is up (see {@link operateTarget}). `agentName` self-declares the
- *  caller in the audit log (X-A2App-Agent). */
+/** The framework's own client for a running project — its admin credential,
+ *  routed to the dev instance while one is up (see {@link operateTarget}). For
+ *  framework tooling (the gate); an agent's commands resolve their credential
+ *  through `clientForTarget`. `agentName` self-declares the caller in the audit
+ *  log (X-A2App-Agent). */
 export async function clientFor(project: Project): Promise<A2AppClient> {
   const target = await operateTarget(project);
   return new A2AppClient({
     baseUrl: target.baseUrl,
     token: readAgentToken(project.dir),
     agentName: process.env["A2APP_AGENT"] ?? "a2app-cli",
-    authToken: await principalToken(project, target.baseUrl),
   });
-}
-
-/**
- * The acting user's own auth token for multi-user apps. v1 reads a project-local
- * `.principal` file `{ "authUrl": "...", "identity": "...", "password": "..." }`;
- * absent on single-user (`authMode: none`) apps.
- */
-async function principalToken(project: Project, baseUrl: string): Promise<string | null> {
-  const file = join(project.dir, ".principal");
-  if (!existsSync(file)) return null;
-  try {
-    const cred = readJsonFile(file) as {
-      authUrl: string;
-      identity: string;
-      password: string;
-    };
-    const res = await fetch(`${baseUrl}${cred.authUrl}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ identity: cred.identity, password: cred.password }),
-    });
-    if (!res.ok) return null;
-    return ((await res.json()) as { token: string }).token;
-  } catch {
-    return null;
-  }
 }
 
 /**

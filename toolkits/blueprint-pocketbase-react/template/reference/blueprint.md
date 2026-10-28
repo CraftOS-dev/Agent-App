@@ -49,7 +49,7 @@ that work until it is done. Replace all three with your own.
 | `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, hands migrations the app's mode (`A2APP_AUTH_MODE`), ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote). Never edit. |
 | `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter hook REGISTRATIONS — thin one-liner handlers that `require()` the impl module (PocketBase runs each handler isolated from file scope). Never edit. |
 | `pb/pb_hooks/_a2app_impl.js` | SYSTEM (hash-locked) | the adapter IMPLEMENTATION: identity, describe, the record guards, operations, the task queue and event log, credentials, accounts, sessions and device sign-in, loaded via `require()` from the handlers. Never edit. |
-| `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep, scopes and the ceiling, credentials, cookies, user codes, sign-in limits, device polling) + `--selftest`. Never edit. |
+| `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep, scopes and the ceiling, credentials, cookies, user codes, sign-in limits, device polling and confirmation) + `--selftest`. Never edit. |
 | `pb/pb_migrations/1759622300_a2app_accounts.js` | SYSTEM (hash-locked) | prepares PocketBase's `users` collection to hold a multi-user app's accounts (`login`, `role`, `active`), turns off PocketBase's own sign-in and locks its rules. Applied once, before your migrations. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 
@@ -446,7 +446,8 @@ self-test"** (`node --check` the three adapter files, then
 `node pb/pb_hooks/_a2app_rules.js --selftest`, which covers the guard, the
 predicates, the fingerprint, operation arguments, the approval and dedup keys,
 the task lifecycle and the sweep, and the access rules: scopes and the
-ceiling, credentials, cookies, user codes, sign-in limits, device polling),
+ceiling, credentials, cookies, user codes, sign-in limits, device polling and
+confirmation),
 and **"operations resolve"** (every
 operation in `operations.json` has a runner in `pb/pb_hooks/operations.js`). `lifecycle.dataDir` is
 `pb/pb_data`; `lifecycle.promote` is `node pb-serve.mjs --migrate`.

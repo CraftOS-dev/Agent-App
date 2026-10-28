@@ -613,6 +613,12 @@ var AUTH = {
   DEVICE_CODE_TTL_SECONDS: 600,
   DEVICE_POLL_INTERVAL_SECONDS: 5,
   DEVICE_SLOW_DOWN_STEP_SECONDS: 5,
+  /** Wrong confirmation codes a device request survives before it is void. */
+  DEVICE_CONFIRM_ATTEMPTS: 5,
+  /** Where an agent on the person's computer waits for the confirmation. */
+  DEVICE_LOOPBACK_CALLBACK: "/a2app/callback",
+  DEVICE_LOOPBACK_PORT_MIN: 1024,
+  DEVICE_LOOPBACK_PORT_MAX: 65535,
 };
 
 /** A 256-bit secret is 43 base64url characters: 42 that carry 6 bits each and
@@ -816,17 +822,50 @@ function signInFailed(window, nowMs) {
   return { count: window.count + 1, start: window.start };
 }
 
+/** The 127.0.0.1 port a device sign-in's agent waits on (spec §7, RFC 8252):
+ *  the port, null when none was given, or `{ problem }`. */
+function parseLoopbackPort(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || Math.floor(value) !== value || value < AUTH.DEVICE_LOOPBACK_PORT_MIN || value > AUTH.DEVICE_LOOPBACK_PORT_MAX) {
+    return { problem: "loopbackPort is the port, " + AUTH.DEVICE_LOOPBACK_PORT_MIN + " to " + AUTH.DEVICE_LOOPBACK_PORT_MAX + ", where the agent waits on 127.0.0.1." };
+  }
+  return value;
+}
+
+/** Where an approval sends the browser back to an agent waiting on the
+ *  person's own computer, with the confirmation code; null when the agent is
+ *  elsewhere (it gave no port), and the person passes the code on themselves. */
+function loopbackRedirect(port, confirmation) {
+  if (typeof port !== "number") return null;
+  return "http://127.0.0.1:" + port + AUTH.DEVICE_LOOPBACK_CALLBACK + "?confirmation=" + encodeURIComponent(confirmation);
+}
+
 /**
  * One poll of `auth/token` against a device row (spec §7), at `nowMs`:
- * `{ outcome, row }` where outcome is `expired` | `denied` | `issue` |
+ * `{ outcome, row }` where outcome is `expired` | `denied` |
+ * `confirmation_required` | `confirmation_invalid` | `void` | `issue` |
  * `slow_down` | `pending`, and `row` is what to store back (null: delete it).
- * The approved row is consumed before its credential is issued: single use.
+ *
+ * Approval alone hands nothing over: an approved request issues only to a poll
+ * presenting its confirmation code. `presented` is the SHA-256 of the code as
+ * normalized, or null when the poll gave none. Such polls are answered at once,
+ * whatever the interval; wrong guesses are bounded by DEVICE_CONFIRM_ATTEMPTS
+ * instead. The approved row is consumed before its credential is issued:
+ * single use.
  */
-function pollDevice(row, nowMs) {
+function pollDevice(row, nowMs, presented) {
   if (!row || Date.parse(row.expiresAt) <= nowMs) return { outcome: "expired", row: null };
   if (row.status === "denied") return { outcome: "denied", row: null };
-  if (row.status === "approved" && row.approvedBy !== null && row.approvedScopes !== null) return { outcome: "issue", row: null };
   var next = JSON.parse(JSON.stringify(row));
+  if (row.status === "approved" && row.approvedBy !== null && row.approvedScopes !== null && typeof row.confirmationHash === "string") {
+    if (presented === null || presented === undefined) return { outcome: "confirmation_required", row: next };
+    if (presented !== row.confirmationHash) {
+      next.confirmAttempts = row.confirmAttempts + 1;
+      if (next.confirmAttempts >= AUTH.DEVICE_CONFIRM_ATTEMPTS) return { outcome: "void", row: null };
+      return { outcome: "confirmation_invalid", row: next };
+    }
+    return { outcome: "issue", row: null };
+  }
   next.lastPolledAt = nowMs;
   if (row.lastPolledAt !== null && nowMs - row.lastPolledAt < row.interval * 1000) {
     next.interval = row.interval + AUTH.DEVICE_SLOW_DOWN_STEP_SECONDS;
@@ -871,7 +910,7 @@ function ownedByProblems(entities, ownedBy) {
   return problems;
 }
 
-module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, newTask: newTask, taskWire: taskWire, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
+module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, newTask: newTask, taskWire: taskWire, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, parseLoopbackPort: parseLoopbackPort, loopbackRedirect: loopbackRedirect, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
 
 /* -------- gate self-test: `node _a2app_rules.js --selftest` -------- */
 if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--selftest") !== -1) {
@@ -1112,15 +1151,46 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
   if (!signInRetryAfter(w, nowMs + AUTH.SIGN_IN_WINDOW_MS).lapsed) failures.push("the window lapses");
 
   // Device polling (spec §7): pending, slow_down, single use.
-  var device = { expiresAt: "2026-10-05T10:10:00.000Z", status: "pending", interval: 5, lastPolledAt: null, approvedBy: null, approvedScopes: null };
-  var p1 = pollDevice(device, nowMs);
-  var p2 = pollDevice(p1.row, nowMs + 1000);
-  var p3 = pollDevice(p2.row, nowMs + 12000);
+  var device = { expiresAt: "2026-10-05T10:10:00.000Z", status: "pending", interval: 5, lastPolledAt: null, approvedBy: null, approvedScopes: null, loopbackPort: null, confirmationHash: null, confirmAttempts: 0 };
+  var p1 = pollDevice(device, nowMs, null);
+  var p2 = pollDevice(p1.row, nowMs + 1000, null);
+  var p3 = pollDevice(p2.row, nowMs + 12000, null);
   if (p1.outcome !== "pending" || p2.outcome !== "slow_down" || p2.row.interval !== 10 || p3.outcome !== "pending") failures.push("device polling: " + [p1.outcome, p2.outcome, p3.outcome].join(","));
-  var approvedRow = Object.assign({}, p1.row, { status: "approved", approvedBy: "usr_bob", approvedScopes: ["data:tasks:read"] });
-  if (pollDevice(approvedRow, nowMs + 1).outcome !== "issue" || pollDevice(approvedRow, nowMs + 1).row !== null) failures.push("an approved request issues once");
-  if (pollDevice(device, Date.parse(device.expiresAt)).outcome !== "expired" || pollDevice(null, nowMs).outcome !== "expired") failures.push("expired and used codes say so");
-  if (pollDevice(Object.assign({}, device, { status: "denied" }), nowMs).outcome !== "denied") failures.push("a declined request says so");
+  if (pollDevice(device, Date.parse(device.expiresAt), null).outcome !== "expired" || pollDevice(null, nowMs, null).outcome !== "expired") failures.push("expired and used codes say so");
+  if (pollDevice(Object.assign({}, device, { status: "denied" }), nowMs, null).outcome !== "denied") failures.push("a declined request says so");
+
+  // Confirmation (spec §7): approval alone hands nothing over. Polls on an
+  // approved request are answered at once, whatever the interval (p1.row was
+  // polled a moment ago); the code is matched as typed, by its hash.
+  var approvedRow = Object.assign({}, p1.row, { status: "approved", approvedBy: "usr_bob", approvedScopes: ["data:tasks:read"], confirmationHash: sha("BCDF-GHJK") });
+  var unconfirmed = pollDevice(approvedRow, nowMs + 1, null);
+  if (unconfirmed.outcome !== "confirmation_required" || unconfirmed.row.confirmAttempts !== 0) failures.push("approved but unconfirmed is confirmation_required: " + unconfirmed.outcome);
+  var guess = pollDevice(approvedRow, nowMs + 1, sha("BBBB-BBBB"));
+  if (guess.outcome !== "confirmation_invalid" || guess.row.confirmAttempts !== 1) failures.push("a wrong code is confirmation_invalid, and counted: " + guess.outcome);
+  var confirmed = pollDevice(approvedRow, nowMs + 1, sha(normalizeUserCode("bcdfghjk")));
+  if (confirmed.outcome !== "issue" || confirmed.row !== null) failures.push("the right code (any case, any dash) issues once: " + confirmed.outcome);
+  var guessed = approvedRow;
+  var outcomes = [];
+  for (var g = 0; g < AUTH.DEVICE_CONFIRM_ATTEMPTS; g++) {
+    var tried = pollDevice(guessed, nowMs + 1, sha("BBBB-BBBB"));
+    outcomes.push(tried.outcome);
+    guessed = tried.row;
+  }
+  if (outcomes.join(",") !== "confirmation_invalid,confirmation_invalid,confirmation_invalid,confirmation_invalid,void" || guessed !== null) {
+    failures.push("five wrong confirmation codes void the request: " + outcomes.join(","));
+  }
+
+  // An agent on the person's computer: a real port, and the way back to it.
+  var ports = [parseLoopbackPort(undefined), parseLoopbackPort(null), parseLoopbackPort(53682), parseLoopbackPort(1024), parseLoopbackPort(65535)];
+  if (JSON.stringify(ports) !== "[null,null,53682,1024,65535]") failures.push("loopback ports: " + JSON.stringify(ports));
+  var badPorts = [80, 1023, 65536, 5368.2, "53682", true];
+  for (var bp = 0; bp < badPorts.length; bp++) {
+    var refused = parseLoopbackPort(badPorts[bp]);
+    if (!refused || refused.problem !== "loopbackPort is the port, 1024 to 65535, where the agent waits on 127.0.0.1.") failures.push("loopback port " + JSON.stringify(badPorts[bp]) + " must be refused");
+  }
+  if (loopbackRedirect(53682, "BCDF-GHJK") !== "http://127.0.0.1:53682/a2app/callback?confirmation=BCDF-GHJK" || loopbackRedirect(null, "BCDF-GHJK") !== null) {
+    failures.push("an approval sends the browser back to the agent's port, and only there");
+  }
 
   // Capabilities and ownership must name what the app declares.
   if (capabilityScopes({ triage: { scopes: ["data:tasks:read"] } }, "triage").join() !== "data:tasks:read" || capabilityScopes({}, "triage").join() !== "*") failures.push("capability scopes");
@@ -1132,6 +1202,6 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
   }
 
   if (failures.length) console.log("a2app_rules selftest FAILED:\n  - " + failures.join("\n  - "));
-  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep, task principal, secrets, user codes, cookies, scopes and the ceiling, credentials, accounts, sign-in limits, device polling, capabilities, ownership)");
+  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep, task principal, secrets, user codes, cookies, scopes and the ceiling, credentials, accounts, sign-in limits, device polling, device confirmation and loopback, capabilities, ownership)");
   process.exit(failures.length ? 1 : 0);
 }

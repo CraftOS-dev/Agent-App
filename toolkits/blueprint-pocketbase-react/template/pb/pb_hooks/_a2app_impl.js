@@ -1429,6 +1429,13 @@ function newSecret() {
   return $security.randomStringWithAlphabet(42, rules.SECRET_ALPHABET) + $security.randomStringWithAlphabet(1, rules.SECRET_LAST_ALPHABET);
 }
 
+/** `XXXX-XXXX` from the user-code alphabet: a device request's user code, or
+ *  the confirmation code its approval issues. */
+function newUserCode() {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  return rules.formatUserCode($security.randomStringWithAlphabet(8, rules.USER_CODE_ALPHABET));
+}
+
 /** An id that is not a secret: `prefix_` + 64 random bits, hex. */
 function newId(prefix) {
   return `${prefix}_${$security.randomStringWithAlphabet(16, "0123456789abcdef")}`;
@@ -2222,6 +2229,12 @@ function revokeCredential(e, id) {
  * the credential issued acts for them, with the scopes they approved. Codes
  * live 10 minutes, are single use, and the device code is stored only as its
  * hash.
+ *
+ * Approving is not enough on its own: anyone can start a request and send the
+ * person its link. So approval issues a one-time confirmation code (stored as
+ * its hash), and the credential goes only to whoever presents it. An agent on
+ * the person's own computer receives it on a loopback port (RFC 8252) when the
+ * page returns the browser there; an agent elsewhere is given it by the person.
  */
 
 /** Live requests by key, dropping the expired as it goes. */
@@ -2246,7 +2259,7 @@ function deviceByUserCode(db, input) {
   return null;
 }
 
-/** POST /api/_a2app/auth/device */
+/** POST /api/_a2app/auth/device {agentName?, scopes?, expiresIn?, loopbackPort?} */
 function startDevice(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
   const body = bodyOf(e);
@@ -2256,10 +2269,12 @@ function startDevice(e) {
   if (agentName !== undefined && (typeof agentName !== "string" || agentName.trim() === "" || agentName.length > 100)) {
     return fail(e, 400, "usage", "agentName is 1–100 characters.");
   }
+  const loopbackPort = rules.parseLoopbackPort(body.loopbackPort);
+  if (loopbackPort !== null && typeof loopbackPort === "object") return fail(e, 400, "usage", loopbackPort.problem);
   const db = $app.db();
   const taken = liveDevices(db).map((d) => d.body.userCode);
-  let userCode = rules.formatUserCode($security.randomStringWithAlphabet(8, rules.USER_CODE_ALPHABET));
-  while (taken.indexOf(userCode) !== -1) userCode = rules.formatUserCode($security.randomStringWithAlphabet(8, rules.USER_CODE_ALPHABET));
+  let userCode = newUserCode();
+  while (taken.indexOf(userCode) !== -1) userCode = newUserCode();
   const deviceCode = newSecret();
   const nowMs = Date.now();
   putRowBody(db, "_a2app_devices", $security.sha256(deviceCode), {
@@ -2274,6 +2289,11 @@ function startDevice(e) {
     status: "pending",
     approvedBy: null,
     approvedScopes: null,
+    // the 127.0.0.1 port the agent waits on, when it is on the person's computer
+    loopbackPort: loopbackPort,
+    // SHA-256 of the confirmation code issued at approval
+    confirmationHash: null,
+    confirmAttempts: 0,
   });
   const approve = `${publicLink(e)}${rules.AUTH.ACCOUNT_URL}#approve`;
   return e.json(200, {
@@ -2294,7 +2314,16 @@ function reviewDevice(e, userCode) {
   const found = deviceByUserCode($app.db(), userCode);
   if (found === null) return fail(e, 404, "device_code_invalid", "No sign-in request with that code is waiting: it was used, or it expired.");
   const row = found.body;
-  return e.json(200, { a2app: true, userCode: row.userCode, agentName: row.agentName, scopes: row.scopes, expiresIn: row.expiresInSeconds, expiresAt: row.expiresAt });
+  return e.json(200, {
+    a2app: true,
+    userCode: row.userCode,
+    agentName: row.agentName,
+    scopes: row.scopes,
+    expiresIn: row.expiresInSeconds,
+    expiresAt: row.expiresAt,
+    requestedAt: row.createdAt,
+    loopback: typeof row.loopbackPort === "number",
+  });
 }
 
 /** POST /api/_a2app/auth/device/{userCode} {approve, scopes?} — the person decides. */
@@ -2322,19 +2351,28 @@ function decideDevice(e, userCode) {
     if (wider.length > 0) return fail(e, 400, "usage", `Approval can only narrow what the agent asked for, not add ${wider.join(", ")}.`);
     scopes = parsed.scopes;
   }
+  // Approval hands nothing over by itself: the credential goes only to a poll
+  // presenting this code, which the page passes on (to the agent's loopback
+  // port, or to the person to give their agent).
+  const confirmation = newUserCode();
   row.status = "approved";
   row.approvedBy = manager.principal;
   row.approvedScopes = scopes;
+  row.confirmationHash = $security.sha256(confirmation);
   putRowBody(db, "_a2app_devices", found.key, row);
-  return e.json(200, { a2app: true, ok: true, status: "approved" });
+  return e.json(200, { a2app: true, ok: true, status: "approved", confirmation: confirmation, redirect: rules.loopbackRedirect(row.loopbackPort, confirmation) });
 }
 
-/** POST /api/_a2app/auth/token {deviceCode} — the agent polls. */
+/** POST /api/_a2app/auth/token {deviceCode, confirmation?} — the agent polls. */
 function pollDevice(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  const deviceCode = bodyOf(e).deviceCode;
+  const body = bodyOf(e);
+  const deviceCode = body.deviceCode;
   if (typeof deviceCode !== "string") return fail(e, 400, "usage", "Poll with { deviceCode }.");
   const key = $security.sha256(deviceCode);
+  // The confirmation code as typed (any case, dash optional), by its hash.
+  const confirmation = typeof body.confirmation === "string" ? rules.normalizeUserCode(body.confirmation) : "";
+  const presented = confirmation === "" ? null : $security.sha256(confirmation);
   // Read, decide and write back in one transaction: of two polls at once, the
   // second sees the first's result, so an approved request issues once.
   let poll = null;
@@ -2343,7 +2381,7 @@ function pollDevice(e) {
   let inactive = false;
   $app.runInTransaction((tx) => {
     row = rowBody(tx.db(), "_a2app_devices", key);
-    poll = rules.pollDevice(row, Date.now());
+    poll = rules.pollDevice(row, Date.now(), presented);
     if (poll.row === null) {
       if (row !== null) deleteRow(tx.db(), "_a2app_devices", key);
     } else {
@@ -2363,6 +2401,12 @@ function pollDevice(e) {
       return fail(e, 400, "expired_token", "This sign-in request expired or was already used. Start again.");
     case "denied":
       return fail(e, 400, "access_denied", "The person declined this agent's request.");
+    case "confirmation_required":
+      return fail(e, 400, "confirmation_required", "Approved. Present the confirmation code the approval produced.", { interval: poll.row.interval });
+    case "confirmation_invalid":
+      return fail(e, 400, "confirmation_invalid", `That is not this request's confirmation code (${rules.AUTH.DEVICE_CONFIRM_ATTEMPTS - poll.row.confirmAttempts} tries left).`);
+    case "void":
+      return fail(e, 400, "access_denied", "Too many wrong confirmation codes: this request is void. Start again.");
     case "issue":
       if (inactive) return fail(e, 400, "access_denied", "The person who approved this is no longer active.");
       return e.json(200, { a2app: true, token: issued.token, credential: rules.credentialWire(issued.grant, issued.principalName) });

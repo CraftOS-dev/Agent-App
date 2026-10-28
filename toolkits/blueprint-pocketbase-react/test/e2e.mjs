@@ -7,10 +7,11 @@
  * and drives it over HTTP and through the `a2app` CLI: access from foreign
  * origins and programs, who is calling (protocol 0.2: the admin credential,
  * delegated credentials held to their scopes, device sign-in approved by the
- * View, whose records), operations and approval, idempotency, the task queue
- * (claim contention, progress, completion, who asked, the task's own
- * credential), one open run per record, a runner that throws, writes paused
- * while operations.js cannot load, a restart, and a rotated .agent-token.
+ * View and confirmed by the agent, whose records), operations and approval,
+ * idempotency, the task queue (claim contention, progress, completion, who
+ * asked, the task's own credential), one open run per record, a runner that
+ * throws, writes paused while operations.js cannot load, a restart, and a
+ * rotated .agent-token.
  * The multi-user side is conformance/multi-user/run.mjs.
  *
  *   POCKETBASE_BIN=/path/to/pocketbase node test/e2e.mjs
@@ -171,14 +172,35 @@ try {
     check("the View revokes it", (await http("DELETE", `${base}/api/_a2app/credentials/${issued.json?.credential?.credentialId}`, { headers: own })).status, 200);
     check("…and it stops working", (await http("GET", records, { headers: reader })).json?.code, "credential_revoked");
 
+    const view = { "Sec-Fetch-Site": "same-origin" };
+    const poll = (deviceCode, confirmation) => http("POST", `${base}/api/_a2app/auth/token`, { json: confirmation === undefined ? { deviceCode } : { deviceCode, confirmation } });
     const started = (await http("POST", `${base}/api/_a2app/auth/device`, { json: { agentName: "e2e device", scopes: ["data:tasks:read"] } })).json;
     ok("an agent asks to sign in", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(started?.userCode ?? ""));
     ok("…with a link to approve it", started?.verificationUriComplete === `${base}/_a2app/account#approve/${started?.userCode}`);
-    check("…and is told to wait", (await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } })).json?.code, "authorization_pending");
-    check("the View approves it", (await http("POST", `${base}/api/_a2app/auth/device/${started?.userCode}`, { headers: own, json: { approve: true } })).json?.status, "approved");
-    const got = await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } });
-    check("the agent receives a credential for the owner", [got.status, got.json?.credential?.principal, got.json?.credential?.scopes], [200, "owner", ["data:tasks:read"]]);
-    check("…once", (await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } })).json?.code, "expired_token");
+    check("…and is told to wait", (await poll(started?.deviceCode)).json?.code, "authorization_pending");
+    const review = (await http("GET", `${base}/api/_a2app/auth/device/${started?.userCode}`, { headers: view })).json;
+    ok("the View sees when it was asked, and that no agent waits on this computer", Date.parse(review?.requestedAt) <= Date.now() && review?.loopback === false);
+    const approval = (await http("POST", `${base}/api/_a2app/auth/device/${started?.userCode}`, { headers: own, json: { approve: true } })).json;
+    check("the View approves it", approval?.status, "approved");
+    ok("…and is given a confirmation code, with nowhere to send it", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(approval?.confirmation ?? "") && approval?.redirect === null);
+    check("approval alone hands nothing over, at once", (await poll(started?.deviceCode)).json?.code, "confirmation_required");
+    check("…nor does a wrong code", (await poll(started?.deviceCode, "BBBB-BBBB")).json?.code, "confirmation_invalid");
+    const got = await poll(started?.deviceCode, approval?.confirmation?.replace("-", "").toLowerCase());
+    check("the agent with the code (any case, any dash) receives a credential for the owner", [got.status, got.json?.credential?.principal, got.json?.credential?.scopes], [200, "owner", ["data:tasks:read"]]);
+    check("…once", (await poll(started?.deviceCode, approval?.confirmation)).json?.code, "expired_token");
+
+    const guessed = (await http("POST", `${base}/api/_a2app/auth/device`, { json: {} })).json;
+    await http("POST", `${base}/api/_a2app/auth/device/${guessed?.userCode}`, { headers: own, json: { approve: true } });
+    for (let i = 0; i < 4; i++) await poll(guessed?.deviceCode, "BBBB-BBBB");
+    check("five wrong confirmation codes void the request", (await poll(guessed?.deviceCode, "BBBB-BBBB")).json?.code, "access_denied");
+    check("…for good", (await poll(guessed?.deviceCode)).json?.code, "expired_token");
+
+    check("a loopback port must be a real one", (await http("POST", `${base}/api/_a2app/auth/device`, { json: { loopbackPort: 80 } })).json?.code, "usage");
+    const local = (await http("POST", `${base}/api/_a2app/auth/device`, { json: { agentName: "e2e local", loopbackPort: 53682 } })).json;
+    check("an agent on this computer is shown as such", (await http("GET", `${base}/api/_a2app/auth/device/${local?.userCode}`, { headers: view })).json?.loopback, true);
+    const sent = (await http("POST", `${base}/api/_a2app/auth/device/${local?.userCode}`, { headers: own, json: { approve: true } })).json;
+    check("approval sends the browser back to the agent's port, with the code", sent?.redirect, `http://127.0.0.1:53682/a2app/callback?confirmation=${sent?.confirmation}`);
+    check("…which completes the sign-in", (await poll(local?.deviceCode, sent?.confirmation)).status, 200);
 
     const created = await http("POST", records, { headers: agent, json: { title: "owned", status: "todo" } });
     check("a record is its creator's: here, the owner's", created.json?.owner, "owner");

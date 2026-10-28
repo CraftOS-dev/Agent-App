@@ -1,6 +1,6 @@
 # Conformance
 
-Runnable suites: language-agnostic YAML cases plus thin per-language harnesses. Suites assert outputs AND error behavior (`code`, all-violations), and every payload validates against `spec/v0_1/schema/`.
+Runnable suites: language-agnostic YAML cases plus thin per-language harnesses. Suites assert outputs AND error behavior (`code`, all-violations), and every payload validates against `spec/v0_2/schema/`.
 
 ## A2App protocol classes
 

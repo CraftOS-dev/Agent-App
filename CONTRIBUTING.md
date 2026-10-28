@@ -30,7 +30,7 @@ node framework/cli/dist/agent-app.js stop ./my-app
 ```
 
 ## Ground rules
-- **Spec + schema move together.** The JSON Schemas in `spec/v0_1/schema/` are the
+- **Spec + schema move together.** The JSON Schemas in `spec/v0_2/schema/` are the
   machine contract and win over prose. Change both, and add a conformance check.
 - **A change is proven by the conformance suite**, not by assertion. New protocol
   behavior needs a suite entry; new framework behavior needs a test.

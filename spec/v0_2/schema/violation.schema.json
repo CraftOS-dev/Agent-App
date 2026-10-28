@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/violation.json",
+  "type": "object",
+  "required": ["code", "field"],
+  "properties": {
+    "code": { "type": "string" },
+    "field": { "type": "string" },
+    "expected": { "type": "string" },
+    "got": {}
+  }
+}

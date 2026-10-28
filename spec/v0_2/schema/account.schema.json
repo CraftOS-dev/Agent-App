@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/account.json",
+  "title": "One account on a multi-user app: GET/POST /api/_a2app/session answers with the signed-in one, GET /api/_a2app/users lists them. Never carries a password or its hash.",
+  "type": "object",
+  "required": ["id", "name", "login", "role", "active", "createdAt"],
+  "properties": {
+    "id": { "type": "string", "description": "the principal" },
+    "name": { "type": "string" },
+    "login": { "type": "string", "description": "what the person signs in with; compared case-insensitively" },
+    "role": { "enum": ["owner", "member"] },
+    "active": { "type": "boolean", "description": "false: the account cannot sign in, and every credential acting for it is refused" },
+    "createdAt": { "type": "string" }
+  }
+}

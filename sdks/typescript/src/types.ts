@@ -1,7 +1,7 @@
 /**
  * A2App protocol wire types (protocol 0.1).
  *
- * These mirror the normative JSON Schemas in `spec/v0_1/schema/*.json`. Where
+ * These mirror the normative JSON Schemas in `spec/v0_2/schema/*.json`. Where
  * these types and a schema disagree, the schema wins.
  */
 import type { ProtocolType } from "@a2app/rules";

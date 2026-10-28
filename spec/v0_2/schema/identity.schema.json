@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/identity.json",
+  "type": "object",
+  "required": ["a2app", "protocol", "adapterVersion", "app", "schemaVersion", "serverNow", "serverTzOffsetMinutes", "authMode", "accountUrl"],
+  "properties": {
+    "a2app": { "const": true },
+    "protocol": { "type": "string", "description": "\"0.2\" for this version" },
+    "authMode": { "enum": ["none", "multi-user"], "description": "none: one implicit principal, `owner`. multi-user: principals are the app's accounts (spec/v0_2/auth.md)." },
+    "accountUrl": { "type": "string", "description": "Path of the framework's account page on this app (sign-in, approve an agent, connected agents). A client sends a person there; it never asks for their password itself." },
+    "adapterVersion": { "type": "string" },
+    "app": {
+      "type": "object",
+      "required": ["id"],
+      "properties": { "id": { "type": "string" }, "name": { "type": ["string", "null"] } }
+    },
+    "schemaVersion": { "type": "string" },
+    "serverNow": { "type": "string" },
+    "serverTzOffsetMinutes": { "type": "integer" },
+    "appVersion": {
+      "type": "string",
+      "description": "Optional, non-normative. An opaque marker of the app's own CODE version — the View it serves and the source it is built from. schemaVersion covers the MODEL only, so a UI-only change leaves it identical; appVersion is what a loaded page compares against to learn that the code it is running has been superseded. No client may require it."
+    },
+    "env": {
+      "type": "string",
+      "description": "Optional, non-normative safe-evolve marker: \"dev\" or \"live\"."
+    }
+  }
+}

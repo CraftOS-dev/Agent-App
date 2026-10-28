@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/invite.json",
+  "title": "A one-time account setup link (POST /api/_a2app/invites). Only the creating response carries `code` and `url`.",
+  "type": "object",
+  "required": ["a2app", "role", "expiresAt"],
+  "properties": {
+    "a2app": { "const": true },
+    "code": { "type": "string", "description": "secret, single use; the app stores only its SHA-256" },
+    "url": { "type": "string", "description": "the account page's setup screen with the code filled in" },
+    "role": { "enum": ["owner", "member"] },
+    "expiresAt": { "type": "string" }
+  }
+}

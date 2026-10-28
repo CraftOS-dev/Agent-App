@@ -32,7 +32,7 @@ closest to your stack and mirror it (including its `reference/blueprint.md`):
 - **`blueprint-pocketbase-react`** — PocketBase + adapter-as-hooks.
 
 The normative contract is `requirement.md` (framework) and `requirement_A2App.md`
-(protocol); the machine-checkable schemas are in `spec/v0_1/schema/`. Where prose
+(protocol); the machine-checkable schemas are in `spec/v0_2/schema/`. Where prose
 and schema disagree, the schema wins.
 
 ## What you must build (the adapter contract)

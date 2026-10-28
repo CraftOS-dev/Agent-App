@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/whoami.json",
+  "type": "object",
+  "required": ["a2app", "credentialId", "principal", "scopes"],
+  "properties": {
+    "a2app": { "const": true },
+    "credentialId": { "type": "string" },
+    "agentName": { "type": ["string", "null"] },
+    "principal": { "type": "string" },
+    "principalName": { "type": ["string", "null"], "description": "display name of the principal" },
+    "role": { "enum": ["owner", "member"], "description": "the principal's role; the owner sees every record" },
+    "expiresAt": { "type": ["string", "null"], "description": "when the presented credential stops working; null when it does not expire or no credential was presented" },
+    "scopes": { "type": "array", "items": { "type": "string" }, "description": "effective scopes: the credential's grant intersected with what the principal may do now" }
+  }
+}

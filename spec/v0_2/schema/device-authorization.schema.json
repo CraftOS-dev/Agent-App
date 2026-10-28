@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/device-authorization.json",
+  "title": "POST /api/_a2app/auth/device — the start of a device-code sign-in (RFC 8628 shape).",
+  "type": "object",
+  "required": ["a2app", "deviceCode", "userCode", "verificationUri", "verificationUriComplete", "expiresIn", "interval"],
+  "properties": {
+    "a2app": { "const": true },
+    "deviceCode": { "type": "string", "description": "secret; the client polls POST /api/_a2app/auth/token with it" },
+    "userCode": {
+      "type": "string",
+      "pattern": "^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$",
+      "description": "what the person types or confirms on the account page"
+    },
+    "verificationUri": { "type": "string", "description": "the account page's approve screen" },
+    "verificationUriComplete": { "type": "string", "description": "the same, with the user code filled in" },
+    "expiresIn": { "type": "integer", "description": "seconds until the codes expire" },
+    "interval": { "type": "integer", "description": "minimum seconds between token polls" }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentapp/registry.json",
+  "title": "Agent App registry",
+  "description": "User-level index of known Agent Apps, stored in the framework home (A2APP_HOME, default ~/.a2app). An index, not a source of truth: each app's manifest.json remains authoritative for its identity, and an app is complete without a registry entry (framework section 5.6).",
+  "type": "object",
+  "required": ["version", "apps"],
+  "properties": {
+    "version": { "const": 1 },
+    "apps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "path"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "the app's manifest id (authoritative in the manifest, mirrored here)"
+          },
+          "name": { "type": "string" },
+          "path": {
+            "type": "string",
+            "description": "absolute path to the app directory"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "the port assigned at creation; the app binds it and operate commands reach it there (section 5.5)"
+          },
+          "blueprint": {
+            "type": "string",
+            "description": "toolkit id the app was scaffolded from, when any"
+          },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$comment": "No `status` field by design: running/stopped/missing is derived at read time by probing the app and its path, because a stored status rots silently (section 5.6). Host-specific concerns (theme, icon, session, backup policy, tunnels) stay with the host."
+}

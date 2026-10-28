@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/error.json",
+  "type": "object",
+  "required": ["a2app", "ok", "code", "message"],
+  "properties": {
+    "a2app": { "const": true },
+    "ok": { "const": false },
+    "code": { "type": "string" },
+    "field": { "type": "string" },
+    "expected": { "type": "string" },
+    "got": {},
+    "required": { "type": "string" },
+    "id": { "type": "string" },
+    "message": { "type": "string" },
+    "violations": { "type": "array", "items": { "$ref": "a2app/violation.json" } }
+  }
+}

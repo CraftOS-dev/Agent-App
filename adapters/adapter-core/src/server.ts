@@ -37,6 +37,7 @@ import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, t
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import { hostnameOf, isLoopbackName } from "./network.js";
 import { ACCOUNT_URL, createAccountRoutes, type Manager } from "./accounts.js";
+import { createCredentialRoutes } from "./credentials.js";
 import { hashSecret, parseCookies, type AccountRow, type SessionRow } from "./auth.js";
 import {
   OperationError,
@@ -643,8 +644,12 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       }
       return { reply: unauthenticated(req, "This app needs a credential.") };
     }
-    // The app's own UI (same origin) is trusted: no credential needed.
-    if (isSameOrigin(req)) {
+    // The app's own UI (same origin) is trusted: no credential needed. A
+    // browser sends Origin only on a change; on a read it marks the request
+    // with Sec-Fetch-Site, which a web page cannot forge. A local program can,
+    // but on this mode it already reads everything without a credential, so
+    // only a change is held to the stronger Origin rule.
+    if (isSameOrigin(req) || (!opts.isWrite && fromOwnPage(req))) {
       return { ctx: { credentialId: "ui", agentName: null, principal: OWNER.id, role: "owner" }, held: permissions(OWNER) ?? new Set(), grant: null };
     }
     // A program write always needs a credential; an anonymous read on a
@@ -706,6 +711,20 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     secureCookies,
     publicOrigin,
     isSameOrigin,
+  });
+
+  const credentialRoutes = createCredentialRoutes({
+    store,
+    now,
+    ok,
+    err,
+    managerOf,
+    presentedGrant: (req) => {
+      const presented = credentialOf(req);
+      return presented && "grant" in presented ? presented.grant : null;
+    },
+    principalInfo,
+    declaredScopes: allScopes,
   });
 
   /* ------------------------------------------------------------ ownership */
@@ -1343,6 +1362,9 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         // disagree.
         scopes: caller.held === "anonymous" ? [...reachAsScopes(accessFor(req))].sort() : [...caller.held].sort(),
       });
+    }
+    if (path === "/api/_a2app/credentials" || path.startsWith("/api/_a2app/credentials/")) {
+      return credentialRoutes(req, path)!;
     }
     const accountPath = ["/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"].some(
       (p) => path === p || path.startsWith(`${p}/`),

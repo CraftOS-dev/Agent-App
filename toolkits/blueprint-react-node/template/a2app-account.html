@@ -248,6 +248,82 @@
         return el("section", null, el("h2", null, "People"), list, el("div", { class: "row", style: "margin-top:12px" }, role, invite), inviteOut, error);
       }
 
+      function agentsSection(me) {
+        const list = el("ul", { class: "list" });
+        const issued = el("div");
+        const error = el("p", { class: "error", role: "alert" });
+        const seesOthers = !me || me.role === "owner";
+
+        function access(scopes) {
+          if (scopes.includes("*")) return "everything its person can do";
+          return scopes.join(", ");
+        }
+
+        async function load() {
+          const r = await api("GET", "/api/_a2app/credentials");
+          if (!r.ok) {
+            error.textContent = r.json.message || "Could not load the agents.";
+            return;
+          }
+          if (r.json.credentials.length === 0) {
+            list.replaceChildren(el("li", { class: "muted small" }, "No agent has access yet."));
+            return;
+          }
+          list.replaceChildren(...r.json.credentials.map((c) =>
+            el("li", { class: "spread" },
+              el("div", null,
+                el("div", null, c.agentName || "Unnamed agent", seesOthers && me && c.principal !== me.id ? el("span", { class: "muted small" }, ` · for ${c.principalName || c.principal}`) : null),
+                el("div", { class: "muted small" }, `Can: ${access(c.scopes)}`),
+                el("div", { class: "muted small" }, `Expires ${fmtDate(c.expiresAt)} · last used ${fmtDate(c.lastUsedAt)}`),
+              ),
+              el("button", {
+                type: "button",
+                class: "danger",
+                onclick: async () => {
+                  const d = await api("DELETE", `/api/_a2app/credentials/${encodeURIComponent(c.credentialId)}`);
+                  if (!d.ok) error.textContent = d.json.message || "Could not revoke it.";
+                  await load();
+                },
+              }, "Revoke"),
+            )));
+        }
+
+        const give = form([
+          field("Agent name", { name: "agentName", required: true, maxlength: 100, placeholder: "e.g. Claude Code on my laptop" }),
+          el("label", null, "It can", el("select", { name: "access" },
+            el("option", { value: "all" }, "Do everything you can do"),
+            el("option", { value: "read" }, "Only read"))),
+          el("label", null, "For", el("select", { name: "days" },
+            el("option", { value: "7" }, "7 days"),
+            el("option", { value: "30", selected: true }, "30 days"),
+            el("option", { value: "90" }, "90 days"),
+            el("option", { value: "365" }, "1 year"))),
+        ], "Create access token", async (data) => {
+          let scopes = ["*"];
+          if (data.get("access") === "read") {
+            const who = await api("GET", "/api/_a2app/whoami");
+            scopes = (who.json.scopes || []).filter((sc) => sc.endsWith(":read"));
+            if (scopes.length === 0) return "This app has nothing to read yet.";
+          }
+          const r = await api("POST", "/api/_a2app/credentials", {
+            agentName: data.get("agentName"), scopes, expiresIn: Number(data.get("days")) * 86400,
+          });
+          if (!r.ok) return r.json.message || "Could not create it.";
+          issued.replaceChildren(
+            el("p", { class: "notice" }, "Copy this token now: it is shown once. Give it to the agent as A2APP_TOKEN; it acts as you, and never for more than you can do."),
+            el("div", { class: "code" }, r.json.token),
+          );
+          await load();
+        });
+
+        load();
+        return el("section", null,
+          el("h2", null, "Connected agents"),
+          el("p", { class: "muted small" }, "Agents that can use this app for you. An agent that can open a browser asks for access itself (a2app <app> login) and you approve it here."),
+          list, error,
+          el("h2", { style: "margin-top:20px" }, "Give an agent access"), give, issued);
+      }
+
       async function home() {
         let me = null;
         if (app.authMode === "multi-user") {
@@ -272,6 +348,7 @@
           ));
           if (me.role === "owner") sections.push(peopleSection(me));
         }
+        sections.push(agentsSection(me));
         show(header(me ? "Your account" : "Account"), ...sections);
       }
 

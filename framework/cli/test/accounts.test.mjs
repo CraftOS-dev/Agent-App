@@ -60,11 +60,19 @@ function project(port, id) {
 }
 
 async function serveApp(port, { id, authMode }) {
-  const app = createA2App(new MemoryBinding({ appId: id, appName: "CLI Accounts", authMode, entities: {} }), {
+  const app = createA2App(
+    new MemoryBinding({
+      appId: id,
+      appName: "CLI Accounts",
+      authMode,
+      entities: { notes: { module: "desk", fields: [{ name: "title", type: "string", required: true }], seed: [] } },
+    }),
+    {
     modules: [{ name: "desk" }],
     allowedOrigins: [`http://127.0.0.1:${port}`],
     credentials: [{ token: TOKEN, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"], admin: true }],
-  });
+    },
+  );
   const server = createA2AppServer(app);
   await new Promise((r) => server.listen(port, "127.0.0.1", r));
   return server;
@@ -85,6 +93,29 @@ try {
       ok("invite makes a member link by default", member.code === 0 && /new member/.test(member.out));
       const bad = await cli([dir, "invite", "--role", "admin"], home);
       check("an unknown role is a usage error", bad.code, 2);
+
+      // credential mint / list / revoke, for a person who signed up through the link.
+      const code = owner.out.match(/#setup\/([A-Za-z0-9_-]{43})/)[1];
+      const signup = await fetch(`http://127.0.0.1:${port}/api/_a2app/invites/${code}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
+        body: JSON.stringify({ name: "Alice", login: "alice@example.com", password: "correct horse battery" }),
+      });
+      const alice = await signup.json();
+      const minted = await cli([dir, "credential", "mint", "--for", "Alice@Example.com", "--scopes", "data:notes:read", "--expires", "1d", "--name", "CI"], home);
+      const token = minted.out.split(/\r?\n/).find((l) => /^a2a_[A-Za-z0-9_-]{43}$/.test(l));
+      ok("credential mint prints the token once, on a line of its own", minted.code === 0 && token !== undefined);
+      const whoami = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
+      check("…a token that acts for the person it was minted for", [whoami.principal, whoami.scopes], [alice.id, ["data:notes:read"]]);
+      const listed = await cli([dir, "credential", "list"], home);
+      ok("credential list shows it", listed.code === 0 && /for Alice/.test(listed.out) && /agent "CI"/.test(listed.out));
+      ok("…without the token", !listed.out.includes(token));
+      const id = listed.out.match(/cred_[0-9a-f]{16}/)[0];
+      check("credential revoke succeeds", (await cli([dir, "credential", "revoke", id], home)).code, 0);
+      const after = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
+      check("…and the token is refused from the next request", after.code, "credential_revoked");
+      check("a lifetime that is not one is a usage error", (await cli([dir, "credential", "mint", "--expires", "soon"], home)).code, 2);
+      check("an unknown person is a usage error", (await cli([dir, "credential", "mint", "--for", "nobody"], home)).code, 2);
     } finally {
       server.close();
       rmSync(dir, { recursive: true, force: true });

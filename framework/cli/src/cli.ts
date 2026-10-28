@@ -69,6 +69,12 @@ const COMMANDS: Record<string, CommandMeta> = {
   restore: { summary: "Restore a backup (captures current state, rolls back on failure)", surface: "agent-app", scope: "app", args: "[<backup-id>]" },
   owner: { summary: "Print a one-time setup link for an owner account (multi-user apps): how the first owner is created", surface: "agent-app", scope: "app" },
   invite: { summary: "Print a one-time setup link for a new account (multi-user apps)", surface: "agent-app", scope: "app", args: "[--role member|owner]" },
+  credential: {
+    summary: "List, mint or revoke the agent credentials acting for this app's people (mint prints the token once)",
+    surface: "agent-app",
+    scope: "app",
+    args: "list | mint [--for <login>] [--scopes a,b] [--expires 30d] [--name <agent>] | revoke <id>",
+  },
   forget: { summary: "Drop an app from the registry, releasing its port (never touches files)", surface: "agent-app", scope: "app", args: "[--force]" },
   remove: { summary: "Delete an app's files and drop it from the registry (data backed up first; needs --yes)", surface: "agent-app", scope: "app", args: "[--yes] [--force]" },
   // agent-app registry commands: the machine's set of apps, not one app.

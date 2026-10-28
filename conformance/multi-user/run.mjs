@@ -28,9 +28,16 @@ if (!base || !admin) {
 
 const failures = [];
 let passed = 0;
+/** JSON with object keys sorted: a server's key order is not behaviour. */
+const canonical = (v) =>
+  v === null || typeof v !== "object"
+    ? JSON.stringify(v)
+    : Array.isArray(v)
+      ? `[${v.map(canonical).join(",")}]`
+      : `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
 const check = (label, got, want) => {
-  const g = JSON.stringify(got);
-  const w = JSON.stringify(want);
+  const g = canonical(got);
+  const w = canonical(want);
   if (g === w) passed += 1;
   else failures.push(`${label}\n    expected: ${w}\n    actual:   ${g}`);
 };

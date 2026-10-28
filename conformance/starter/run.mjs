@@ -29,9 +29,17 @@ if (!base || !admin) {
 
 const failures = [];
 let passed = 0;
+/** JSON with object keys sorted (RFC 8785 for these plain values): a server's
+ *  key order is not behaviour, and it is the approval key's canonical form. */
+const canonical = (v) =>
+  v === null || typeof v !== "object"
+    ? JSON.stringify(v)
+    : Array.isArray(v)
+      ? `[${v.map(canonical).join(",")}]`
+      : `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
 const check = (label, got, want) => {
-  const g = JSON.stringify(got);
-  const w = JSON.stringify(want);
+  const g = canonical(got);
+  const w = canonical(want);
   if (g === w) passed += 1;
   else failures.push(`${label}\n    expected: ${w}\n    actual:   ${g}`);
 };
@@ -72,12 +80,6 @@ const foreignHost = (path) =>
     req.end();
   });
 
-/** RFC 8785 canonical JSON, enough for plain objects, arrays, strings, numbers. */
-function jcs(v) {
-  if (v === null || typeof v !== "object") return JSON.stringify(v);
-  if (Array.isArray(v)) return `[${v.map(jcs).join(",")}]`;
-  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${jcs(v[k])}`).join(",")}}`;
-}
 const run = randomBytes(3).toString("hex");
 
 /* -------------------------------------------------------- identity, Host */
@@ -124,7 +126,7 @@ check("a required parameter is enforced", (await call("POST", "/api/ops/request-
 check("an undeclared parameter is refused", (await call("POST", "/api/ops/request-triage", { body: { task: created.json?.id, extra: 1 } })).status, 400);
 const asked = await call("POST", "/api/ops/clear-done", { body: {} });
 check("a destructive operation asks for approval", [asked.status, code(asked)], [428, "approval_required"]);
-check("…with the reference's approval key (sha256 of the JCS call)", asked.json?.approvalKey, createHash("sha256").update(jcs({ operation: "clear-done", args: {} })).digest("hex"));
+check("…with the reference's approval key (sha256 of the JCS call)", asked.json?.approvalKey, createHash("sha256").update(canonical({ operation: "clear-done", args: {} })).digest("hex"));
 check("…which then runs it", (await call("POST", "/api/ops/clear-done", { body: {}, headers: { "x-a2app-approval": asked.json?.approvalKey } })).status, 200);
 const opKey = `op-${run}`;
 await call("POST", "/api/ops/count-tasks", { body: {}, headers: { "idempotency-key": opKey } });

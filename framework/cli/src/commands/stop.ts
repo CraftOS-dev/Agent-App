@@ -66,11 +66,16 @@ export async function run(args: string[], app: string): Promise<number> {
 
   return withLock(serveLock, async () => {
     const servePath = join(project.dir, ".a2app", "serve.json");
+    // A bridge is not part of the app's process tree and `stop` leaves it up:
+    // it picks work up again when the app is back. Say so, or a person who
+    // stopped "the app" believes nothing of it is still running.
     const reportStopped = (stopped: number | null): void => {
       const bridge = inspectLocalBridge(project.dir);
       if (bridge.running !== null) {
-        log.info(`the local bridge remains running (pid ${bridge.running.pid}) and continues polling; ` +
-          `it can resume when the app returns. Stop it separately: ${appCommand(project.dir, "bridge stop")}`);
+        log.info(
+          `the bridge (pid ${bridge.running.pid}) keeps running and picks up tasks again once the app is back. ` +
+            `Stop it: ${appCommand(app, "bridge stop")}`,
+        );
       }
       log.raw(JSON.stringify({ ok: true, stopped, bridge }, null, 2));
     };

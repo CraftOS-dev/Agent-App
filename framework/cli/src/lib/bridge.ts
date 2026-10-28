@@ -88,7 +88,9 @@ export interface BridgeRecord {
   mode: string;
   intervalMs: number;
   startedAt: string;
-  /** Endpoint fixed at startup; a dev bridge must not be mistaken for live. */
+  /** The app URL this bridge takes work from, fixed at startup, so a bridge
+   *  watching a dev instance is never mistaken for one serving the live app.
+   *  Absent from records written by older versions. */
   baseUrl?: string;
   /** pid of a gateway this bridge started, so `stop` can take it down too */
   gatewayPid?: number;
@@ -799,22 +801,6 @@ export async function pumpLoop(ctx: BridgeContext, intervalMs: number, stopped: 
     }
     if (stopped()) break;
     await sleepUntilStopped(intervalMs, stopped);
-  }
-}
-
-/** How many tasks are waiting right now — used by `bridge` status. */
-export async function countWaiting(client: Pick<A2AppClient, "pollTasks">): Promise<number | null> {
-  try {
-    const res = await client.pollTasks("submitted");
-    if (!res.ok) return null;
-    const body = res.json as { tasks?: unknown } | null;
-    if (!body || !Array.isArray(body.tasks)) return null;
-    const tasks = parseTasks(body);
-    // A malformed success envelope is not evidence of an empty queue.
-    if (tasks.length !== body.tasks.length) return null;
-    return tasks.length;
-  } catch {
-    return null;
   }
 }
 

@@ -137,18 +137,15 @@ agent-app <dir> open       # and show it to the user (see below)
 `promote` applies migrations and launches NOTHING, so a change is not in front of
 the user until you serve again. Do not end a modify at `promote`.
 
-**Check live agent-work delivery before finishing.** If the app has features
-that queue agent work, follow the creator skill's live delivery check after
-promote + serve: inspect `agent-app <dir> bridge`, start/reuse plain background
-`bridge start` where agent runs are authorized and a route exists, then confirm
-the process is still running after the command exits. Do not leave only a
-`--once`, `--dry-run`, or interactive foreground test. Start after dev is gone
-so the bridge watches live. A subscribe-only harness needs its own continuing
-polling loop; verify it where possible. Confirm `agentWork.bridgeTargetsLive`
-is true; a bridge left on the dev port needs stopping and restarting after dev
-is gone. Existing authorization still applies.
-Report any unavailable or unverified delivery and its remedy explicitly; a
-successful serve does not establish that the agent feature is operational.
+**Agent work.** When the change adds or changes a feature that queues agent
+work, or the user asks about agent work, finish with the creator skill's step
+6 after promote + serve: run `agent-app <dir> bridge`, and leave a bridge
+running only on the user's explicit yes in this conversation, after telling
+them which harness it launches, that it runs until `agent-app <dir> bridge stop`
+(beyond this session and `stop`), and that each queued task starts an agent run
+that may cost money. Without a yes, give them the command and say tasks will
+wait. Skip this for unrelated changes. A bridge you ran with `--once` or
+`--foreground` against dev is a test, not the handoff.
 
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU

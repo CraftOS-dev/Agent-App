@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { A2AppClient } from "@a2app/sdk";
 import { readDevRecord } from "./instance.js";
-import { identifyApp } from "./net.js";
+import { appPort, identifyApp } from "./net.js";
 import { AmbiguousAppError, find } from "./registry.js";
 import { readJsonFile } from "./json.js";
 import { log } from "./log.js";
@@ -102,8 +102,7 @@ export function loadProject(projectDir: string): Project {
     );
   }
   const manifest = readJsonFile(manifestPath) as Manifest;
-  const port = manifest.port ?? 8090;
-  return { dir, manifest, baseUrl: `http://127.0.0.1:${port}` };
+  return { dir, manifest, baseUrl: `http://127.0.0.1:${appPort(manifest)}` };
 }
 
 /** The project's agent credential, or null when it predates it. */

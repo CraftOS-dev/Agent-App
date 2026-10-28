@@ -30,11 +30,11 @@ import { portInUse, register } from "../lib/registry.js";
 import { readDevRecord } from "../lib/instance.js";
 import { dataDir } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
-import { identifyApp, pollHealth } from "../lib/net.js";
+import { appPort, identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
-import { inspectDelivery, reportDelivery } from "../lib/delivery.js";
+import { agentWorkLine, inspectAgentWork, printLine } from "../lib/delivery.js";
 
 function readServe(file: string): { pid: number } | null {
   try {
@@ -47,7 +47,7 @@ function readServe(file: string): { pid: number } | null {
 export async function run(args: string[], app: string): Promise<number> {
   const project = loadProject(app);
   const pipeline = project.manifest.pipeline;
-  const port = project.manifest.port ?? 8090;
+  const port = appPort(project.manifest);
   const healthUrl = `${project.baseUrl}${pipeline?.health ?? "/api/_a2app"}`;
   // `--open` is a hand-off to a person, so it runs only once the app is healthy —
   // never before, or the browser races the server and lands on a refused port.
@@ -87,8 +87,9 @@ export async function run(args: string[], app: string): Promise<number> {
       if (servingId === project.manifest.id) {
         const prev = readServe(servePath);
         log.ok(`already serving on ${project.baseUrl}${prev ? ` (pid ${prev.pid})` : ""}`);
-        const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
-        reportDelivery(agentWork, project.dir);
+        // The port just answered as this app, so the check need not ask again.
+        const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl, { identityVerified: true });
+        printLine(agentWorkLine(agentWork, app));
         const shown = await show();
         log.raw(
           JSON.stringify(
@@ -205,8 +206,11 @@ export async function run(args: string[], app: string): Promise<number> {
         "\n",
     );
     log.ok(`serving "${project.manifest.name}" on ${project.baseUrl} (pid ${pid})`);
-    const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
-    reportDelivery(agentWork, project.dir);
+    // Queued agent work needs a bridge, which outlives this app and is never
+    // started from here: starting agent runs is the user's call. Say whether
+    // one is running, and what to type when one is needed.
+    const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl);
+    printLine(agentWorkLine(agentWork, app));
     // A relaunch after a code change is the moment a tab opened earlier goes
     // stale, and the person looking at it has no way to know. The View's update
     // watcher tells them; say so here so the loop is visible from the terminal

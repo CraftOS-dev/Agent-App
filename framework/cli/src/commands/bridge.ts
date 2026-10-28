@@ -29,6 +29,7 @@ import { flag, flagAll, hasFlag, positionals } from "../lib/args.js";
 import {
   bridgeLockPath,
   bridgeLogPath,
+  bridgeRecordPath,
   clearBridgeRecord,
   DEFAULT_INTERVAL_MS,
   DEFAULT_TASK_TIMEOUT_MS,
@@ -41,12 +42,21 @@ import {
   type BridgeContext,
 } from "../lib/bridge.js";
 import { chooseRoute, harnessesPath, loadHarnesses, selectProfile, type RungReport } from "../lib/harness.js";
+import { readDevRecord } from "../lib/instance.js";
 import { withLock } from "../lib/lock.js";
 import { isPidAlive, killTreeForce, terminateTree, waitForExit } from "../lib/proc.js";
 import { loadProject, UsageError, type Project } from "../lib/project.js";
 import { connect } from "../lib/target.js";
 import { log } from "../lib/log.js";
-import { appCommand, inspectDelivery, inspectLocalBridge, reportDelivery, type RunningBridge } from "../lib/delivery.js";
+import {
+  agentWorkLine,
+  appCommand,
+  inspectAgentWork,
+  inspectLocalBridge,
+  printLine,
+  tasksPhrase,
+  type RunningBridge,
+} from "../lib/delivery.js";
 
 /** A bridge that is recorded AND actually alive. A record whose process is gone
  *  is not a running bridge — it is a leftover, and treating it as one would make
@@ -56,6 +66,39 @@ function runningBridge(dir: string): RunningBridge | null {
   if (rec === null) return null;
   if (rec.pid === process.pid) return null;
   return rec;
+}
+
+/**
+ * Where a start would take work from. A background bridge is the hand-off, so
+ * it is always the live app (and it refuses to start while dev is up). A
+ * one-shot or foreground run follows operate routing: the dev instance while
+ * one is recorded, so a change can be tried end to end before it is promoted.
+ */
+function startTarget(project: Project, detached: boolean): string {
+  const dev = detached ? null : readDevRecord(project.dir);
+  return dev !== null ? dev.url : project.baseUrl;
+}
+
+/**
+ * A bridge is already running. That is success only when it takes work from
+ * where this start would: a bridge left on a dev instance is alive and still
+ * delivers nothing to the live app, and "already running" is how that went
+ * unnoticed. Returns the exit code.
+ */
+function alreadyRunning(already: RunningBridge, target: string, detached: boolean, app: string): number {
+  const restart = `${appCommand(app, "bridge stop")}, then ${appCommand(app, "bridge start")}`;
+  if (already.baseUrl === undefined || already.baseUrl === target) {
+    log.ok(`a bridge is already running for this app (pid ${already.pid}, ${already.harness} via ${already.mode})`);
+    if (already.baseUrl === undefined) log.info(`an older agent-app started it without recording its target; restart it to record it: ${restart}`);
+    log.raw(JSON.stringify({ ok: true, started: false, alreadyRunning: true, ...already }, null, 2));
+    return 0;
+  }
+  log.error(
+    `a bridge is already running for this app (pid ${already.pid}), but it takes work from ${already.baseUrl}, not ${target}. ` +
+      (detached ? `Restart it: ${restart}` : `Stop it first: ${appCommand(app, "bridge stop")}`),
+  );
+  log.raw(JSON.stringify({ ok: false, started: false, alreadyRunning: true, ...already, target }, null, 2));
+  return 1;
 }
 
 /** The five rungs as a person needs to read them when nothing worked. */
@@ -79,7 +122,9 @@ function explainNoRoute(app: string, ladder: RungReport[]): void {
 async function status(args: string[], app: string, project: Project): Promise<number> {
   const loaded = loadHarnesses();
   const selection = await selectProfile(loaded, flag(args, "harness"));
-  const agentWork = await inspectDelivery(project.dir, project.manifest.id, project.baseUrl);
+  // Always the live app, even while a dev instance takes operate traffic: the
+  // question is whether the app people use will have its work picked up.
+  const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl);
   const running = agentWork.running;
 
   let ladder: RungReport[] = [];
@@ -105,17 +150,22 @@ async function status(args: string[], app: string, project: Project): Promise<nu
     profiles: loaded.profiles.map((p) => p.id),
   };
 
-  if (running !== null) log.ok(`bridge running (pid ${running.pid}) — ${running.harness} via ${running.mode}`);
-  else log.info("no bridge is running for this app");
+  // The bridge first, then the route a start would take, then the queue.
+  const line = agentWorkLine(agentWork, app);
+  if (line === null) log.info("no bridge is running for this app");
+  printLine(line);
   if (selection.profile === null) log.warn(selection.why);
   else if (mode === null) explainNoRoute(app, ladder);
   else if (mode === "subscribe") log.info(`${selection.profile.id} subscribes — start it to be shown the listen command`);
-  else log.info(`route available: ${selection.profile.id} via ${mode} (${selection.why}); this does not verify delivery`);
-  reportDelivery(agentWork, project.dir);
-  if (!agentWork.queuesAgentWork && agentWork.state === "absent") {
-    log.info(agentWork.tasksWaiting === null ? "waiting work: unknown (live queue could not be read)" : `${agentWork.tasksWaiting} task(s) waiting in the live queue`);
+  else log.info(`bridge start would run ${selection.profile.id} via ${mode} (${selection.why})`);
+  const waiting = agentWork.tasksWaiting;
+  if (waiting === null) {
+    const down = agentWork.queueError === "the app is not answering";
+    log.info(`couldn't read the task queue: ${agentWork.queueError ?? "unknown"}${down ? `. Start it: ${appCommand(app, "serve")}` : ""}`);
+  } else if (line === null || !line.counted) {
+    log.info(`${tasksPhrase(waiting)} waiting`);
   }
-  for (const line of logTail(project.dir)) log.info(`  log: ${line}`);
+  for (const entry of logTail(project.dir)) log.info(`  log: ${entry}`);
 
   log.raw(JSON.stringify(report, null, 2));
   return 0;
@@ -127,11 +177,7 @@ async function startBackground(passthrough: string[], app: string, project: Proj
   // cheap; this one is what makes two simultaneous `start`s spawn one bridge
   // rather than two, which would double every delivery.
   const already = runningBridge(project.dir);
-  if (already !== null) {
-    log.ok(`a bridge is already running for this app (pid ${already.pid}, ${already.harness} via ${already.mode})`);
-    log.raw(JSON.stringify({ ok: true, started: false, alreadyRunning: true, ...already }, null, 2));
-    return 0;
-  }
+  if (already !== null) return alreadyRunning(already, startTarget(project, true), true, app);
   mkdirSync(join(project.dir, ".a2app"), { recursive: true });
   const entry = fileURLToPath(new URL("../agent-app.js", import.meta.url));
   const outFd = openSync(bridgeLogPath(project.dir), "a");
@@ -167,8 +213,11 @@ async function startBackground(passthrough: string[], app: string, project: Proj
   while (Date.now() < deadline) {
     const rec = readBridgeRecord(project.dir);
     if (rec !== null && rec.pid === child.pid) {
-      log.ok(`bridge started (pid ${rec.pid}) — ${rec.harness} via ${rec.mode}, polling every ${rec.intervalMs}ms`);
-      log.info(`log: ${bridgeLogPath(project.dir)} · stop it: agent-app ${app} bridge stop`);
+      log.ok(
+        `bridge started (pid ${rec.pid}) — ${rec.harness} via ${rec.mode}, ` +
+          `checking ${rec.baseUrl ?? project.baseUrl} every ${rec.intervalMs}ms`,
+      );
+      log.info(`it keeps running until: ${appCommand(app, "bridge stop")} · log: ${bridgeLogPath(project.dir)}`);
       log.raw(JSON.stringify({ ok: true, started: true, ...rec }, null, 2));
       return 0;
     }
@@ -194,12 +243,12 @@ function millis(args: string[], name: string, fallback: number, floor: number): 
 }
 
 async function start(args: string[], app: string, project: Project): Promise<number> {
+  const once = hasFlag(args, "once");
+  const dryRun = hasFlag(args, "dry-run");
+  const detached = !hasFlag(args, "foreground") && !once && !dryRun;
+
   const already = runningBridge(project.dir);
-  if (already !== null) {
-    log.ok(`a bridge is already running for this app (pid ${already.pid}, ${already.harness} via ${already.mode})`);
-    log.raw(JSON.stringify({ ok: true, started: false, alreadyRunning: true, ...already }, null, 2));
-    return 0;
-  }
+  if (already !== null) return alreadyRunning(already, startTarget(project, detached), detached, app);
 
   // Parse every option HERE, before the fork in the road. A background start
   // that only discovered `--interval banana` inside its own detached child
@@ -209,7 +258,6 @@ async function start(args: string[], app: string, project: Project): Promise<num
   const taskTimeoutMs = millis(args, "task-timeout", DEFAULT_TASK_TIMEOUT_MS, 1_000);
   const capabilities = flagAll(args, "capability");
   const harnessFlag = flag(args, "harness");
-  const dryRun = hasFlag(args, "dry-run");
 
   const loaded = loadHarnesses();
   const selection = await selectProfile(loaded, harnessFlag);
@@ -249,8 +297,21 @@ async function start(args: string[], app: string, project: Project): Promise<num
     return 0;
   }
 
-  const once = hasFlag(args, "once");
-  if (!hasFlag(args, "foreground") && !once && !dryRun) {
+  if (detached) {
+    // A background bridge outlives this session and the dev instance. Started
+    // while dev is up, it would take work from dev: alive, and delivering
+    // nothing to the live app once dev is gone. Trying a change on dev is what
+    // `--once` and `--foreground` are for.
+    const dev = readDevRecord(project.dir);
+    if (dev !== null) {
+      log.error(
+        `a dev instance is up (${dev.url}), so a background bridge would take work from it, not from the live app. ` +
+          `Promote or abandon the change first, then: ${appCommand(app, "bridge start")} ` +
+          `(to try it on dev: ${appCommand(app, "bridge start --once")})`,
+      );
+      log.raw(JSON.stringify({ ok: false, started: false, reason: "dev_instance_up", dev: dev.url }, null, 2));
+      return 1;
+    }
     // Rebuild the child's arguments from what was parsed rather than filtering
     // the original tokens: a token-filter would strip a flag's VALUE if it
     // happened to read like a subcommand, leaving the child a valueless flag.
@@ -388,6 +449,13 @@ async function start(args: string[], app: string, project: Project): Promise<num
 async function stopBridge(project: Project, app: string): Promise<number> {
   return withLock(bridgeLockPath(project.dir), async () => {
     const rec = readBridgeRecord(project.dir);
+    if (rec === null && existsSync(bridgeRecordPath(project.dir))) {
+      // Unreadable, or names no usable pid: nothing to signal, only a leftover.
+      clearBridgeRecord(project.dir);
+      log.info("cleared an unreadable bridge record");
+      log.raw(JSON.stringify({ ok: true, stopped: null, cleared: true }, null, 2));
+      return 0;
+    }
     if (rec === null) {
       log.info("no bridge is recorded for this app");
       log.raw(JSON.stringify({ ok: true, stopped: null }, null, 2));
@@ -422,9 +490,8 @@ async function stopBridge(project: Project, app: string): Promise<number> {
     // That task is not lost: it stays `working` until the app's own sweeper
     // returns it to the queue, which is the same path a crashed agent takes.
     log.info(
-      "Any task interrupted by this stop can return to the queue after its claim expires.\n" +
-        `The app can still queue work. Resume this local listener: ${appCommand(project.dir, "bridge start")}\n` +
-        "Another harness may be polling the queue independently.",
+      `new agent tasks now wait in the queue until: ${appCommand(app, "bridge start")} ` +
+        `(a run this stop cut short goes back to the queue by itself)`,
     );
     log.raw(JSON.stringify({ ok: true, stopped: rec.pid }, null, 2));
     return 0;

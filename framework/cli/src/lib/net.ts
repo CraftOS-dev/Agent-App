@@ -8,6 +8,16 @@
  * reuse this helper so the behaviour is uniform.
  */
 
+/** The port an app is served on when its manifest names none. */
+export const DEFAULT_APP_PORT = 8090;
+
+/** The port `serve` binds for this manifest. Everything that probes an app's
+ *  live port (`serve`, `list`, operate commands) derives it here, so they can
+ *  never look in two places. */
+export function appPort(manifest: { port?: number }): number {
+  return manifest.port ?? DEFAULT_APP_PORT;
+}
+
 /** `fetch` with a hard per-request deadline via AbortController. */
 export async function fetchWithTimeout(
   url: string,

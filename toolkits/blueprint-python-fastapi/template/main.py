@@ -1,7 +1,8 @@
 """FastAPI wiring (SYSTEM-OWNED — hash-locked in the ownership canon).
 
 Mounts the A2App adapter (`a2app_adapter.py`) on FastAPI. The adapter owns the
-protocol; this file only translates HTTP <-> the adapter's `dispatch()`. Run:
+protocol; this file only translates HTTP <-> the adapter's `dispatch()`, and
+serves the framework's account page (`a2app-account.html`). Run:
 `python main.py` — the `__main__` block below binds uvicorn to the environment's
 `PORT` (what `agent-app <dir> serve` sets), so the start command needs no shell
 variable and is portable across POSIX shells and cmd.exe.
@@ -20,11 +21,12 @@ import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 import sys
 
-from a2app_adapter import Adapter, SqliteStore, network_policy
+from a2app_adapter import ACCOUNT_URL, Adapter, SqliteStore, network_policy
 import schema
 
 HERE = Path(__file__).resolve().parent
@@ -73,7 +75,19 @@ adapter = Adapter(
     # type that is not declared here, so the set of things the app can ever ask
     # an agent to react to is fixed by its author in `schema.py`.
     events=schema.EVENTS,
+    # `none`, or `multi-user`: accounts, sign-in and per-person records.
+    auth_mode=manifest.get("authMode", "none"),
+    # What each capability's agent may do (spec/v0_2/auth.md §6.2).
+    capabilities=getattr(schema, "CAPABILITIES", {}),
+    # What each person may do (spec/v0_2/auth.md §3), when the schema says;
+    # every agent acting for them is limited to the same.
+    permissions_of=getattr(schema, "permissions_of", None),
 )
+
+# The framework's account page: sign in, accept an invite, people (owner), the
+# agents acting for you, approving an agent's sign-in. The same file in every
+# blueprint, read once at boot like the rest of this process's code.
+ACCOUNT_PAGE = (HERE / "a2app-account.html").read_bytes()
 
 app = FastAPI(title=manifest["name"])
 
@@ -131,18 +145,41 @@ async def a2app_route(path: str, request: Request):
         body, too_large = await _read_body(request)
         if too_large is not None:
             return JSONResponse(status_code=too_large[0], content=too_large[1])
-    status, payload = adapter.dispatch(
-        request.method, f"/api/{path}", dict(request.headers), body, dict(request.query_params)
+    # Off the event loop: a sign-in spends a few hundred milliseconds hashing a
+    # password, and the app keeps answering everyone else meanwhile (the adapter
+    # serializes access to its own state).
+    status, payload, headers = await run_in_threadpool(
+        adapter.dispatch, request.method, f"/api/{path}", dict(request.headers), body, dict(request.query_params)
     )
-    return JSONResponse(status_code=status, content=payload)
+    return JSONResponse(status_code=status, content=payload, headers=headers)
 
 
 @app.get("/.well-known/a2app.json")
 async def wellknown(request: Request):
     # Through dispatch, so the identity document gets the same Host check as
     # every other route.
-    status, payload = adapter.dispatch("GET", "/.well-known/a2app.json", dict(request.headers), None)
-    return JSONResponse(status_code=status, content=payload)
+    status, payload, headers = await run_in_threadpool(
+        adapter.dispatch, "GET", "/.well-known/a2app.json", dict(request.headers), None
+    )
+    return JSONResponse(status_code=status, content=payload, headers=headers)
+
+
+@app.get(ACCOUNT_URL)
+async def account_page(request: Request):
+    refused = adapter.host_refusal(dict(request.headers))
+    if refused is not None:
+        return JSONResponse(status_code=refused[0], content=refused[1])
+    return Response(ACCOUNT_PAGE, media_type="text/html; charset=utf-8", headers={"cache-control": "no-cache"})
+
+
+@app.get("/")
+async def home(request: Request):
+    # This stack has no View of its own, so a person who lands on the app (the
+    # account page sends them to "/" after signing in) reaches the account page.
+    refused = adapter.host_refusal(dict(request.headers))
+    if refused is not None:
+        return JSONResponse(status_code=refused[0], content=refused[1])
+    return RedirectResponse(ACCOUNT_URL, status_code=302)
 
 
 if __name__ == "__main__":

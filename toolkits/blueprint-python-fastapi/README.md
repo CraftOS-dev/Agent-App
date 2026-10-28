@@ -1,13 +1,14 @@
 # blueprint-python-fastapi
 
-A Python Agent App blueprint. `agent-app <dir> scaffold --blueprint blueprint-python-fastapi` scaffolds a FastAPI + SQLite app whose A2App adapter is a dependency-free, in-process port of the served surface (identity, describe, guarded records CRUD, operations with approval, tasks/events). Records persist in SQLite via the stdlib `sqlite3` module — the stack needs nothing beyond FastAPI itself. Not part of the pnpm workspace (Python).
+A Python Agent App blueprint. `agent-app <dir> scaffold --blueprint blueprint-python-fastapi` scaffolds a FastAPI + SQLite app whose A2App adapter is a dependency-free, in-process port of the served surface (identity, describe, guarded records CRUD, operations with approval, tasks/events, and on `--auth-mode multi-user` accounts, sign-in and per-person records). Records persist in SQLite via the stdlib `sqlite3` module — the stack needs nothing beyond FastAPI itself. Not part of the pnpm workspace (Python).
 
 Layout:
 
 | Path | Ownership | Role |
 |---|---|---|
-| `main.py` | system-owned (hash-locked) | FastAPI wiring: translates HTTP ↔ the adapter's `dispatch()` |
+| `main.py` | system-owned (hash-locked) | FastAPI wiring: translates HTTP ↔ the adapter's `dispatch()`; serves the account page |
 | `a2app_adapter.py` | system-owned (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store |
+| `a2app-account.html` | system-owned (hash-locked) | the framework's account page at `/_a2app/account` (sign in, invites, people, connected agents); identical in every blueprint |
 | `schema.py` | agent-owned | entities, operations, operation runners, seed — edit this to evolve the app |
 | `scripts/promote_apply.py` | lifecycle | run by `agent-app promote` after the mandatory backup; refuses to orphan an entity that still holds data |
 | `manifest.json`, `operations.json`, `AGENT_APP.md`, `reference/requirements.md` | framework files | identity, declared ops, plan, requirements |

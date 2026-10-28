@@ -2,9 +2,10 @@
 
 A FastAPI backend + a SQLite store, whose A2App adapter is a dependency-free,
 in-process Python port of the served surface (identity, describe, guarded
-records CRUD, operations with approval, tasks/events). Records persist in
-SQLite via the stdlib `sqlite3` module. The pure rules match `@a2app/rules`
-byte-for-byte on rejections — the conformance suite is the oracle.
+records CRUD, operations with approval, tasks/events, accounts and agent
+credentials). Records persist in SQLite via the stdlib `sqlite3` module. The
+pure rules match `@a2app/rules` byte-for-byte on rejections — the conformance
+suite is the oracle.
 
 Where the `creator`/`modify` skill says "per your stack", the answer is here. If
 this file and the source disagree, the source wins.
@@ -18,7 +19,9 @@ a working data model. A human View is out of scope for this stack:
 - **custom operations** — declared in `schema.OPERATIONS` + `operations.json` and
   implemented in `schema.OPERATION_RUNNERS` (see **Operations**);
 - **the View** — this stack serves the A2App API only; `main.py` (system-owned)
-  exposes `/api/**` and `/.well-known/a2app.json`, so it cannot present a browser UI.
+  exposes `/api/**`, `/.well-known/a2app.json` and the framework's account page
+  (`/_a2app/account`, which `/` leads to), so it cannot present a browser UI of
+  its own.
 
 Use this stack when an agent is the operator. If you need a human web UI, choose
 `blueprint-react-node` or `blueprint-pocketbase-react` — decide before building.
@@ -38,8 +41,9 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, credentials, framework state, `__pycache__`. Extend as needed. |
 | `requirements.txt` | build | Python dependencies. Add your HTTP client (e.g. `httpx`) here when you call external APIs. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
-| `main.py` | SYSTEM (hash-locked) | FastAPI wiring: reads the HTTP request under a size cap and hands it to `adapter.dispatch()`; serves `/api/**` and `/.well-known/a2app.json` only. Never edit. |
-| `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
+| `main.py` | SYSTEM (hash-locked) | FastAPI wiring: reads the HTTP request under a size cap and hands it to `adapter.dispatch()`; serves `/api/**`, `/.well-known/a2app.json` and the account page. Never edit. |
+| `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `scripts/promote_apply.py` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup; refuses to orphan an entity that still holds data. Leave it alone. |
 | `data/` | runtime | the live SQLite database (`db.sqlite`, git-ignored, created on first boot). Never edit by hand; never commit. |
 
@@ -72,7 +76,9 @@ ENTITIES = {
             {"name": "status", "type": "enum", "values": ["todo", "doing", "done"]},
             {"name": "due", "type": "string", "max": 10, "dayKey": True},   # "YYYY-MM-DD"
             {"name": "created", "type": "datetime", "readOnly": True},       # server-set
+            {"name": "owner", "type": "string", "readOnly": True},           # who created it
         ],
+        "ownedBy": "owner",   # see **Accounts and whose records** below
     },
 }
 
@@ -119,7 +125,8 @@ def _complete_task(args, ctx, store):
 OPERATION_RUNNERS = {"count-tasks": _count_tasks, "complete-task": _complete_task}
 ```
 
-- **Runner signature:** `(args, ctx, store) -> json-able dict`. `store` is the
+- **Runner signature:** `(args, ctx, store) -> json-able dict`. `ctx` is who is
+  calling (`{"credentialId", "agentName", "principal", "role"}`). `store` is the
   live SQLite-backed store — read with `store.get_record(entity, id)` /
   `store.list_records(entity, query)`, write with `store.put_record(entity,
   record)` / `store.delete_record(entity, id)`. Writes are durable when the
@@ -150,8 +157,10 @@ The adapter serves the A2App records REST under `/api/`, dispatched from
 | `DELETE /api/collections/<entity>/records/<id>` | delete |
 | `GET /api/_a2app` and `/api/_a2app/describe/**` | identity + describe |
 
-Agent writes carry the agent token; same-origin browser writes are trusted by
-the adapter's origin rule (`allowed_origins` in `main.py`).
+Agent requests carry a credential (`X-A2App-Token`). On `authMode: none`,
+same-origin browser requests are trusted by the adapter's origin rule
+(`allowed_origins` in `main.py`); on `multi-user`, a browser request carries
+the person's session instead.
 
 ## External data (third-party APIs)
 
@@ -190,6 +199,13 @@ something — nothing is queued and no agent is handed it. The starter's
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
   data.
+- **The agent acts as whoever asked.** The task records the runner's caller
+  (the `store` a runner is handed binds it to `trigger`), and the bridge runs the
+  agent with a credential for that person: it sees and changes only what they
+  could, and dies when the task ends. Say what the work needs in `CAPABILITIES`
+  in `schema.py` — `{"triage": {"scopes": ["data:tasks:read",
+  "data:tasks:write"]}}` — and the credential holds no more; a capability left
+  out gets `*`, still within that person's reach.
 - There is **no declarative trigger manifest**, and none is coming — what the
   agent does is the agent's decision, which is what keeps a compromised app from
   steering it. Do not invent a manifest format.
@@ -202,11 +218,38 @@ or a harness polling `a2app <dir> tasks next --wait`.
 
 **Show the queued work in the View.** Keep the returned `taskId` on the record
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+only while it is unfinished. That read needs no credential: on a single-user app
+the app's own page is trusted, and on a multi-user app the person's session
+makes it. A 404 means the task has been pruned, so drop the indicator. Render
+queued → working (`progress.step`) → done or failed (`reason`, plus a way to ask
+again). The creator skill lists the states. A button that goes quiet after it
+queues work looks broken.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself, in tables of its own in
+`data/db.sqlite` — they are never records:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`,
+  which `main.py` serves (and `/` leads to, as this stack has no View of its
+  own). A request from the app's own page with no session answers
+  `401 sign_in_required` with the page's `signInUrl`; a program without a
+  credential gets `agent_token_required`.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Whose records.** `"ownedBy": "<field>"` on an entity names a `readOnly`
+  string field the adapter fills with the creator's principal. A member then
+  lists, reads, changes and deletes only its own records (anyone else's answer
+  404); an owner sees all. The starter's `tasks` is owned by `owner`.
+- **Runners** get the caller as `ctx = {"principal", "role", …}` and must hold
+  themselves to the same rule for records they touch — the starter's `_mine`
+  helper in `schema.py` is the pattern.
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's and nothing is filtered.
 
 ## Reaching the app from another machine
 
@@ -275,7 +318,8 @@ resolve"**. `lifecycle.dataDir` is `data/`; `lifecycle.promote` is
   while storing nothing.
 - **Schema is declarative; the UI seam is closed.** Evolve the model by editing
   `ENTITIES` — there is no `migrations/` directory to look for. `main.py` serves
-  only the API, so this stack cannot present a browser UI; build one on
+  only the API and the account page, so this stack cannot present a browser UI
+  of its own; build one on
   `blueprint-react-node` or `blueprint-pocketbase-react` instead. See **Read this
   first** above.
 - **Empty-store first responses.** A fresh app has no records — describe and any

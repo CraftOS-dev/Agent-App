@@ -8,6 +8,26 @@ operation names the module it appears under; modules themselves are declared in
 `manifest.json`. That is what gives describe a root screen to serve and keeps
 discovery bounded however large the app grows — an entity or operation outside
 every module has no screen and cannot be reached by walking.
+
+WHOSE RECORDS. `ownedBy` names a read-only string field the adapter fills with
+the caller's principal on create. On a multi-user app a member then lists,
+reads, changes and deletes only its own records (anyone else's answer 404), and
+the owner sees all; on a single-user app every record is the owner's. Operation
+runners get the caller as `ctx` ({"principal", "role", ...}) and hold
+themselves to the same rule — see `_mine` below.
+
+WHAT EACH PERSON MAY DO. On a multi-user app, an optional
+`permissions_of(principal)` returns the scopes a person may use
+(`data:<entity>:read|write`, `op:<name>`, `*`); every agent acting for them is
+limited to the same, on every request. Without it everyone active may use
+everything (their records stay their own):
+
+    def permissions_of(principal):
+        if principal["role"] == "owner":
+            return ["*"]
+        return ["data:tasks:read", "data:tasks:write", "op:request-triage"]
+
+This starter models a to-do list. Replace it with your own entities.
 """
 
 ENTITIES = {
@@ -20,7 +40,9 @@ ENTITIES = {
             {"name": "due", "type": "string", "max": 10, "dayKey": True},
             {"name": "notes", "type": "string", "max": 2000},
             {"name": "created", "type": "datetime", "readOnly": True},
+            {"name": "owner", "type": "string", "readOnly": True},
         ],
+        "ownedBy": "owner",
     },
 }
 
@@ -71,21 +93,36 @@ OPERATIONS = [
 # about.
 EVENTS = [{"type": "task.needs_triage"}]
 
+# What the agent taking each capability's tasks may do, as scopes. The bridge
+# runs it with a credential that acts for the person who asked, holds only
+# these, and dies with the task — so an agent asked to triage cannot do more
+# than triage, nor more than that person could. A capability left out gets
+# `*`, still within the person's own reach.
+CAPABILITIES = {"triage": {"scopes": ["data:tasks:read", "data:tasks:write"]}}
+
+
+def _mine(ctx, rec):
+    """The record if `ctx` may touch it: an owner may touch any task, a member
+    only its own."""
+    return rec if rec is not None and (ctx["role"] == "owner" or rec.get("owner") == ctx["principal"]) else None
+
 
 # Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
 # these for a declared operation; a destructive op is gated by approval first.
+# `ctx` is who is calling ({"credentialId", "agentName", "principal", "role"}).
 # `store` is the live SQLite-backed store — read with store.get_record /
 # store.list_records, write with store.put_record / store.delete_record.
 # Writes are durable when the call returns. A record read from the store is a
 # COPY: mutate it, then put_record() it back, or the change never happened.
 # store.trigger(type, payload, capability=None) emits a declared event (see
-# `request-triage` below).
+# `request-triage` below); a task it queues is done by an agent acting as the
+# caller.
 def _count_tasks(args, ctx, store):
-    return {"count": store.list_records("tasks", {})["totalItems"]}
+    return {"count": sum(1 for rec in store.list_records("tasks", {})["items"] if _mine(ctx, rec))}
 
 
 def _complete_task(args, ctx, store):
-    task = store.get_record("tasks", args.get("task"))
+    task = _mine(ctx, store.get_record("tasks", args.get("task")))
     if task is None:
         return {"ok": False, "reason": "no such task"}
     task["status"] = "done"
@@ -105,7 +142,7 @@ def _complete_task(args, ctx, store):
 # can widen what the agent may do: the payload is data on the other side, and
 # the capability names the kind of work, not a command to run.
 def _request_triage(args, ctx, store):
-    task = store.get_record("tasks", args.get("task"))
+    task = _mine(ctx, store.get_record("tasks", args.get("task")))
     if task is None:
         return {"ok": False, "reason": "no such task"}
     fired = store.trigger("task.needs_triage", {"task": task["id"]}, capability="triage")
@@ -119,5 +156,5 @@ OPERATION_RUNNERS = {
 }
 
 SEED = {
-    "tasks": [{"id": "task_welcome", "title": "Welcome — edit or delete me", "status": "todo", "created": "2026-01-01T00:00:00Z"}],
+    "tasks": [{"id": "task_welcome", "title": "Welcome — edit or delete me", "status": "todo", "created": "2026-01-01T00:00:00Z", "owner": "owner"}],
 }

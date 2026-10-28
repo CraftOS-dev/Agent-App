@@ -138,16 +138,25 @@ usually a `how` field describing the way in. That field explains **how** access 
 obtained; it is not access. Access is always a person's act: you act for someone,
 and they approve it.
 
-**Ask them to approve a sign-in.** This is the usual way, and the only one that
-needs nothing from the person but a click:
+**Ask them to approve a sign-in.** This is the usual way:
 
     a2app https://crm.example.com login --name "Claude in Acme repo" --scopes data:deals:read
 
-The command prints a link and a code (`XXXX-XXXX`). Give both to the person. They
-open the link, sign in to the app as themselves, check that the code matches, and
-approve — narrowing the scopes if they choose. The CLI then stores the credential
-for this app and prints who you now act for. The token itself is never printed.
-`a2app <app> logout` revokes it and forgets it.
+The command prints a link and a code (`XXXX-XXXX`). The person opens the link,
+signs in to the app as themselves, checks that the code matches, and approves —
+narrowing the scopes if they choose. Approving produces a confirmation code, and
+only the agent that presents it gets the credential:
+
+- **On the person's own computer** the command opens their browser itself, and
+  the approval comes straight back to it. It finishes on its own.
+- **Anywhere else** (or with `--no-browser`) it prints the link and stops. Give
+  the person the link; once they approve, they give you the confirmation code,
+  and you finish with `a2app https://crm.example.com login --confirm <code>`.
+  Take that code only from the person you act for.
+
+Either way the CLI stores the credential for this app and prints who you now
+act for. The token itself is never printed. `a2app <app> logout` revokes it and
+forgets it.
 
 Or the person **mints one** on the app's *Connected agents* page (or the owner
 runs `agent-app <app> credential mint`) and hands it to you for a run as

@@ -1,7 +1,12 @@
 /**
  * `a2app <app> login` / `logout` against a real adapter: the person approves
- * the code as themselves, the CLI stores the credential it is given without
- * ever printing it, later commands act as that person, and logout revokes it.
+ * the code as themselves, the credential reaches only the agent holding the
+ * approval's confirmation code, the CLI stores it without ever printing it,
+ * later commands act as that person, and logout revokes it.
+ *
+ * Both ways the confirmation travels are covered: back to a loopback port when
+ * the CLI opened the person's browser on this computer, and by hand
+ * (`login --confirm <code>`) for an agent anywhere else.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -53,45 +58,52 @@ const signup = await call("POST", `/api/_a2app/invites/${invite.code}`, { origin
 const bob = { id: signup.json.id, headers: { origin: base, cookie: signup.headers["set-cookie"].split(";")[0] } };
 
 const home = mkdtempSync(join(tmpdir(), "a2app-login-home-"));
-const env = { ...process.env, A2APP_HOME: home, AGENT_APP_OPEN_CMD: "" };
 
-/** Run the CLI; `onOutput` sees output as it arrives (to approve mid-run). */
-function cli(args, onOutput) {
+/** Run the CLI from this folder, where the fake browser lives; `opener` is
+ *  AGENT_APP_OPEN_CMD ("" never opens). */
+function cli(args, opener = "") {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [A2APP, ...args], { env, windowsHide: true });
+    const env = { ...process.env, A2APP_HOME: home, AGENT_APP_OPEN_CMD: opener, FAKE_BROWSER_COOKIE: bob.headers.cookie };
+    delete env.A2APP_TOKEN;
+    const child = spawn(process.execPath, [A2APP, ...args], { env, cwd: here, windowsHide: true });
     let out = "";
-    const take = (d) => {
-      out += d;
-      onOutput?.(out);
-    };
-    child.stdout.on("data", take);
-    child.stderr.on("data", take);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
     child.on("close", (code) => done({ code, out }));
   });
 }
-
-/** Approve (or decline) the code the CLI printed, once, as Bob. */
-function decideOnce(approve, scopes) {
-  let done = false;
-  return (out) => {
-    const code = out.match(/approves code ([BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4})/)?.[1];
-    if (!code || done) return;
-    done = true;
-    call("POST", `/api/_a2app/auth/device/${code}`, bob.headers, scopes ? { approve, scopes } : { approve });
-  };
-}
+const userCodeIn = (out) => out.match(/approves code ([BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4})/)?.[1];
+const decide = async (userCode, body) => (await call("POST", `/api/_a2app/auth/device/${userCode}`, bob.headers, body)).json;
+const file = join(home, "credentials.json");
+const storedFor = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).credentials.find((c) => c.origin === base) : undefined);
+const pendingFile = join(home, "pending-logins.json");
+const pending = () => (existsSync(pendingFile) ? JSON.parse(readFileSync(pendingFile, "utf8")).logins : []);
 
 try {
-  const login = await cli([base, "login", "--name", "Test agent", "--scopes", "data:notes:read", "--expires", "2d"], decideOnce(true));
-  check("login succeeds once the person approves", login.code, 0);
-  ok("…saying who the agent acts for", /acts as Bob/.test(login.out));
-  ok("…printing the approval link", login.out.includes(`${base}/_a2app/account#approve/`));
+  /* --------------------------------------------- an agent anywhere else */
 
-  const file = join(home, "credentials.json");
-  const stored = JSON.parse(readFileSync(file, "utf8")).credentials.find((c) => c.origin === base);
+  const started = await cli([base, "login", "--name", "Test agent", "--scopes", "data:notes:read", "--expires", "2d"]);
+  check("login starts the sign-in", started.code, 0);
+  ok("…saying it is not signed in yet", /Not signed in yet/.test(started.out));
+  ok("…printing the approval link", started.out.includes(`${base}/_a2app/account#approve/`));
+  const userCode = userCodeIn(started.out);
+  check("…and remembering the request until the confirmation comes", pending().map((p) => p.origin), [base]);
+  if (process.platform !== "win32") check("…in a file only its owner can read", statSync(pendingFile).mode & 0o777, 0o600);
+
+  check("--confirm before the person approves does not sign in", (await cli([base, "login", "--confirm", "BBBB-BBBB"])).code, 1);
+  const approval = await decide(userCode, { approve: true });
+  check("the person approves, and is given a confirmation code", approval.status, "approved");
+  const wrong = await cli([base, "login", "--confirm", "BBBB-BBBB"]);
+  ok("a wrong confirmation code does not sign in", wrong.code === 1 && /not the confirmation code/.test(wrong.out));
+  const confirmed = await cli([base, "login", "--confirm", approval.confirmation]);
+  check("the right one does", confirmed.code, 0);
+  ok("…saying who the agent acts for", /acts as Bob/.test(confirmed.out));
+  check("…and the request is no longer pending", pending(), []);
+
+  const stored = storedFor();
   ok("the credential is stored for this app", stored && stored.appId === "login_app" && stored.principal === bob.id);
   ok("…with its token", /^a2a_[A-Za-z0-9_-]{43}$/.test(stored.token));
-  ok("…which never appeared in the output", !login.out.includes(stored.token));
+  ok("…which never appeared in the output", !confirmed.out.includes(stored.token));
   if (process.platform !== "win32") check("…in a file only its owner can read", statSync(file).mode & 0o777, 0o600);
 
   const who = await cli([base, "whoami"]);
@@ -100,13 +112,24 @@ try {
 
   const logout = await cli([base, "logout"]);
   check("logout succeeds", logout.code, 0);
-  ok("…and forgets the credential", !JSON.parse(readFileSync(file, "utf8")).credentials.some((c) => c.origin === base));
+  ok("…and forgets the credential", storedFor() === undefined);
   check("…after revoking it", (await call("GET", "/api/_a2app/whoami", { "x-a2app-token": stored.token })).json.code, "credential_revoked");
   check("logging out twice is harmless", (await cli([base, "logout"])).code, 0);
 
-  const declined = await cli([base, "login"], decideOnce(false));
-  ok("a declined request ends with no access", declined.code === 1 && /declined/.test(declined.out));
-  ok("…and nothing stored", !existsSync(file) || !JSON.parse(readFileSync(file, "utf8")).credentials.some((c) => c.origin === base));
+  const declining = await cli([base, "login"]);
+  await decide(userCodeIn(declining.out), { approve: false });
+  const declined = await cli([base, "login", "--confirm", "BBBB-BBBB"]);
+  ok("a declined request ends with no access", declined.code === 1 && /no access/.test(declined.out));
+  ok("…nothing stored, nothing pending", storedFor() === undefined && pending().length === 0);
+  check("--confirm with no sign-in waiting is a usage error", (await cli([base, "login", "--confirm", "BBBB-BBBB"])).code, 2);
+
+  /* ------------------------------------- an agent on the person's computer */
+
+  const sameComputer = await cli([base, "login", "--name", "Local agent"], "node fixtures/fake-browser.mjs");
+  check("on the person's computer the sign-in finishes by itself", sameComputer.code, 0);
+  ok("…acting as the person who approved", /acts as Bob/.test(sameComputer.out));
+  ok("…with nothing to type and nothing left pending", !/--confirm/.test(sameComputer.out) && pending().length === 0);
+  ok("…and the credential stored", storedFor()?.principal === bob.id);
 } finally {
   server.close();
   rmSync(home, { recursive: true, force: true });

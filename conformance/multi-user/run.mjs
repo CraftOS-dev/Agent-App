@@ -168,15 +168,32 @@ check("…and it stops working", code(await call("GET", "/api/_a2app/whoami", { 
 const started = await call("POST", "/api/_a2app/auth/device", { body: { agentName: "suite device", scopes: [`data:${entity}:read`, `data:${entity}:write`] } });
 ok("an agent asks to sign in", started.status === 200 && /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(started.json?.userCode ?? ""));
 ok("…with a link to approve it", started.json?.verificationUriComplete?.endsWith(`/_a2app/account#approve/${started.json?.userCode}`));
-const poll = () => call("POST", "/api/_a2app/auth/token", { body: { deviceCode: started.json?.deviceCode } });
-check("polling waits for the person", code(await poll()), "authorization_pending");
-check("…and says to slow down when too fast", code(await poll()), "slow_down");
-check("the person reviews the request", (await call("GET", `/api/_a2app/auth/device/${started.json?.userCode}`, { as: bob.session })).json?.agentName, "suite device");
-check("…and approves it, narrowing it", (await call("POST", `/api/_a2app/auth/device/${started.json?.userCode}`, { as: bob.session, body: { approve: true, scopes: [`data:${entity}:read`] } })).json?.status, "approved");
-await new Promise((r) => setTimeout(r, (started.json?.interval ?? 5) * 1000 + 200));
-const got = await poll();
-check("the agent receives a credential for that person", [got.json?.credential?.principal, got.json?.credential?.scopes], [bob.id, [`data:${entity}:read`]]);
-check("…once", code(await poll()), "expired_token");
+const poll = (deviceCode, confirmation) =>
+  call("POST", "/api/_a2app/auth/token", { body: confirmation === undefined ? { deviceCode } : { deviceCode, confirmation } });
+check("polling waits for the person", code(await poll(started.json?.deviceCode)), "authorization_pending");
+check("…and says to slow down when too fast", code(await poll(started.json?.deviceCode)), "slow_down");
+const review = (await call("GET", `/api/_a2app/auth/device/${started.json?.userCode}`, { as: bob.session })).json;
+check("the person reviews the request: who, when, and that no agent waits on their computer", [review?.agentName, typeof review?.requestedAt, review?.loopback], ["suite device", "string", false]);
+const approval = (await call("POST", `/api/_a2app/auth/device/${started.json?.userCode}`, { as: bob.session, body: { approve: true, scopes: [`data:${entity}:read`] } })).json;
+check("…and approves it, narrowing it", approval?.status, "approved");
+ok("…getting a confirmation code for their agent, with nowhere to send it", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(approval?.confirmation ?? "") && approval?.redirect === null);
+check("approval alone hands nothing over", code(await poll(started.json?.deviceCode)), "confirmation_required");
+check("…nor does a wrong confirmation code", code(await poll(started.json?.deviceCode, "BBBB-BBBB")), "confirmation_invalid");
+const got = await poll(started.json?.deviceCode, approval?.confirmation);
+check("the agent holding the code receives a credential for that person", [got.json?.credential?.principal, got.json?.credential?.scopes], [bob.id, [`data:${entity}:read`]]);
+check("…once", code(await poll(started.json?.deviceCode, approval?.confirmation)), "expired_token");
+
+const guessed = (await call("POST", "/api/_a2app/auth/device", { body: {} })).json;
+await call("POST", `/api/_a2app/auth/device/${guessed?.userCode}`, { as: bob.session, body: { approve: true } });
+for (let i = 0; i < 4; i++) await poll(guessed?.deviceCode, "BBBB-BBBB");
+check("five wrong confirmation codes void the request", code(await poll(guessed?.deviceCode, "BBBB-BBBB")), "access_denied");
+
+check("a loopback port must be a real one", code(await call("POST", "/api/_a2app/auth/device", { body: { loopbackPort: 80 } })), "usage");
+const local = (await call("POST", "/api/_a2app/auth/device", { body: { agentName: "suite local", loopbackPort: 53682 } })).json;
+check("an agent on the person's computer is shown as such", (await call("GET", `/api/_a2app/auth/device/${local?.userCode}`, { as: bob.session })).json?.loopback, true);
+const sent = (await call("POST", `/api/_a2app/auth/device/${local?.userCode}`, { as: bob.session, body: { approve: true } })).json;
+check("approval sends the browser back to the agent's port with the code", sent?.redirect, `http://127.0.0.1:53682/a2app/callback?confirmation=${sent?.confirmation}`);
+check("…which completes the sign-in", (await poll(local?.deviceCode, sent?.confirmation)).json?.credential?.principal, bob.id);
 
 /* -------------------------------------------------------------- tasks */
 

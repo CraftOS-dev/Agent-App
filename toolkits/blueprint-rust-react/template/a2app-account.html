@@ -354,7 +354,9 @@
 
       /** An agent asked to act for the person (a2app <app> login): show what
        *  it asked for, and let them approve — narrowed to reading if they like —
-       *  or decline. */
+       *  or decline. Approving yields a confirmation code that only the agent
+       *  holding it can redeem: sent back to an agent on this computer, or shown
+       *  for the person to give to their own agent elsewhere. */
       async function approve(code) {
         if (app.authMode === "multi-user" && !(await api("GET", "/api/_a2app/session")).ok) {
           location.hash = `#sign-in?next=${encodeURIComponent(`/_a2app/account#approve/${code || ""}`)}`;
@@ -384,12 +386,24 @@
         const decide = async (approve, scopes) => {
           const d = await api("POST", `/api/_a2app/auth/device/${encodeURIComponent(ask.userCode)}`, scopes ? { approve, scopes } : { approve });
           if (!d.ok) return d.json.message || "Could not record your decision.";
+          if (!approve) {
+            show(header("Approve an agent"), el("section", null, el("p", null, "Declined. The agent gets nothing.")));
+            return null;
+          }
+          if (d.json.redirect) {
+            show(header("Approve an agent"), el("section", null, el("p", null, "Approved. Returning you to the agent…")));
+            location.assign(d.json.redirect);
+            return null;
+          }
           show(header("Approve an agent"), el("section", null,
-            el("p", null, approve ? `Approved. ${ask.agentName || "The agent"} can now use ${app.name} as you; it continues on its own.` : "Declined. The agent gets nothing."),
-            el("p", { class: "muted small" }, "You can close this page. Agents acting for you are listed on your account page, where you can revoke them."),
+            el("p", null, `Approved. To finish, give ${ask.agentName || "the agent"} this confirmation code:`),
+            el("p", null, el("span", { class: "code" }, d.json.confirmation)),
+            el("p", { class: "small" }, "Give it only to the agent you are running yourself. Never type it into a website, an email or a message from someone else: whoever has it gets your access."),
+            el("p", { class: "muted small" }, "Agents acting for you are listed on your account page, where you can revoke them."),
           ));
           return null;
         };
+        const minutesAgo = Math.max(0, Math.round((Date.now() - Date.parse(ask.requestedAt)) / 60000));
         const error = el("p", { class: "error", role: "alert" });
         const readOnly = el("input", { type: "checkbox", name: "readOnly" });
         show(
@@ -397,6 +411,11 @@
           el("section", null,
             el("p", null, el("strong", null, ask.agentName || "An agent"), ` wants to use ${app.name} as you.`),
             el("p", { class: "small" }, "Code ", el("span", { class: "code" }, ask.userCode), " — check it matches what the agent shows."),
+            el("p", { class: "small" },
+              `Asked ${minutesAgo === 0 ? "just now" : `${minutesAgo} minute${minutesAgo === 1 ? "" : "s"} ago`}, by an agent `,
+              ask.loopback ? "on this computer: approving returns you to it." : "elsewhere: approving gives you a code to hand it."),
+            el("p", { class: "small" }, el("strong", null, "Approve only a request your own agent just showed you."),
+              " The name above is whatever the requester typed; a link someone sent you is not your agent asking."),
             el("p", { class: "small" }, `It asks to: ${askedAll ? "do everything you can do" : ask.scopes.join(", ")}, for ${days >= 1 ? `${days} day${days === 1 ? "" : "s"}` : `${Math.round(ask.expiresIn / 60)} minutes`}.`),
             el("label", { class: "row small" }, readOnly, "Only let it read"),
             el("p", { class: "muted small" }, "It can never do more than you can, and it stops if your account is deactivated."),

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "a2app/device-authorization.json",
-  "title": "POST /api/_a2app/auth/device — the start of a device-code sign-in (RFC 8628 shape).",
+  "title": "POST /api/_a2app/auth/device — the start of a device-code sign-in (RFC 8628 shape). The request may name `loopbackPort`, where an agent on the person's computer waits for the confirmation code (RFC 8252).",
   "type": "object",
   "required": ["a2app", "deviceCode", "userCode", "verificationUri", "verificationUriComplete", "expiresIn", "interval"],
   "properties": {

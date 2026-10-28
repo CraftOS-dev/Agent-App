@@ -121,10 +121,10 @@ The credential is refused `credential_revoked` once the task is `completed`, `fa
 
 | Step | Call |
 |---|---|
-| Agent asks | `POST /api/_a2app/auth/device {agentName?, scopes?, expiresIn?}` → `device-authorization` |
-| Person reviews | `GET /api/_a2app/auth/device/{userCode}` (manager) → `{ userCode, agentName, scopes, expiresIn, expiresAt }` |
-| Person decides | `POST /api/_a2app/auth/device/{userCode} {approve, scopes?}` (manager; `scopes` may only narrow) |
-| Agent polls | `POST /api/_a2app/auth/token {deviceCode}` → `issued-credential` |
+| Agent asks | `POST /api/_a2app/auth/device {agentName?, scopes?, expiresIn?, loopbackPort?}` → `device-authorization` |
+| Person reviews | `GET /api/_a2app/auth/device/{userCode}` (manager) → `{ userCode, agentName, scopes, expiresIn, expiresAt, requestedAt, loopback }` |
+| Person decides | `POST /api/_a2app/auth/device/{userCode} {approve, scopes?}` (manager; `scopes` may only narrow) → `{ status, confirmation?, redirect? }` |
+| Agent polls | `POST /api/_a2app/auth/token {deviceCode, confirmation?}` → `issued-credential` |
 
 Codes:
 
@@ -132,16 +132,25 @@ Codes:
 - `deviceCode`: 256 random bits, stored as its sha256.
 - Both expire after 600 s and are single use.
 
+**Confirmation.** Anyone can start a request and send its link to a person, so approval alone hands nothing over. Approving issues a one-time `confirmation` code (the `userCode` format, stored as its sha256), and the credential is issued only to a poll that presents it:
+
+- **An agent on the person's computer** sends `loopbackPort` (1024–65535) and waits on `http://127.0.0.1:<loopbackPort>/a2app/callback` (RFC 8252). The approval's `redirect` is that URL with `?confirmation=<code>`, and the account page sends the browser there. The code reaches only the computer the person approved on.
+- **An agent elsewhere** sends no port. The account page shows the code, for the person to give to the agent they are running themselves.
+
+Five wrong codes void the request.
+
 Polling `auth/token` answers `400`, `ok: false`, with one of:
 
 - `authorization_pending`: keep polling at `interval`;
 - `slow_down`: polled sooner than `interval`. Add 5 s to the interval;
-- `access_denied`: the person refused;
+- `confirmation_required`: approved; poll again with `confirmation`;
+- `confirmation_invalid`: not this request's code;
+- `access_denied`: the person refused, or too many wrong codes;
 - `expired_token`: start again.
 
-The issued credential acts for the approving manager's principal, with the approved scopes.
+A poll on an approved request is answered at once, whatever the interval. The issued credential acts for the approving manager's principal, with the approved scopes.
 
-`verificationUri` is the account page's approve screen on the app's public origin. `verificationUriComplete` adds the code.
+`verificationUri` is the account page's approve screen on the app's public origin. `verificationUriComplete` adds the code. The approve screen shows when the request was made and whether the agent waits on this computer, and asks the person to approve only a request their own agent just showed them: the agent name is whatever the requester typed.
 
 ## 8. Endpoints
 
@@ -199,7 +208,7 @@ The session, invite and user routes exist only on `multi-user` apps; elsewhere t
 
 | Command | Does |
 |---|---|
-| `a2app <app> login [--scopes …] [--expires 30d] [--name …]` | runs §7 and stores the credential in `credentials.json` (0600); the token is never printed |
+| `a2app <app> login [--scopes …] [--expires 30d] [--name …] [--no-browser]` · `login --confirm <code>` | runs §7 and stores the credential in `credentials.json` (0600); the token is never printed. When it opens the browser on this computer it waits on a loopback port; otherwise `--confirm` finishes with the code the person was shown |
 | `a2app <app> logout` | revokes and forgets it |
 | `agent-app <app> credential list` · `mint --for <principal> --scopes … --expires …` · `revoke <id>` | manages credentials with the admin credential; `mint` prints the token once |
 | `agent-app <app> owner` · `agent-app <app> invite [--role member]` | prints a setup link |
@@ -218,6 +227,8 @@ The session, invite and user routes exist only on `multi-user` apps; elsewhere t
 | `sign_in_failed` | 401 |
 | `authorization_pending` | 400 |
 | `slow_down` | 400 |
+| `confirmation_required` | 400 |
+| `confirmation_invalid` | 400 |
 | `access_denied` | 400 |
 | `expired_token` | 400 |
 | `device_code_invalid` | 404 |

@@ -10,6 +10,12 @@
  * the credential issued acts for them, with the scopes they approved. No
  * password or session ever reaches the agent. Codes live 10 minutes, are
  * single use, and the device code is stored only as its hash.
+ *
+ * Approving is not enough on its own: anyone can start a request and send the
+ * person its link. So approval issues a one-time confirmation code, and the
+ * credential goes only to whoever presents it. An agent on the person's own
+ * computer receives it on a loopback port (RFC 8252) when the page returns the
+ * browser there; an agent elsewhere is given it by the person.
  */
 import { hashSecret, newSecret, newUserCode, normalizeUserCode } from "./auth.js";
 import { ACCOUNT_URL, type Manager } from "./accounts.js";
@@ -20,6 +26,12 @@ import type { A2AppReply, A2AppRequest, PrincipalInfo } from "./types.js";
 const CODE_TTL_SECONDS = 600;
 const POLL_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_STEP_SECONDS = 5;
+/** Wrong confirmation codes a request survives before it is void. */
+const CONFIRM_ATTEMPTS = 5;
+/** Where an agent on the person's computer waits for the confirmation. */
+const LOOPBACK_CALLBACK = "/a2app/callback";
+const LOOPBACK_PORT_MIN = 1024;
+const LOOPBACK_PORT_MAX = 65535;
 
 interface DeviceRow {
   userCode: string;
@@ -36,6 +48,11 @@ interface DeviceRow {
   status: "pending" | "approved" | "denied";
   approvedBy: string | null;
   approvedScopes: string[] | null;
+  /** the 127.0.0.1 port the agent waits on, when it is on the person's computer */
+  loopbackPort: number | null;
+  /** SHA-256 of the confirmation code issued at approval */
+  confirmationHash: string | null;
+  confirmAttempts: number;
 }
 
 export interface DeviceDeps {
@@ -74,6 +91,13 @@ export function createDeviceRoutes(deps: DeviceDeps) {
     if (agentName !== undefined && (typeof agentName !== "string" || agentName.trim() === "" || agentName.length > 100)) {
       return err(400, "usage", "agentName is 1–100 characters.");
     }
+    const loopbackPort = body.loopbackPort ?? null;
+    if (
+      loopbackPort !== null &&
+      (typeof loopbackPort !== "number" || !Number.isInteger(loopbackPort) || loopbackPort < LOOPBACK_PORT_MIN || loopbackPort > LOOPBACK_PORT_MAX)
+    ) {
+      return err(400, "usage", `loopbackPort is the port, ${LOOPBACK_PORT_MIN} to ${LOOPBACK_PORT_MAX}, where the agent waits on 127.0.0.1.`);
+    }
     const taken = new Set(liveRows().map(([, row]) => row.userCode));
     let userCode = newUserCode();
     while (taken.has(userCode)) userCode = newUserCode();
@@ -91,6 +115,9 @@ export function createDeviceRoutes(deps: DeviceDeps) {
       status: "pending",
       approvedBy: null,
       approvedScopes: null,
+      loopbackPort,
+      confirmationHash: null,
+      confirmAttempts: 0,
     });
     const approve = `${deps.publicOrigin(req)}${ACCOUNT_URL}#approve`;
     return ok({
@@ -105,7 +132,8 @@ export function createDeviceRoutes(deps: DeviceDeps) {
   }
 
   function poll(req: A2AppRequest): A2AppReply {
-    const deviceCode = (req.body as Record<string, unknown> | undefined)?.deviceCode;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const deviceCode = body.deviceCode;
     if (typeof deviceCode !== "string") return err(400, "usage", "Poll with { deviceCode }.");
     const key = hashSecret(deviceCode);
     const row = store.row<DeviceRow>("devices", key);
@@ -118,7 +146,22 @@ export function createDeviceRoutes(deps: DeviceDeps) {
       store.deleteRow("devices", key);
       return err(400, "access_denied", "The person declined this agent's request.");
     }
-    if (row.status === "approved" && row.approvedBy !== null && row.approvedScopes !== null) {
+    if (row.status === "approved" && row.approvedBy !== null && row.approvedScopes !== null && row.confirmationHash !== null) {
+      // Answered at once, whatever the interval: wrong guesses are bounded by
+      // CONFIRM_ATTEMPTS instead.
+      const confirmation = typeof body.confirmation === "string" ? normalizeUserCode(body.confirmation) : "";
+      if (confirmation === "") {
+        return err(400, "confirmation_required", "Approved. Present the confirmation code the approval produced.", { interval: row.interval });
+      }
+      if (hashSecret(confirmation) !== row.confirmationHash) {
+        const attempts = row.confirmAttempts + 1;
+        if (attempts >= CONFIRM_ATTEMPTS) {
+          store.deleteRow("devices", key);
+          return err(400, "access_denied", "Too many wrong confirmation codes: this request is void. Start again.");
+        }
+        store.putRow<DeviceRow>("devices", key, { ...row, confirmAttempts: attempts });
+        return err(400, "confirmation_invalid", `That is not this request's confirmation code (${CONFIRM_ATTEMPTS - attempts} tries left).`);
+      }
       // Single use: the row goes before the credential is handed out.
       store.deleteRow("devices", key);
       const info = deps.principalInfo(row.approvedBy);
@@ -153,6 +196,8 @@ export function createDeviceRoutes(deps: DeviceDeps) {
       scopes: row.scopes,
       expiresIn: row.expiresInSeconds,
       expiresAt: row.expiresAt,
+      requestedAt: row.createdAt,
+      loopback: row.loopbackPort !== null,
     });
   }
 
@@ -178,8 +223,24 @@ export function createDeviceRoutes(deps: DeviceDeps) {
       if (wider.length > 0) return err(400, "usage", `Approval can only narrow what the agent asked for, not add ${wider.join(", ")}.`);
       scopes = parsed.scopes;
     }
-    store.putRow<DeviceRow>("devices", key, { ...row, status: "approved", approvedBy: manager.principal, approvedScopes: scopes });
-    return ok({ a2app: true, ok: true, status: "approved" });
+    const confirmation = newUserCode();
+    store.putRow<DeviceRow>("devices", key, {
+      ...row,
+      status: "approved",
+      approvedBy: manager.principal,
+      approvedScopes: scopes,
+      confirmationHash: hashSecret(confirmation),
+    });
+    return ok({
+      a2app: true,
+      ok: true,
+      status: "approved",
+      confirmation,
+      redirect:
+        row.loopbackPort === null
+          ? null
+          : `http://127.0.0.1:${row.loopbackPort}${LOOPBACK_CALLBACK}?confirmation=${encodeURIComponent(confirmation)}`,
+    });
   }
 
   /** Route one request under /api/_a2app/auth/, or null. */

@@ -160,6 +160,55 @@ function writeCredentials(credentials: StoredCredential[]): void {
   );
 }
 
+/* --------------------------------------------------------- pending sign-ins */
+
+export const PENDING_LOGINS_FILE = "pending-logins.json";
+
+/**
+ * A sign-in `a2app <app> login` started for an agent that is not on the
+ * person's computer: approved in their browser, it waits for the confirmation
+ * code they give the agent (`login --confirm <code>`). The device code is a
+ * secret until the request expires, so it is kept like a credential.
+ */
+export interface PendingLogin {
+  origin: string;
+  appId: string;
+  deviceCode: string;
+  expiresAt: string;
+}
+
+export function pendingLoginsPath(): string {
+  return homePath(PENDING_LOGINS_FILE);
+}
+
+/** The live pending sign-ins; expired ones are not returned. */
+function readPendingLogins(): PendingLogin[] {
+  const store = readJson<{ logins?: PendingLogin[] }>(pendingLoginsPath(), { logins: [] });
+  const now = Date.now();
+  return (Array.isArray(store.logins) ? store.logins : []).filter((p) => Date.parse(p.expiresAt) > now);
+}
+
+function writePendingLogins(logins: PendingLogin[]): void {
+  writeFileAtomic(pendingLoginsPath(), JSON.stringify({ logins }, null, 2) + "\n", undefined, 0o600);
+}
+
+export function pendingLoginFor(origin: string, appId: string): PendingLogin | null {
+  return readPendingLogins().find((p) => p.origin === origin && p.appId === appId) ?? null;
+}
+
+/** Remember a sign-in waiting for its confirmation code, replacing any older one for the app. */
+export async function savePendingLogin(entry: PendingLogin): Promise<void> {
+  await withHomeLock(() => {
+    writePendingLogins([...readPendingLogins().filter((p) => !(p.origin === entry.origin && p.appId === entry.appId)), entry]);
+  });
+}
+
+export async function forgetPendingLogin(origin: string, appId: string): Promise<void> {
+  await withHomeLock(() => {
+    writePendingLogins(readPendingLogins().filter((p) => !(p.origin === origin && p.appId === appId)));
+  });
+}
+
 /* ------------------------------------------------------------------- pins */
 
 export function knownAppsPath(): string {

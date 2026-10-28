@@ -48,11 +48,12 @@ const call = (method, path, headers = {}, body) => app.handle({ method, path, qu
 const invite = (await call("POST", "/api/_a2app/invites", { "x-a2app-token": ADMIN }, { role: "member" })).json;
 const signup = await call("POST", `/api/_a2app/invites/${invite.code}`, { origin: ORIGIN }, { name: "Bob", login: "bob", password: "a long enough password" });
 const bob = { id: signup.json.id, headers: { origin: ORIGIN, cookie: signup.headers["set-cookie"].split(";")[0] } };
-const poll = (deviceCode) => call("POST", "/api/_a2app/auth/token", {}, { deviceCode });
+const poll = (deviceCode, confirmation) => call("POST", "/api/_a2app/auth/token", {}, confirmation === undefined ? { deviceCode } : { deviceCode, confirmation });
 
 /* ------------------------------------------------------------- the ask */
 
 const ask = await call("POST", "/api/_a2app/auth/device", {}, { agentName: "Claude Code on Bob's laptop", scopes: ["data:notes:read", "data:notes:write"], expiresIn: 7 * 86400 });
+const askedAt = new Date(clock).toISOString();
 check("an agent with no credential may ask", ask.status, 200);
 ok("…and gets a user code to show", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(ask.json.userCode));
 check("…the account page to send the person to", ask.json.verificationUri, "http://127.0.0.1:9971/_a2app/account#approve");
@@ -76,16 +77,26 @@ const lower = ask.json.userCode.replace("-", "").toLowerCase();
 const review = await call("GET", `/api/_a2app/auth/device/${lower}`, bob.headers);
 check("the person sees what is asked (code typed any case, any dash)", [review.status, review.json.agentName, review.json.scopes], [200, "Claude Code on Bob's laptop", ["data:notes:read", "data:notes:write"]]);
 check("…and for how long", review.json.expiresIn, 7 * 86400);
+check("…when, and that no agent waits on this computer", [review.json.requestedAt, review.json.loopback], [askedAt, false]);
 check("an unknown code is device_code_invalid", (await call("GET", "/api/_a2app/auth/device/BCDF-GHJK", bob.headers)).json.code, "device_code_invalid");
 
 /* ------------------------------------------------------------ decide */
 
 check("deciding needs this app's Origin", (await call("POST", `/api/_a2app/auth/device/${ask.json.userCode}`, { cookie: bob.headers.cookie }, { approve: true })).json.code, "forbidden_origin");
 check("approval cannot widen what was asked", (await call("POST", `/api/_a2app/auth/device/${ask.json.userCode}`, bob.headers, { approve: true, scopes: ["*"] })).status, 400);
-check("the person approves, narrowed to reading", (await call("POST", `/api/_a2app/auth/device/${ask.json.userCode}`, bob.headers, { approve: true, scopes: ["data:notes:read"] })).json.status, "approved");
-tick(5);
-const issued = await poll(ask.json.deviceCode);
-check("the next poll receives the credential", issued.status, 200);
+const approved = (await call("POST", `/api/_a2app/auth/device/${ask.json.userCode}`, bob.headers, { approve: true, scopes: ["data:notes:read"] })).json;
+check("the person approves, narrowed to reading", approved.status, "approved");
+ok("…and is given a confirmation code for their agent", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(approved.confirmation));
+check("…with nowhere to send it on its own", approved.redirect, null);
+
+// Approval alone does not hand over the credential: whoever started the
+// request (perhaps someone who sent the person its link) must also present
+// the code the person was given.
+const unconfirmed = await poll(ask.json.deviceCode);
+check("approved but unconfirmed is confirmation_required", [unconfirmed.status, unconfirmed.json.code], [400, "confirmation_required"]);
+check("a wrong code is confirmation_invalid", (await poll(ask.json.deviceCode, "BBBB-BBBB")).json.code, "confirmation_invalid");
+const issued = await poll(ask.json.deviceCode, approved.confirmation.replace("-", "").toLowerCase());
+check("the right code (any case, any dash) receives the credential", issued.status, 200);
 ok("…its token", /^a2a_[A-Za-z0-9_-]{43}$/.test(issued.json.token));
 check("…acting for the person who approved", [issued.json.credential.principal, issued.json.credential.principalName], [bob.id, "Bob"]);
 check("…with what they approved", issued.json.credential.scopes, ["data:notes:read"]);
@@ -105,14 +116,28 @@ tick(601);
 check("after ten minutes the request is gone", (await poll(stale.deviceCode)).json.code, "expired_token");
 check("…for the person too", (await call("GET", `/api/_a2app/auth/device/${stale.userCode}`, bob.headers)).json.code, "device_code_invalid");
 
+const guessed = (await call("POST", "/api/_a2app/auth/device", {}, {})).json;
+await call("POST", `/api/_a2app/auth/device/${guessed.userCode}`, bob.headers, { approve: true });
+for (let i = 0; i < 4; i++) await poll(guessed.deviceCode, "BBBB-BBBB");
+check("five wrong confirmation codes void the request", (await poll(guessed.deviceCode, "BBBB-BBBB")).json.code, "access_denied");
+check("…for good", (await poll(guessed.deviceCode)).json.code, "expired_token");
+
+/* ------------------------------------- an agent on the person's computer */
+
+check("a loopback port must be a real one", (await call("POST", "/api/_a2app/auth/device", {}, { loopbackPort: 80 })).json.code, "usage");
+const local = (await call("POST", "/api/_a2app/auth/device", {}, { agentName: "local agent", loopbackPort: 53682 })).json;
+check("the person is told the agent waits on this computer", (await call("GET", `/api/_a2app/auth/device/${local.userCode}`, bob.headers)).json.loopback, true);
+const sent = (await call("POST", `/api/_a2app/auth/device/${local.userCode}`, bob.headers, { approve: true })).json;
+check("approval sends the browser back to the agent's port, with the code", sent.redirect, `http://127.0.0.1:53682/a2app/callback?confirmation=${sent.confirmation}`);
+check("…which completes the sign-in", (await poll(local.deviceCode, sent.confirmation)).status, 200);
+
 /* --------------------------------------------------- single-user app */
 
 const single = makeApp("none");
 const s = (method, path, headers = {}, body) => single.handle({ method, path, query: {}, headers: { host: "127.0.0.1:9971", ...headers }, body });
 const soloAsk = (await s("POST", "/api/_a2app/auth/device", {}, { agentName: "remote agent" })).json;
-await s("POST", `/api/_a2app/auth/device/${soloAsk.userCode}`, { origin: ORIGIN }, { approve: true });
-tick(5);
-const soloIssued = await s("POST", "/api/_a2app/auth/token", {}, { deviceCode: soloAsk.deviceCode });
+const soloApproved = (await s("POST", `/api/_a2app/auth/device/${soloAsk.userCode}`, { origin: ORIGIN }, { approve: true })).json;
+const soloIssued = await s("POST", "/api/_a2app/auth/token", {}, { deviceCode: soloAsk.deviceCode, confirmation: soloApproved.confirmation });
 check("on a single-user app the View approves as the owner", [soloIssued.status, soloIssued.json.credential.principal], [200, "owner"]);
 
 if (failures.length) {

@@ -92,7 +92,7 @@ const COMMANDS: Record<string, CommandMeta> = {
     summary: "Ask the person to approve this agent in the app; stores the credential it is given (never printed)",
     surface: "a2app",
     scope: "app",
-    args: "[--scopes a,b] [--expires 30d] [--name <agent>]",
+    args: "[--scopes a,b] [--expires 30d] [--name <agent>] [--no-browser] | --confirm <code>",
   },
   logout: { summary: "Revoke and forget this agent's stored credential for the app", surface: "a2app", scope: "app" },
 };

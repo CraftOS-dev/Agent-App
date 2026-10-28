@@ -21,7 +21,12 @@ never do more than that person can. The normative text is
   deactivating the person narrows or stops all of their agents at once.
 - **`a2app <app> login` / `logout`**: device-code sign-in (RFC 8628). The person
   approves the request in their browser, and the CLI stores the credential
-  without printing it.
+  without printing it. Approving produces a one-time confirmation code, and only
+  the agent presenting it gets the credential, so approving a link someone else
+  sent you gives them nothing. On the person's own computer the code comes back
+  to the CLI by itself (a loopback redirect, RFC 8252); an agent elsewhere
+  finishes with `login --confirm <code>`. The approve screen says when the
+  request was made and where the agent is.
 - **Reaching an app from another machine**: `A2APP_HOST` and `A2APP_PUBLIC_URL`,
   plus a Host check in every adapter. An app refuses to listen beyond loopback
   without an https public URL.

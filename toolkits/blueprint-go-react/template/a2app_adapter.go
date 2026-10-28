@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1487,6 +1488,10 @@ type AdapterConfig struct {
 	Token          string
 	Modules        []M
 	AllowedOrigins []string
+	// PublicURL is the origin people and agents reach the app at
+	// (A2APP_PUBLIC_URL, resolved by NetworkPolicy), or "" for loopback only.
+	// It is one more of the app's own origins, and its host is answered.
+	PublicURL      string
 	Runners        map[string]OperationRunner
 	// Events are the event types this app may emit ({"type": ...} each). A
 	// runner's store.trigger refuses a type that is not declared here.
@@ -1510,6 +1515,7 @@ type Adapter struct {
 	store          *Store
 	authMode       string
 	allowedOrigins map[string]bool
+	allowedHosts   map[string]bool
 	runners        map[string]OperationRunner
 	credentialHint string
 	env            string
@@ -1538,6 +1544,7 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		store:          cfg.Store,
 		authMode:       cfg.AuthMode,
 		allowedOrigins: map[string]bool{},
+		allowedHosts:   map[string]bool{},
 		runners:        cfg.Runners,
 		credentialHint: cfg.CredentialHint,
 		env:            cfg.Env,
@@ -1562,8 +1569,18 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 			"A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - " +
 				strings.Join(problems, "\n  - "))
 	}
-	for _, origin := range cfg.AllowedOrigins {
+	origins := cfg.AllowedOrigins
+	if cfg.PublicURL != "" {
+		origins = append(append([]string{}, origins...), cfg.PublicURL)
+	}
+	for _, origin := range origins {
 		a.allowedOrigins[origin] = true
+		// The hosts this app answers to are derived from its own origins, so an
+		// app reached at its public URL answers there and nowhere new.
+		if u, err := url.Parse(origin); err == nil && u.Host != "" {
+			a.allowedHosts[strings.ToLower(u.Host)] = true
+			a.allowedHosts[hostnameOf(u.Host)] = true
+		}
 	}
 	// The declared event types are what keep the app->agent queue from being an
 	// open channel: store.trigger refuses a type that is not declared, so the set
@@ -2138,6 +2155,67 @@ func (a *Adapter) credentialOf(headers map[string]string) M {
 	return a.store.grantByToken(token)
 }
 
+// isAllowedHost reports whether a Host header value names this app: a loopback
+// name or address, or a host of one of its own origins.
+func (a *Adapter) isAllowedHost(raw string) bool {
+	host := strings.ToLower(raw)
+	if a.allowedHosts[host] {
+		return true
+	}
+	name := hostnameOf(host)
+	return isLoopbackName(name) || a.allowedHosts[name]
+}
+
+// hostnameOf is the host name in a Host value: `name`, `name:port` or `[v6]:port`.
+func hostnameOf(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(h)
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+}
+
+// isLoopbackName reports whether a host name is a loopback name or address.
+func isLoopbackName(name string) bool {
+	if name == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(name, "["), "]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// NetworkPolicy resolves where the app listens (A2APP_HOST, default loopback)
+// and the origin people and agents reach it at (A2APP_PUBLIC_URL). It refuses
+// the combinations that would send the agent token across a network in clear:
+// a non-loopback bind without an https public URL, or a plain-http public URL
+// that does not name this machine (an SSH tunnel ends on loopback).
+func NetworkPolicy(hostEnv, publicURLEnv string) (host string, publicURL string, err error) {
+	host = strings.TrimSpace(hostEnv)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	scheme := ""
+	if raw := strings.TrimSpace(publicURLEnv); raw != "" {
+		u, perr := url.Parse(raw)
+		if perr != nil || u.Host == "" {
+			return "", "", fmt.Errorf("A2APP_PUBLIC_URL is not a URL: %q", raw)
+		}
+		scheme = strings.ToLower(u.Scheme)
+		if scheme != "https" && scheme != "http" {
+			return "", "", fmt.Errorf("A2APP_PUBLIC_URL must be an http(s) URL, not %q", raw)
+		}
+		if scheme == "http" && !isLoopbackName(strings.ToLower(u.Hostname())) {
+			return "", "", fmt.Errorf("A2APP_PUBLIC_URL must be https: %q would send the agent token across a network in clear. "+
+				"Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address", raw)
+		}
+		publicURL = scheme + "://" + strings.ToLower(u.Host)
+	}
+	if !isLoopbackName(strings.ToLower(host)) && scheme != "https" {
+		return "", "", fmt.Errorf("A2APP_HOST=%s exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "+
+			"(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1", host)
+	}
+	return host, publicURL, nil
+}
+
 // authorize runs the fixed precedence: origin, then credential, then scope.
 // A nil errBody means the caller may proceed with ctx.
 func (a *Adapter) authorize(headers map[string]string, scope string, isWrite bool) (ctx M, status int, errBody M) {
@@ -2380,6 +2458,13 @@ func (a *Adapter) dispatch(method, path string, headers map[string]string, body 
 		path = "/"
 	}
 
+	// Before any route, including the unauthenticated identity document, which
+	// is otherwise a free fingerprint of the app for a rebound page: binding
+	// loopback does not stop a page on evil.com whose DNS re-resolves to
+	// 127.0.0.1, but its Host header still says evil.com.
+	if host, ok := headers["host"]; ok && !a.isAllowedHost(host) {
+		return errEnv(403, "forbidden_host", "Refused: this app answers only on its own host, not \""+host+"\".", nil)
+	}
 	if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
 		return 200, a.identity()
 	}
@@ -3102,10 +3187,47 @@ func selftest() int {
 		}
 	}
 
+	// 7. Host and network policy: the app answers only to loopback and its own
+	//    origins (the public URL among them), and refuses to listen where the
+	//    agent token would cross a network in clear.
+	if hostApp, err := NewAdapter(AdapterConfig{
+		AppID: "selftest", Store: NewStore(nil), Token: "t", Modules: []M{{"name": "core"}},
+		Entities:       map[string]M{},
+		AllowedOrigins: []string{"http://127.0.0.1:9931"},
+		PublicURL:      "https://crm.example.com",
+	}); err != nil {
+		failures = append(failures, "could not build an adapter for the host checks: "+err.Error())
+	} else {
+		check("the public host is answered", hostApp.isAllowedHost("crm.example.com"), true)
+		check("…with an explicit port", hostApp.isAllowedHost("crm.example.com:443"), true)
+		check("loopback is answered", hostApp.isAllowedHost("127.0.0.2:9931"), true)
+		check("an IPv6 loopback literal is answered", hostApp.isAllowedHost("[::1]:9931"), true)
+		check("a rebound host is refused", hostApp.isAllowedHost("evil.example.com"), false)
+		check("a lookalike host is refused", hostApp.isAllowedHost("localhost.evil.example.com"), false)
+		status, _ := hostApp.dispatch("GET", "/api/_a2app", map[string]string{"host": "evil.example.com"}, nil, nil)
+		check("dispatch refuses a foreign host before identity", status, 403)
+		check("the public origin is the app's own", hostApp.allowedOrigins["https://crm.example.com"], true)
+	}
+	policy := func(host, public string) string {
+		h, p, err := NetworkPolicy(host, public)
+		if err != nil {
+			return "refused"
+		}
+		return h + " " + p
+	}
+	check("loopback by default", policy("", ""), "127.0.0.1 ")
+	check("an https public URL is reduced to its origin", policy("", "https://CRM.example.com/x"), "127.0.0.1 https://crm.example.com")
+	check("a non-loopback bind needs a public URL", policy("0.0.0.0", ""), "refused")
+	check("…an https one", policy("0.0.0.0", "http://localhost:8080"), "refused")
+	check("a non-loopback bind behind https is allowed", policy("0.0.0.0", "https://crm.example.com"), "0.0.0.0 https://crm.example.com")
+	check("a plain-http public name is refused", policy("", "http://crm.example.com"), "refused")
+	check("a plain-http tunnel to loopback is allowed", policy("", "http://localhost:9000"), "127.0.0.1 http://localhost:9000")
+	check("a public URL that is not a URL is refused", policy("", "crm.example.com"), "refused")
+
 	if len(failures) > 0 {
 		fmt.Println("a2app_adapter selftest FAILED:\n  - " + strings.Join(failures, "\n  - "))
 		return 1
 	}
-	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store)")
+	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)")
 	return 0
 }

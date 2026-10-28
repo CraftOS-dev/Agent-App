@@ -29,6 +29,10 @@ export type { StateStore, StoredTask, StoredEvent } from "./store.js";
 export { RateLimiter, DEFAULT_RATE_LIMITS } from "./rate.js";
 export type { RateLimits, RouteClass, RateDecision } from "./rate.js";
 export { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
+/** Where the app listens and the address it is reached at (A2APP_HOST,
+ *  A2APP_PUBLIC_URL), and the loopback rule the Host check uses. */
+export { networkPolicy, isLoopbackName, hostnameOf } from "./network.js";
+export type { NetworkPolicy } from "./network.js";
 
 /** Text that reaches an agent's context, and the bound on the app-supplied
  *  part of it. Exported so a host can see exactly what its callers are told. */

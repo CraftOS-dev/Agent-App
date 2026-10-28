@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -1591,6 +1592,10 @@ pub struct AdapterConfig {
     pub token: String,
     pub modules: Value,
     pub allowed_origins: Vec<String>,
+    /// The origin people and agents reach the app at (A2APP_PUBLIC_URL,
+    /// resolved by [`network_policy`]), or None for loopback only. It is one
+    /// more of the app's own origins, and its host is answered.
+    pub public_url: Option<String>,
     pub runner_lookup: RunnerLookup,
     /// The event types this app may emit (`[{"type": ...}]`). A runner's
     /// `store.trigger` refuses a type that is not declared here.
@@ -1613,11 +1618,76 @@ pub struct Adapter {
     pub store: Store,
     auth_mode: String,
     allowed_origins: HashSet<String>,
+    allowed_hosts: HashSet<String>,
     runner_lookup: RunnerLookup,
     credential_hint: String,
     env: Option<String>,
     limiter: RateLimiter,
     app_version: Option<Box<dyn Fn() -> String>>,
+}
+
+/* ---------------------------------------------------------------- network
+ *
+ * Where an app listens, and the address the rest of the world uses for it. The
+ * one rule: a bearer token must never cross a network in clear, so binding a
+ * non-loopback address needs an https public URL, and a public URL may be
+ * plain http only when it names this machine (an SSH tunnel ends on loopback).
+ */
+
+/// Is `name` a loopback name or address? Accepts a bracketed IPv6 literal.
+pub fn is_loopback_name(name: &str) -> bool {
+    let bare = name.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    bare == "localhost" || bare.parse::<IpAddr>().map_or(false, |ip| ip.is_loopback())
+}
+
+/// The host name in a Host value (`name`, `name:port`, `[v6]:port`), or None.
+pub fn hostname_of(host: &str) -> Option<String> {
+    url::Url::parse(&format!("http://{host}")).ok()?.host_str().map(str::to_ascii_lowercase)
+}
+
+/// The Host values an origin answers to: `name:port` and `name`.
+fn origin_hosts(origin: &str) -> Vec<String> {
+    let Ok(u) = url::Url::parse(origin) else { return vec![] };
+    let Some(name) = u.host_str().map(str::to_ascii_lowercase) else { return vec![] };
+    match u.port() {
+        Some(port) => vec![format!("{name}:{port}"), name],
+        None => vec![name],
+    }
+}
+
+/// Resolve (bind host, public origin) from A2APP_HOST / A2APP_PUBLIC_URL, or
+/// the reason the combination is unsafe.
+pub fn network_policy(host_env: Option<String>, public_url_env: Option<String>) -> Result<(String, Option<String>), String> {
+    let host = host_env
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let mut public = None;
+    let mut https = false;
+    if let Some(raw) = public_url_env.map(|r| r.trim().to_string()).filter(|r| !r.is_empty()) {
+        let u = url::Url::parse(&raw).map_err(|_| format!("A2APP_PUBLIC_URL is not a URL: \"{raw}\"."))?;
+        if u.scheme() != "https" && u.scheme() != "http" {
+            return Err(format!("A2APP_PUBLIC_URL must be an http(s) URL, not \"{raw}\"."));
+        }
+        let Some(name) = u.host_str() else {
+            return Err(format!("A2APP_PUBLIC_URL is not a URL: \"{raw}\"."));
+        };
+        https = u.scheme() == "https";
+        if !https && !is_loopback_name(name) {
+            return Err(format!(
+                "A2APP_PUBLIC_URL must be https: \"{raw}\" would send the agent token across a network in clear. \
+                 Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address."
+            ));
+        }
+        public = Some(u.origin().ascii_serialization());
+    }
+    if !is_loopback_name(&host) && !https {
+        return Err(format!(
+            "A2APP_HOST={host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address \
+             (the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
+        ));
+    }
+    Ok((host, public))
 }
 
 /// Everything wrong with the app part's module/operation declarations.
@@ -1729,6 +1799,9 @@ impl Adapter {
             "token": config.token, "credentialId": "cred_local", "agentName": "local",
             "principal": "owner", "scopes": ["*"],
         }));
+        // The hosts this app answers to are derived from its own origins, so an
+        // app reached at its public URL answers there and nowhere new.
+        let own_origins: Vec<String> = config.allowed_origins.iter().cloned().chain(config.public_url.clone()).collect();
         let mut adapter = Adapter {
             app_id: config.app_id,
             app_name: config.app_name,
@@ -1737,7 +1810,8 @@ impl Adapter {
             modules: config.modules,
             store,
             auth_mode: config.auth_mode,
-            allowed_origins: config.allowed_origins.into_iter().collect(),
+            allowed_origins: own_origins.iter().cloned().collect(),
+            allowed_hosts: own_origins.iter().flat_map(|o| origin_hosts(o)).collect(),
             runner_lookup: config.runner_lookup,
             credential_hint: config
                 .credential_hint
@@ -2445,6 +2519,13 @@ impl Adapter {
         (200, Self::fit_list(build, &items))
     }
 
+    fn is_allowed_host(&self, raw: &str) -> bool {
+        if self.allowed_hosts.contains(&raw.to_ascii_lowercase()) {
+            return true;
+        }
+        hostname_of(raw).map_or(false, |name| is_loopback_name(&name) || self.allowed_hosts.contains(&name))
+    }
+
     pub fn dispatch(
         &mut self,
         method: &str,
@@ -2468,6 +2549,15 @@ impl Adapter {
         let trimmed = path.trim_end_matches('/');
         let path = if trimmed.is_empty() { "/" } else { trimmed };
 
+        // Before any route, including the unauthenticated identity document,
+        // which is otherwise a free fingerprint of the app for a rebound page:
+        // binding loopback does not stop a page on evil.com whose DNS
+        // re-resolves to 127.0.0.1, but its Host header still says evil.com.
+        if let Some(host) = headers.get("host") {
+            if !self.is_allowed_host(host) {
+                return Self::err(403, "forbidden_host", &format!("Refused: this app answers only on its own host, not \"{host}\"."));
+            }
+        }
         if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
             return (200, self.identity());
         }
@@ -3283,10 +3373,86 @@ pub fn selftest() -> i32 {
     }
     let _ = std::fs::remove_dir_all(&tmp);
 
+    // Host and network policy: the app answers only to loopback and its own
+    // origins (the public URL among them), and refuses to listen where the
+    // agent token would cross a network in clear.
+    fn no_runner(_: &str) -> Option<Runner> {
+        None
+    }
+    match Adapter::new(AdapterConfig {
+        app_id: "selftest".into(),
+        app_name: None,
+        entities: json!({}),
+        operations: json!([]),
+        store: Store::memory(json!({})),
+        token: "t".into(),
+        modules: json!([{ "name": "core" }]),
+        allowed_origins: vec!["http://127.0.0.1:9931".into()],
+        public_url: Some("https://crm.example.com".into()),
+        runner_lookup: no_runner,
+        events: json!([]),
+        auth_mode: "none".into(),
+        credential_hint: None,
+        env: None,
+        app_version: None,
+    }) {
+        Err(e) => failures.push(format!("could not build an adapter for the host checks: {e}")),
+        Ok(mut hosted) => {
+            for (label, host, expected) in [
+                ("the public host is answered", "crm.example.com", true),
+                ("…with an explicit port", "crm.example.com:443", true),
+                ("loopback is answered", "127.0.0.2:9931", true),
+                ("an IPv6 loopback literal is answered", "[::1]:9931", true),
+                ("a rebound host is refused", "evil.example.com", false),
+                ("a lookalike host is refused", "localhost.evil.example.com", false),
+            ] {
+                check(&mut failures, label, &json!(hosted.is_allowed_host(host)), &json!(expected));
+            }
+            let headers: HashMap<String, String> =
+                [("Host".to_string(), "evil.example.com".to_string())].into_iter().collect();
+            let (status, _) = hosted.dispatch("GET", "/api/_a2app", &headers, None, &HashMap::new());
+            check(&mut failures, "dispatch refuses a foreign host before identity", &json!(status), &json!(403));
+            check(
+                &mut failures,
+                "the public origin is the app's own",
+                &json!(hosted.allowed_origins.contains("https://crm.example.com")),
+                &json!(true),
+            );
+        }
+    }
+    let policy = |host: Option<&str>, public: Option<&str>| match network_policy(host.map(str::to_string), public.map(str::to_string)) {
+        Ok((h, p)) => json!([h, p]),
+        Err(_) => json!("refused"),
+    };
+    for (label, actual, expected) in [
+        ("loopback by default", policy(None, None), json!(["127.0.0.1", null])),
+        (
+            "an https public URL is reduced to its origin",
+            policy(None, Some("https://CRM.example.com/x")),
+            json!(["127.0.0.1", "https://crm.example.com"]),
+        ),
+        ("a non-loopback bind needs a public URL", policy(Some("0.0.0.0"), None), json!("refused")),
+        ("…an https one", policy(Some("0.0.0.0"), Some("http://localhost:8080")), json!("refused")),
+        (
+            "a non-loopback bind behind https is allowed",
+            policy(Some("0.0.0.0"), Some("https://crm.example.com")),
+            json!(["0.0.0.0", "https://crm.example.com"]),
+        ),
+        ("a plain-http public name is refused", policy(None, Some("http://crm.example.com")), json!("refused")),
+        (
+            "a plain-http tunnel to loopback is allowed",
+            policy(None, Some("http://localhost:9000")),
+            json!(["127.0.0.1", "http://localhost:9000"]),
+        ),
+        ("a public URL that is not a URL is refused", policy(None, Some("crm.example.com")), json!("refused")),
+    ] {
+        check(&mut failures, label, &actual, &expected);
+    }
+
     if !failures.is_empty() {
         println!("a2app_adapter selftest FAILED:\n  - {}", failures.join("\n  - "));
         return 1;
     }
-    println!("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store)");
+    println!("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)");
     0
 }

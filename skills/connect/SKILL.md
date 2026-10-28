@@ -43,20 +43,26 @@ authenticate to something else.
 
 ### When a cloud app refuses you and neither of you is wrong
 
-An adapter binds loopback and answers only on hostnames it is configured for.
-Deployed behind a proxy or a tunnel, the app receives its **public** hostname in
-`Host` and refuses it unless its own config names it:
+An app answers only to loopback and to the host of its own public URL.
+Deployed behind a proxy, it receives its **public** hostname in `Host` and
+refuses it unless it was started with that address:
 
     → https://kanban.example.com is an Agent App, but it does not answer to that
-      hostname. It replied 403 forbidden_host … the app's adapter needs
-      "kanban.example.com" in its allowedHosts.
+      hostname. It replied 403 forbidden_host … its owner starts it with
+      A2APP_PUBLIC_URL=https://kanban.example.com.
 
 The app is running, reachable, and genuinely an Agent App. It has not been told
 what it is called. **This is the owner's to fix, not yours** — no credential, no
 retry and no other URL will change the answer, so report it rather than hunting
-for a way in. Deploying an Agent App for others to reach means setting
-`allowedHosts` (or an `allowedOrigins` entry carrying the host) to the name it is
-served under.
+for a way in. Deploying an Agent App for others to reach means serving it behind
+TLS with `A2APP_PUBLIC_URL` set to the address it is served under (each
+blueprint's `reference/blueprint.md`, "Reaching the app from another machine").
+
+An SSH tunnel needs none of that: `ssh -L 9000:127.0.0.1:<port> <host>`, then
+`a2app http://localhost:9000`. The tunnel ends on loopback, which the app always
+answers, and it carries the token encrypted. An app is never reached over plain
+http across a network: it refuses to listen that way, because the token would
+travel in clear.
 
 A `401` on the identity document means the same kind of thing. That document is
 unauthenticated by design, so a refusal there is something *in front of* the app —
@@ -243,7 +249,7 @@ assemble it from credentials you were handed for something else.
 | `401` | `agent_token_required` | no credential, or one this app does not know | 39 |
 | `403` | `insufficient_scope` | the credential is valid, this scope is not held — `required` names it | 39, to ask the owner for that scope |
 | `403` | `forbidden_origin` | the request carried a browser origin the app does not accept | not yours to route around |
-| `403` | `forbidden_host` | the app does not answer to the hostname you reached it by | nothing — the owner configures `allowedHosts` |
+| `403` | `forbidden_host` | the app does not answer to the hostname you reached it by | nothing — the owner sets `A2APP_PUBLIC_URL` |
 
 Telling these apart is what keeps a retry from being aimed at the wrong gate: a
 missing scope is a conversation with the owner, a missing credential is step 39,

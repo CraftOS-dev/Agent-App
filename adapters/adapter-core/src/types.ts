@@ -241,6 +241,13 @@ export interface A2AppConfig {
   /** Host names to answer on, beyond loopback and the hosts of allowedOrigins.
    *  Set this only when the app is deliberately reachable under another name. */
   allowedHosts?: string[];
+  /**
+   * The URL people and agents reach the app at (`A2APP_PUBLIC_URL`), resolved
+   * by {@link import("./network.js").networkPolicy}. Its origin is one of the
+   * app's own and its host is answered; null/absent when the app is reached on
+   * loopback only.
+   */
+  publicUrl?: string | null;
   /** declared event types. */
   events?: EventTypeDecl[];
   /** injectable clock, for deterministic tests. */

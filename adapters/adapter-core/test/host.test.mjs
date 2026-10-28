@@ -55,6 +55,53 @@ check("a lookalike host is refused", await get("localhost.evil.example.com"), 40
 
 server.close();
 
+/* ------------------------------------------- reached at a public URL (#39) */
+
+// Behind a TLS proxy the app receives its public name in Host, and the View's
+// requests carry the public origin. Both must be the app's own — and nothing
+// else becomes so.
+const proxied = createA2App(
+  new MemoryBinding({
+    appId: "host_public",
+    appName: "Host Public",
+    entities: { notes: { module: "desk", fields: [{ name: "title", type: "string", required: true }], seed: [] } },
+  }),
+  {
+    modules: [{ name: "desk", summary: "notes" }],
+    allowedOrigins: ["http://127.0.0.1:9932"],
+    publicUrl: "https://crm.example.com",
+  },
+);
+const ask = async (headers, method = "GET") =>
+  (await proxied.handle({ method, path: method === "GET" ? "/api/_a2app" : "/api/collections/notes/records", query: {}, headers, body: { title: "x" } }))
+    .status;
+check("the public host is served", await ask({ host: "crm.example.com" }), 200);
+check("…with an explicit port too", await ask({ host: "crm.example.com:443" }), 200);
+check("another host is still refused", await ask({ host: "evil.example.com" }), 403);
+check("the public origin is the app's own (View write)", await ask({ host: "crm.example.com", origin: "https://crm.example.com" }, "POST"), 200);
+check("an http origin on the public name is not", await ask({ host: "crm.example.com", origin: "http://crm.example.com" }, "POST"), 403);
+
+/* -------------------------------------------------------- networkPolicy */
+
+const { networkPolicy } = await import("../dist/index.js");
+const refused = (env) => {
+  try {
+    networkPolicy(env);
+    return false;
+  } catch {
+    return true;
+  }
+};
+check("loopback by default", JSON.stringify(networkPolicy({})), JSON.stringify({ host: "127.0.0.1", publicUrl: null }));
+check("an https public URL is reduced to its origin", networkPolicy({ publicUrl: "https://crm.example.com/some/path" }).publicUrl, "https://crm.example.com");
+check("a non-loopback bind needs a public URL", refused({ host: "0.0.0.0" }), true);
+check("…an https one", refused({ host: "0.0.0.0", publicUrl: "http://localhost:8080" }), true);
+check("a non-loopback bind behind https is allowed", refused({ host: "0.0.0.0", publicUrl: "https://crm.example.com" }), false);
+check("a plain-http public name is refused", refused({ publicUrl: "http://crm.example.com" }), true);
+check("a plain-http tunnel to loopback is allowed", refused({ publicUrl: "http://localhost:9000" }), false);
+check("a public URL that is not a URL is refused", refused({ publicUrl: "crm.example.com" }), true);
+check("…nor an http(s) one", refused({ publicUrl: "ftp://crm.example.com" }), true);
+
 if (failures.length) {
   console.log(`host validation: ${failures.length} check(s) FAILED\n`);
   for (const f of failures) console.log(`  [FAIL] ${f}\n`);

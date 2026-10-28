@@ -25,6 +25,66 @@ require "time"
 # parse_qs), fileutils for creating the data directory on first boot.
 require "uri"
 require "fileutils"
+require "ipaddr"
+
+module A2appAdapter
+  # Where an app listens, and the address the rest of the world uses for it.
+  # The one rule: a bearer token must never cross a network in clear, so
+  # binding a non-loopback address needs an https public URL, and a public URL
+  # may be plain http only when it names this machine (an SSH tunnel ends on
+  # loopback). config/puma.rb binds with it; the controller passes the public
+  # URL to the adapter.
+  module Network
+    module_function
+
+    # Is `name` a loopback name or address? Accepts a bracketed IPv6 literal.
+    def loopback_name?(name)
+      bare = name.to_s.downcase.delete_prefix("[").delete_suffix("]")
+      return true if bare == "localhost"
+      IPAddr.new(bare).loopback?
+    rescue IPAddr::Error
+      false
+    end
+
+    # The host name in a Host value (`name`, `name:port`, `[v6]:port`), or nil.
+    def hostname_of(host)
+      URI.parse("http://#{host}").hostname&.downcase
+    rescue URI::Error
+      nil
+    end
+
+    # [bind host, public origin or nil] from A2APP_HOST / A2APP_PUBLIC_URL, or
+    # ArgumentError with the reason the combination is unsafe.
+    def policy(host_env, public_url_env)
+      host = host_env.to_s.strip
+      host = "127.0.0.1" if host.empty?
+      public_url = nil
+      scheme = ""
+      raw = public_url_env.to_s.strip
+      unless raw.empty?
+        begin
+          uri = URI.parse(raw)
+        rescue URI::Error
+          raise ArgumentError, %(A2APP_PUBLIC_URL is not a URL: "#{raw}".)
+        end
+        scheme = uri.scheme.to_s.downcase
+        raise ArgumentError, %(A2APP_PUBLIC_URL is not a URL: "#{raw}".) if uri.host.nil?
+        raise ArgumentError, %(A2APP_PUBLIC_URL must be an http(s) URL, not "#{raw}".) unless %w[http https].include?(scheme)
+        if scheme == "http" && !loopback_name?(uri.hostname)
+          raise ArgumentError, %(A2APP_PUBLIC_URL must be https: "#{raw}" would send the agent token across a network in clear. ) +
+                               "Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address."
+        end
+        default_port = scheme == "https" ? 443 : 80
+        public_url = "#{scheme}://#{uri.host.downcase}#{uri.port == default_port ? "" : ":#{uri.port}"}"
+      end
+      if !loopback_name?(host) && scheme != "https"
+        raise ArgumentError, "A2APP_HOST=#{host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address " \
+                             "(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
+      end
+      [host, public_url]
+    end
+  end
+end
 
 module A2appAdapter
   RULES_VERSION = "0.1.0"
@@ -840,7 +900,7 @@ module A2appAdapter
     attr_reader :store
 
     def initialize(app_id:, app_name:, entities:, operations:, store:, token:,
-                   modules: nil, allowed_origins: nil, operation_runners: nil, events: nil,
+                   modules: nil, allowed_origins: nil, public_url: nil, operation_runners: nil, events: nil,
                    auth_mode: "none", credential_hint: nil, env: nil, app_version: nil)
       @app_id = app_id
       @app_name = app_name
@@ -865,7 +925,19 @@ module A2appAdapter
       # author rather than by whatever a runner passes at the moment of firing.
       store.event_types = (events || []).map { |e| e["type"] }
       @auth_mode = auth_mode
-      @allowed_origins = (allowed_origins || []).to_h { |o| [o, true] }
+      # The public URL (A2APP_PUBLIC_URL, resolved by Network.policy) is one
+      # more of the app's own origins, and the hosts this app answers to are
+      # derived from those origins: reached at its public URL, it answers
+      # there and nowhere new.
+      own_origins = (allowed_origins || []) + [public_url].compact
+      @allowed_origins = own_origins.to_h { |o| [o, true] }
+      @allowed_hosts = {}
+      own_origins.each do |origin|
+        uri = URI.parse(origin)
+        next if uri.hostname.nil?
+        @allowed_hosts[uri.hostname.downcase] = true
+        @allowed_hosts["#{uri.hostname.downcase}:#{uri.port}"] = true
+      end
       @runners = operation_runners || {}
       @credential_hint = credential_hint || "Read the app's .agent-token file (mode 0600) in the project directory."
       @env = env
@@ -1380,6 +1452,12 @@ module A2appAdapter
       end.then { |doc| [200, doc] }
     end
 
+    def allowed_host?(raw)
+      return true if @allowed_hosts.key?(raw.downcase)
+      name = Network.hostname_of(raw)
+      !name.nil? && (Network.loopback_name?(name) || @allowed_hosts.key?(name))
+    end
+
     def dispatch(method, path, headers, body, query = nil)
       headers = (headers || {}).to_h { |k, v| [k.to_s.downcase, v] }
       method = method.upcase
@@ -1392,6 +1470,14 @@ module A2appAdapter
       path = path.sub(%r{/+\z}, "")
       path = "/" if path.empty?
 
+      # Before any route, including the unauthenticated identity document,
+      # which is otherwise a free fingerprint of the app for a rebound page:
+      # binding loopback does not stop a page on evil.com whose DNS
+      # re-resolves to 127.0.0.1, but its Host header still says evil.com.
+      host = headers["host"]
+      if !host.nil? && !allowed_host?(host)
+        return err(403, "forbidden_host", %(Refused: this app answers only on its own host, not "#{host}".))
+      end
       return [200, identity] if ["/.well-known/a2app.json", "/api/_a2app"].include?(path)
       # Describe is navigational: the bare path is the root level, and each
       # extra segment moves one level inward (A2APP-SPEC 3).
@@ -1959,11 +2045,42 @@ module A2appAdapter
       failures << "sqlite store: #{e.message}"
     end
 
+    # Host and network policy: the app answers only to loopback and its own
+    # origins (the public URL among them), and refuses to listen where the
+    # agent token would cross a network in clear.
+    hosted = Adapter.new(app_id: "selftest", app_name: nil, entities: {}, operations: [], store: Store.new, token: "t",
+                         modules: [{ "name" => "core" }], allowed_origins: ["http://127.0.0.1:9931"],
+                         public_url: "https://crm.example.com")
+    check.call("the public host is answered", hosted.allowed_host?("crm.example.com"), true)
+    check.call("…with an explicit port", hosted.allowed_host?("crm.example.com:443"), true)
+    check.call("loopback is answered", hosted.allowed_host?("127.0.0.2:9931"), true)
+    check.call("an IPv6 loopback literal is answered", hosted.allowed_host?("[::1]:9931"), true)
+    check.call("a rebound host is refused", hosted.allowed_host?("evil.example.com"), false)
+    check.call("a lookalike host is refused", hosted.allowed_host?("localhost.evil.example.com"), false)
+    check.call("dispatch refuses a foreign host before identity",
+               hosted.dispatch("GET", "/api/_a2app", { "Host" => "evil.example.com" }, nil)[0], 403)
+    policy = lambda do |host, public_url|
+      Network.policy(host, public_url)
+    rescue ArgumentError
+      "refused"
+    end
+    check.call("loopback by default", policy.call(nil, nil), ["127.0.0.1", nil])
+    check.call("an https public URL is reduced to its origin", policy.call(nil, "https://CRM.example.com/x"),
+               ["127.0.0.1", "https://crm.example.com"])
+    check.call("a non-loopback bind needs a public URL", policy.call("0.0.0.0", nil), "refused")
+    check.call("…an https one", policy.call("0.0.0.0", "http://localhost:8080"), "refused")
+    check.call("a non-loopback bind behind https is allowed", policy.call("0.0.0.0", "https://crm.example.com"),
+               ["0.0.0.0", "https://crm.example.com"])
+    check.call("a plain-http public name is refused", policy.call(nil, "http://crm.example.com"), "refused")
+    check.call("a plain-http tunnel to loopback is allowed", policy.call(nil, "http://localhost:9000"),
+               ["127.0.0.1", "http://localhost:9000"])
+    check.call("a public URL that is not a URL is refused", policy.call(nil, "crm.example.com"), "refused")
+
     if failures.any?
       puts "a2app_adapter selftest FAILED:\n  - " + failures.join("\n  - ")
       return 1
     end
-    puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store)"
+    puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)"
     0
   end
 end

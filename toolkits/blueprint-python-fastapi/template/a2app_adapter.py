@@ -16,6 +16,7 @@ agent evolves the app by editing `schema.py`, never this file.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -25,7 +26,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 RULES_VERSION = "0.1.0"
 PROTOCOL_VERSION = "0.1"
@@ -89,6 +90,61 @@ _DATE_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?\s*(Z|[+-]\d{2}:?\d{2})?$"
 )
 _DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+# ---------------------------------------------------------------- network
+#
+# Where an app listens, and the address the rest of the world uses for it. The
+# one rule: a bearer token must never cross a network in clear, so binding a
+# non-loopback address needs an https public URL, and a public URL may be plain
+# http only when it names this machine (an SSH tunnel ends on loopback).
+
+
+def is_loopback_name(name: str) -> bool:
+    """Is `name` a loopback name or address? Accepts a bracketed IPv6 literal."""
+    bare = name.lower().strip("[]")
+    if bare == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
+def hostname_of(host: str) -> Optional[str]:
+    """The host name in a Host value (`name`, `name:port`, `[v6]:port`), or None."""
+    try:
+        return urlsplit("//" + host).hostname
+    except ValueError:
+        return None
+
+
+def network_policy(host_env: Optional[str], public_url_env: Optional[str]) -> tuple[str, Optional[str]]:
+    """Resolve (bind host, public origin) from A2APP_HOST / A2APP_PUBLIC_URL, or
+    raise ValueError with the reason the combination is unsafe."""
+    host = (host_env or "").strip() or "127.0.0.1"
+    public: Optional[str] = None
+    scheme = ""
+    raw = (public_url_env or "").strip()
+    if raw:
+        parts = urlsplit(raw)
+        scheme = parts.scheme.lower()
+        if not parts.netloc:
+            raise ValueError(f'A2APP_PUBLIC_URL is not a URL: "{raw}".')
+        if scheme not in ("http", "https"):
+            raise ValueError(f'A2APP_PUBLIC_URL must be an http(s) URL, not "{raw}".')
+        if scheme == "http" and not is_loopback_name(parts.hostname or ""):
+            raise ValueError(
+                f'A2APP_PUBLIC_URL must be https: "{raw}" would send the agent token across a network in clear. '
+                "Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address."
+            )
+        public = f"{scheme}://{parts.netloc.lower()}"
+    if not is_loopback_name(host) and scheme != "https":
+        raise ValueError(
+            f"A2APP_HOST={host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "
+            "(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
+        )
+    return host, public
 
 
 def _valid_ymd(y: int, m: int, d: int) -> bool:
@@ -827,6 +883,7 @@ class Adapter:
         token: str,
         modules: Optional[list[dict]] = None,
         allowed_origins: Optional[list[str]] = None,
+        public_url: Optional[str] = None,
         operation_runners: Optional[dict[str, Callable]] = None,
         events: Optional[list[dict]] = None,
         auth_mode: str = "none",
@@ -857,7 +914,17 @@ class Adapter:
         # firing.
         store.event_types = {e["type"] for e in events or []}
         self.auth_mode = auth_mode
-        self.allowed_origins = set(allowed_origins or [])
+        # The public URL (A2APP_PUBLIC_URL, resolved by network_policy) is one
+        # more of the app's own origins, and the hosts this app answers to are
+        # derived from those origins: reached at its public URL, it answers
+        # there and nowhere new.
+        self.allowed_origins = set(allowed_origins or []) | ({public_url} if public_url else set())
+        self.allowed_hosts: set[str] = set()
+        for origin in self.allowed_origins:
+            netloc = urlsplit(origin).netloc.lower()
+            if netloc:
+                self.allowed_hosts.add(netloc)
+                self.allowed_hosts.add(hostname_of(netloc) or "")
         self.runners = operation_runners or {}
         self.credential_hint = credential_hint or "Read the app's .agent-token file (mode 0600) in the project directory."
         self.env = env
@@ -1353,6 +1420,12 @@ class Adapter:
 
         return 200, self._fit_list(build, items)
 
+    def _is_allowed_host(self, raw: str) -> bool:
+        if raw.lower() in self.allowed_hosts:
+            return True
+        name = hostname_of(raw)
+        return name is not None and (is_loopback_name(name) or name in self.allowed_hosts)
+
     def dispatch(self, method: str, path: str, headers: dict, body: Optional[dict], query: Optional[dict] = None):
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         method = method.upper()
@@ -1362,6 +1435,13 @@ class Adapter:
             q.update({k: v[-1] for k, v in parse_qs(qs).items()})
         path = re.sub(r"/+$", "", path) or "/"
 
+        # Before any route, including the unauthenticated identity document,
+        # which is otherwise a free fingerprint of the app for a rebound page:
+        # binding loopback does not stop a page on evil.com whose DNS
+        # re-resolves to 127.0.0.1, but its Host header still says evil.com.
+        host = headers.get("host")
+        if host is not None and not self._is_allowed_host(host):
+            return self._err(403, "forbidden_host", f'Refused: this app answers only on its own host, not "{host}".')
         if path in ("/.well-known/a2app.json", "/api/_a2app"):
             return 200, self.identity()
         # Describe is navigational: the bare path is the root level, and each
@@ -1955,10 +2035,41 @@ def _selftest() -> int:
     swept = q_store.tasks[tid]
     check("redelivery is bounded", (swept["status"], swept["reason"]), ("failed", "redelivery_exhausted"))
 
+    # Host and network policy: the app answers only to loopback and its own
+    # origins (the public URL among them), and refuses to listen where the
+    # agent token would cross a network in clear.
+    hosted = Adapter(
+        app_id="selftest", app_name=None, entities={}, operations=[], store=Store(), token="t",
+        modules=[{"name": "core"}], allowed_origins=["http://127.0.0.1:9931"], public_url="https://crm.example.com",
+    )
+    check("the public host is answered", hosted._is_allowed_host("crm.example.com"), True)
+    check("…with an explicit port", hosted._is_allowed_host("crm.example.com:443"), True)
+    check("loopback is answered", hosted._is_allowed_host("127.0.0.2:9931"), True)
+    check("an IPv6 loopback literal is answered", hosted._is_allowed_host("[::1]:9931"), True)
+    check("a rebound host is refused", hosted._is_allowed_host("evil.example.com"), False)
+    check("a lookalike host is refused", hosted._is_allowed_host("localhost.evil.example.com"), False)
+    check("dispatch refuses a foreign host before identity", hosted.dispatch("GET", "/api/_a2app", {"Host": "evil.example.com"}, None)[0], 403)
+    check("the public origin is the app's own", "https://crm.example.com" in hosted.allowed_origins, True)
+
+    def policy(host: Optional[str], public: Optional[str]) -> Any:
+        try:
+            return network_policy(host, public)
+        except ValueError:
+            return "refused"
+
+    check("loopback by default", policy(None, None), ("127.0.0.1", None))
+    check("an https public URL is reduced to its origin", policy(None, "https://CRM.example.com/x"), ("127.0.0.1", "https://crm.example.com"))
+    check("a non-loopback bind needs a public URL", policy("0.0.0.0", None), "refused")
+    check("…an https one", policy("0.0.0.0", "http://localhost:8080"), "refused")
+    check("a non-loopback bind behind https is allowed", policy("0.0.0.0", "https://crm.example.com"), ("0.0.0.0", "https://crm.example.com"))
+    check("a plain-http public name is refused", policy(None, "http://crm.example.com"), "refused")
+    check("a plain-http tunnel to loopback is allowed", policy(None, "http://localhost:9000"), ("127.0.0.1", "http://localhost:9000"))
+    check("a public URL that is not a URL is refused", policy(None, "crm.example.com"), "refused")
+
     if failures:
         print("a2app_adapter selftest FAILED:\n  - " + "\n  - ".join(failures))
         return 1
-    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, task queue)")
+    print("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, task queue, host and network policy)")
     return 0
 
 

@@ -22,12 +22,22 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from a2app_adapter import Adapter, SqliteStore
+import sys
+
+from a2app_adapter import Adapter, SqliteStore, network_policy
 import schema
 
 HERE = Path(__file__).resolve().parent
 manifest = json.loads((HERE / "manifest.json").read_text())
 PORT = int(os.environ.get("PORT", manifest.get("port", 8090)))
+
+# Where to listen, and the address people and agents use (A2APP_HOST,
+# A2APP_PUBLIC_URL). A combination that would send the agent token across a
+# network in clear is refused here, before anything is opened.
+try:
+    HOST, PUBLIC_URL = network_policy(os.environ.get("A2APP_HOST"), os.environ.get("A2APP_PUBLIC_URL"))
+except ValueError as e:
+    sys.exit(str(e))
 DATA_DIR = Path(os.environ.get("A2APP_DATA_DIR", HERE / "data")).resolve()
 
 
@@ -57,6 +67,7 @@ adapter = Adapter(
     # lists; every entity and operation names one.
     modules=manifest.get("modules", []),
     allowed_origins=[f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"],
+    public_url=PUBLIC_URL,
     operation_runners=schema.OPERATION_RUNNERS,
     # The event types this app may emit. A runner's `store.trigger` refuses a
     # type that is not declared here, so the set of things the app can ever ask
@@ -127,11 +138,16 @@ async def a2app_route(path: str, request: Request):
 
 
 @app.get("/.well-known/a2app.json")
-async def wellknown():
-    return JSONResponse(content=adapter.identity())
+async def wellknown(request: Request):
+    # Through dispatch, so the identity document gets the same Host check as
+    # every other route.
+    status, payload = adapter.dispatch("GET", "/.well-known/a2app.json", dict(request.headers), None)
+    return JSONResponse(status_code=status, content=payload)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=PORT)
+    # Bind the address network_policy resolved (loopback unless the owner
+    # deliberately exposed the app).
+    uvicorn.run(app, host=HOST, port=PORT)

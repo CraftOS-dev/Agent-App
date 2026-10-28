@@ -5,17 +5,23 @@
 # `bundle exec puma -C config/puma.rb`. The CLI reaches a running app at the
 # manifest's port, so the two must always agree.
 require "json"
+require_relative "../lib/a2app_adapter"
 
 manifest = JSON.parse(File.read(File.expand_path("../manifest.json", __dir__)))
 port = Integer(ENV.fetch("PORT") { manifest["port"] || 8096 })
 
-# Bind loopback explicitly. Binding every interface would make the app
-# reachable from the network while its own log line said localhost — and a
-# same-origin request is trusted as the owner without a credential, which
-# would make a scaffolded Agent App remotely writable by anyone who could
-# reach the port. Exposing it must be a deliberate act, hence the env var.
-host = ENV.fetch("A2APP_HOST", "127.0.0.1")
-bind "tcp://#{host}:#{port}"
+# Where to listen, and the address people and agents use (A2APP_HOST,
+# A2APP_PUBLIC_URL). Loopback unless the owner deliberately exposed the app:
+# a same-origin request is trusted as the owner without a credential, so an
+# app listening on the network by accident would be writable by anyone who
+# could reach the port. A combination that would send the agent token across
+# a network in clear is refused here, before anything is bound.
+begin
+  host, = A2appAdapter::Network.policy(ENV["A2APP_HOST"], ENV["A2APP_PUBLIC_URL"])
+rescue ArgumentError => e
+  abort e.message
+end
+bind "tcp://#{(IPAddr.new(host).ipv6? rescue false) ? "[#{host}]" : host}:#{port}"
 
 # Single mode (no workers): one process, a thread pool, one SQLite
 # connection guarded by one mutex in the adapter's store. Forked workers

@@ -456,6 +456,11 @@ fn serve() -> Result<(), String> {
     // it is system-owned, and the View is the agent's to rewrite entirely.
     let update_js = PathBuf::from("a2app-update.js");
 
+    // Where to listen, and the address people and agents use (A2APP_HOST,
+    // A2APP_PUBLIC_URL). A combination that would send the agent token across
+    // a network in clear is refused here, before anything is opened.
+    let (host, public_url) = a2app_adapter::network_policy(std::env::var("A2APP_HOST").ok(), std::env::var("A2APP_PUBLIC_URL").ok())?;
+
     let token = agent_token()?;
     let allowed_origins = vec![
         format!("http://localhost:{port}"),
@@ -483,6 +488,7 @@ fn serve() -> Result<(), String> {
         // level lists; every entity and operation names one.
         modules: manifest.get("modules").cloned().unwrap_or_else(|| json!([])),
         allowed_origins,
+        public_url: public_url.clone(),
         runner_lookup: schema::operation_runner,
         // The event types this app may emit. A runner's `store.trigger` refuses
         // a type that is not declared here, so the set of things the app can
@@ -494,12 +500,10 @@ fn serve() -> Result<(), String> {
         app_version: Some(version_fn),
     })?;
 
-    // Bind loopback explicitly. Binding every interface would make the app
-    // reachable from the network while its own log line said localhost — and a
-    // same-origin request is trusted as the owner without a credential, which
-    // would make a scaffolded Agent App remotely writable by anyone who could
-    // reach the port. Exposing it must be a deliberate act, hence the env var.
-    let host = std::env::var("A2APP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    // Bind the address network_policy resolved (loopback unless the owner
+    // deliberately exposed the app): a same-origin request is trusted as the
+    // owner without a credential, so an app listening on the network by
+    // accident would be writable by anyone who could reach the port.
     let server = tiny_http::Server::http((host.as_str(), port))
         .map_err(|e| format!("cannot bind http://{host}:{port}: {e}"))?;
 

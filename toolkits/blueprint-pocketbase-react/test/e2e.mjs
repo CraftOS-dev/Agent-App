@@ -227,6 +227,28 @@ try {
     check("an open run is still recognised after a restart", repeat.json?.result?.queued, open?.id);
   }
 
+  console.log("reached at a public URL");
+  {
+    await stop();
+    const exposed = await launchOnce({ A2APP_HOST: "0.0.0.0" });
+    ok("a network bind without an https public URL refuses to start", exposed.code !== 0 && /A2APP_PUBLIC_URL/.test(exposed.output));
+    const clear = await launchOnce({ A2APP_PUBLIC_URL: "http://crm.example.com" });
+    ok("a plain-http public name refuses to start", clear.code !== 0 && /https/.test(clear.output));
+
+    await start({ A2APP_PUBLIC_URL: "https://crm.example.com" });
+    const pub = { Host: "crm.example.com" };
+    check("the public host is answered", (await rawRequest("GET", "/api/_a2app", pub)).status, 200);
+    check("…and its records read", (await rawRequest("GET", "/api/collections/tasks/records", pub)).status, 200);
+    const viewWrite = await rawRequest("POST", "/api/collections/tasks/records", { ...pub, Origin: "https://crm.example.com" }, { title: "from the public View", status: "todo" });
+    check("the View at the public origin can write", viewWrite.status, 200);
+    const cors = await http("GET", records, { headers: { Origin: "https://crm.example.com" } });
+    check("CORS answers the public origin", cors.headers.get("access-control-allow-origin"), "https://crm.example.com");
+    check("another host is still refused", (await rawRequest("GET", "/api/_a2app", { Host: "evil.example" })).status, 403);
+    check("an http origin on the public name is not the app's", (await rawRequest("POST", "/api/collections/tasks/records", { ...pub, Origin: "http://crm.example.com" }, { title: "x", status: "todo" })).status, 403);
+    await stop();
+    await start();
+  }
+
   if (process.env.E2E_SLOW === "1") {
     console.log("abandoned claim (waits 65 s)");
     const open = (await tasks()).find((t) => t.status === "submitted");
@@ -246,10 +268,31 @@ if (failures.length) process.exit(1);
 
 /* ----------------------------------------------------------------- helpers */
 
-async function start() {
+function launchEnv(extra = {}) {
+  const env = { ...process.env, PORT: String(port), A2APP_DATA_DIR: join(dir, "pb", "pb_data"), ...extra };
+  for (const key of ["A2APP_HOST", "A2APP_PUBLIC_URL"]) if (!(key in extra)) delete env[key];
+  return env;
+}
+
+/** Run the launcher with `extra` env and wait for it to exit (for a launch that must refuse). */
+function launchOnce(extra) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, ["pb-serve.mjs"], { cwd: dir, env: launchEnv(extra), windowsHide: true });
+    let output = "";
+    child.stdout.on("data", (d) => (output += d));
+    child.stderr.on("data", (d) => (output += d));
+    const timer = setTimeout(() => child.kill(), 15_000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      done({ code, output });
+    });
+  });
+}
+
+async function start(extra = {}) {
   server = spawn(process.execPath, ["pb-serve.mjs"], {
     cwd: dir,
-    env: { ...process.env, PORT: String(port), A2APP_DATA_DIR: join(dir, "pb", "pb_data") },
+    env: launchEnv(extra),
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
     windowsHide: true,
@@ -320,11 +363,17 @@ async function http(method, url, { headers = {}, json, timeoutMs = 5000 } = {}) 
   }
 }
 
-/** fetch() drops a Host header (a forbidden header name), so the DNS-rebinding
- *  check goes through node:http, which sends what it is given. */
+/** fetch() drops a Host header (a forbidden header name), so the host checks
+ *  go through node:http, which sends what it is given. */
 function rawGet(path, headers) {
+  return rawRequest("GET", path, headers);
+}
+
+function rawRequest(method, path, headers, json) {
   return new Promise((done, fail) => {
-    const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
+    const body = json === undefined ? null : JSON.stringify(json);
+    const all = body === null ? headers : { ...headers, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) };
+    const req = request({ host: "127.0.0.1", port, path, method, headers: all }, (res) => {
       let text = "";
       res.on("data", (d) => (text += d));
       res.on("end", () => {
@@ -338,7 +387,7 @@ function rawGet(path, headers) {
       });
     });
     req.on("error", fail);
-    req.end();
+    req.end(body ?? undefined);
   });
 }
 

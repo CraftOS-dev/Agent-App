@@ -921,22 +921,48 @@ function credentialRefusal(e, kind) {
 
 const FOREIGN_ORIGIN = { status: 403, code: "forbidden_origin", message: "Refused: request Origin is not this app's own." };
 
-/** A refusal if the Host is not a loopback name, else null. A page on evil.com
- *  whose DNS re-resolves to 127.0.0.1 sends no Origin on a GET, but its Host
- *  header still says evil.com. */
+/** A refusal if the Host is not one this app answers to, else null: a loopback
+ *  name, or the host of A2APP_PUBLIC_URL. A page on evil.com whose DNS
+ *  re-resolves to 127.0.0.1 sends no Origin on a GET, but its Host header still
+ *  says evil.com. */
 function refuseHost(e) {
   const host = String(e.request.host || "").toLowerCase();
-  const name = host.indexOf("[") === 0 ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
-  const loopback = name === "localhost" || name === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
-  if (loopback) return null;
+  const name = hostnameOf(host);
+  const pub = publicOrigin();
+  if (isLoopbackName(name) || (pub !== "" && name === hostnameOf(pub.slice(pub.indexOf("//") + 2)))) return null;
   return { status: 403, code: "forbidden_host", message: `Refused: this app answers only on its own host, not "${host}".` };
 }
 
-/** "none" (a program, or a same-origin GET), "own" (this app's View) or "foreign". */
+/** "none" (a program, or a same-origin GET), "own" (this app's View) or "foreign".
+ *  The View is reached on loopback (`http://<Host>`) or at the public URL. */
 function originOf(e) {
-  const origin = header(e, "Origin");
+  const origin = header(e, "Origin").toLowerCase();
   if (origin === "") return "none";
-  return origin.toLowerCase() === `http://${String(e.request.host || "").toLowerCase()}` ? "own" : "foreign";
+  const host = String(e.request.host || "").toLowerCase();
+  if (origin === publicOrigin()) return "own";
+  return isLoopbackName(hostnameOf(host)) && origin === `http://${host}` ? "own" : "foreign";
+}
+
+/** The origin people and agents reach the app at, normalized by pb-serve.mjs
+ *  (which refuses an unsafe one before PocketBase starts), or "". */
+function publicOrigin() {
+  return String($os.getenv("A2APP_PUBLIC_URL") || "").toLowerCase();
+}
+
+/** The host name in a Host value: `name`, `name:port`, or `[v6]:port`. */
+function hostnameOf(host) {
+  return host.indexOf("[") === 0 ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+}
+
+function isLoopbackName(name) {
+  if (name === "localhost" || name === "[::1]") return true;
+  const parts = name.split(".");
+  if (parts.length !== 4 || parts[0] !== "127") return false;
+  for (let i = 0; i < 4; i++) {
+    const n = Number(parts[i]);
+    if (parts[i] === "" || !Number.isInteger(n) || n < 0 || n > 255) return false;
+  }
+  return true;
 }
 
 /** "none", "valid" or "wrong": the agent token from `.agent-token`, sent as X-A2App-Token. */

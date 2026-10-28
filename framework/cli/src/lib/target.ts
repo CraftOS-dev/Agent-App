@@ -115,8 +115,8 @@ async function noIdentity(target: RemoteTarget): Promise<UsageError> {
         `${target.origin} is an Agent App, but it does not answer to that hostname.\n` +
           `It replied ${res.status} forbidden_host: an adapter serves only the hosts it is configured for, ` +
           `and a deployed app receives its public hostname in \`Host\`.\n` +
-          `This is the owner's to fix — the app's adapter needs "${new URL(target.baseUrl).host}" in its ` +
-          `allowedHosts (or an allowedOrigins entry carrying it). Nothing you can send will change the answer.`,
+          `This is the owner's to fix — the app is started with A2APP_PUBLIC_URL=${target.origin} ` +
+          `(behind TLS). Nothing you can send will change the answer.`,
       );
     }
     if (res.status === 401 || res.status === 403) {

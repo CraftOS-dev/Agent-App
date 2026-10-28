@@ -10,7 +10,7 @@
  * `schemaVersion` are derived from the live schema, an agent always sees the
  * true model.
  */
-import { createA2App, createStaticView, UnsupportedFilterError } from "@a2app/adapter-core";
+import { createA2App, createStaticView, networkPolicy, UnsupportedFilterError } from "@a2app/adapter-core";
 import { serve } from "@hono/node-server";
 import { RESPONSE_ALREADY_SENT } from "@hono/node-server/utils/response";
 import { Hono } from "hono";
@@ -43,6 +43,19 @@ const manifest = JSON.parse(readFileSync(join(HERE, "manifest.json"), "utf8"));
 // always agree. PORT env overrides (`serve` passes manifest.port; `dev` a
 // hidden port), then manifest.port.
 const PORT = Number(process.env.PORT ?? manifest.port ?? 8091);
+
+// Where to listen, and the address people and agents use (A2APP_HOST,
+// A2APP_PUBLIC_URL). Loopback unless the owner says otherwise; a combination
+// that would send the agent token across a network in clear is refused here,
+// before anything is opened.
+let NETWORK;
+try {
+  NETWORK = networkPolicy({ host: process.env.A2APP_HOST, publicUrl: process.env.A2APP_PUBLIC_URL });
+} catch (e) {
+  process.stderr.write(`${e.message}
+`);
+  process.exit(1);
+}
 
 /* ----------------------------------------------------------- persistence */
 
@@ -321,6 +334,7 @@ const a2app = createA2App(binding, {
   // lists; every entity and operation names one.
   modules: manifest.modules,
   allowedOrigins: [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`],
+  publicUrl: NETWORK.publicUrl,
   credentialHint: "Read the app's .agent-token file (mode 0600) in the project directory.",
   // Adapter-owned state (idempotency keys, tasks, events, grants, audit) lives
   // beside the records, inside the toolkit's declared lifecycle dataDir. The
@@ -429,14 +443,18 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
-// Bind loopback explicitly. Binding every interface would make the app
-// reachable from the network while its own log line said localhost — and a
-// same-origin request is trusted as the owner without a credential, which
-// would make a scaffolded Agent App remotely writable by anyone who could
-// reach the port. Exposing it must be a deliberate act, hence the env var.
-const HOST = process.env.A2APP_HOST ?? "127.0.0.1";
+// Bind loopback unless the owner deliberately exposed the app (NETWORK, above):
+// a same-origin request is trusted as the owner without a credential, so an
+// app listening on the network by accident would be writable by anyone who
+// could reach the port.
+const HOST = NETWORK.host;
 const server = serve({ fetch: hono.fetch, port: PORT, hostname: HOST }, () => {
-  logLine("info", "boot", { app: manifest.name ?? manifest.id, a2appId: manifest.id, url: `http://${HOST}:${PORT}` });
+  logLine("info", "boot", {
+    app: manifest.name ?? manifest.id,
+    a2appId: manifest.id,
+    url: `http://${HOST}:${PORT}`,
+    ...(NETWORK.publicUrl ? { publicUrl: NETWORK.publicUrl } : {}),
+  });
 });
 
 // Observe (never handle) every request for the log: id, method, path, status,

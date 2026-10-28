@@ -105,6 +105,8 @@ class A2appController < ActionController::Base
         # level lists; every entity and operation names one.
         modules: manifest["modules"] || [],
         allowed_origins: ["http://localhost:#{port}", "http://127.0.0.1:#{port}"],
+        # config/puma.rb already refused an unsafe combination before binding.
+        public_url: A2appAdapter::Network.policy(ENV["A2APP_HOST"], ENV["A2APP_PUBLIC_URL"])[1],
         operation_runners: A2appSchema::OPERATION_RUNNERS,
         # The event types this app may emit. A runner's `store.trigger` refuses
         # a type that is not declared here, so the set of things the app can

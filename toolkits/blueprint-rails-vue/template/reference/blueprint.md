@@ -273,6 +273,36 @@ writes to the record instead. Render queued → working (`progress.step`) → do
 failed (`reason`, plus a way to ask again). The creator skill lists the states.
 A button that goes quiet after it queues work looks broken.
 
+## Reaching the app from another machine
+
+The app listens on loopback and answers only to its own names. To let people and
+agents reach it from elsewhere, tell it the address they will use, with
+`A2APP_PUBLIC_URL`:
+
+- **Behind a TLS proxy (recommended).** Keep the default bind (`A2APP_HOST`
+  unset: loopback), put a proxy that terminates TLS in front, and serve with the
+  public address. With Caddy, which keeps the original `Host`:
+
+      crm.example.com {
+          reverse_proxy 127.0.0.1:<port>
+      }
+
+      A2APP_PUBLIC_URL=https://crm.example.com agent-app <dir> serve
+
+  An agent elsewhere then operates it as `a2app https://crm.example.com`, with
+  a credential the owner gives it.
+- **Through an SSH tunnel.** Nothing to configure: `ssh -L 9000:127.0.0.1:<port>
+  <host>`, then `a2app http://localhost:9000`. The tunnel ends on loopback, and
+  carries the token encrypted.
+- **Listening on the network directly** (`A2APP_HOST=0.0.0.0`) needs an `https`
+  `A2APP_PUBLIC_URL`; otherwise the app refuses to start, because the agent
+  token would cross the network in clear. A plain-`http` public URL is refused
+  for the same reason unless it names this machine (a tunnel).
+
+A request under any other host name is refused `403 forbidden_host`: the app
+answers only to loopback and the host of `A2APP_PUBLIC_URL`. That refusal is
+also what stops a page whose DNS re-resolves to 127.0.0.1 from reading the app.
+
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything (`install` → `build` → `start`,

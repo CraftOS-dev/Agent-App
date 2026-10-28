@@ -531,6 +531,13 @@ func serveApp() {
 			port = p
 		}
 	}
+	// Where to listen, and the address people and agents use (A2APP_HOST,
+	// A2APP_PUBLIC_URL). A combination that would send the agent token across
+	// a network in clear is refused here, before anything is opened.
+	host, publicURL, err := NetworkPolicy(os.Getenv("A2APP_HOST"), os.Getenv("A2APP_PUBLIC_URL"))
+	if err != nil {
+		fatal(err.Error())
+	}
 	envName := os.Getenv("A2APP_ENV")
 	if envName == "" {
 		envName = "live"
@@ -595,6 +602,7 @@ func serveApp() {
 		// level lists; every entity and operation names one.
 		Modules:        toMList(manifest["modules"]),
 		AllowedOrigins: []string{fmt.Sprintf("http://localhost:%d", port), fmt.Sprintf("http://127.0.0.1:%d", port)},
+		PublicURL:      publicURL,
 		Runners:        OPERATION_RUNNERS,
 		// The event types this app may emit. A runner's store.trigger refuses a
 		// type that is not declared here, so the set of things the app can ever
@@ -656,6 +664,9 @@ func serveApp() {
 				headers[strings.ToLower(k)] = vs[0]
 			}
 		}
+		// net/http moves Host out of the header map; the adapter's host check
+		// needs it back.
+		headers["host"] = r.Host
 		query := map[string]string{}
 		for k, vs := range r.URL.Query() {
 			if len(vs) > 0 {
@@ -707,15 +718,10 @@ func serveApp() {
 		view.serveHTTP(rec, r)
 	})
 
-	// Bind loopback explicitly. Binding every interface would make the app
-	// reachable from the network while its own log line said localhost — and a
-	// same-origin request is trusted as the owner without a credential, which
-	// would make a scaffolded Agent App remotely writable by anyone who could
-	// reach the port. Exposing it must be a deliberate act, hence the env var.
-	host := os.Getenv("A2APP_HOST")
-	if host == "" {
-		host = "127.0.0.1"
-	}
+	// Bind the address NetworkPolicy resolved (loopback unless the owner
+	// deliberately exposed the app): a same-origin request is trusted as the
+	// owner without a credential, so an app listening on the network by
+	// accident would be writable by anyone who could reach the port.
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		logLine("error", "crash", M{"message": err.Error()})

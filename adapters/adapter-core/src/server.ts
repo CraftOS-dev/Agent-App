@@ -35,6 +35,7 @@ import { AGENT_TEXT, boundAppText } from "./agentText.js";
 import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
+import { hostnameOf, isLoopbackName } from "./network.js";
 import {
   OperationError,
   UnsupportedFilterError,
@@ -112,11 +113,14 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   const operations = config.operations ?? [];
   const opByName = new Map(operations.map((o) => [o.name, o]));
   const eventTypes = knownEventTypes(config.events);
-  const allowedOrigins = new Set(config.allowedOrigins ?? []);
+  // The public URL is one more origin of the app's own: people open the View
+  // there, and agents reach the app there.
+  const ownOrigins = [...(config.allowedOrigins ?? []), ...(config.publicUrl ? [new URL(config.publicUrl).origin] : [])];
+  const allowedOrigins = new Set(ownOrigins);
   // Host names this app will answer to. Derived from the origins it already
   // declares, so an app that configures its own UI origin keeps working.
   const allowedHosts = new Set((config.allowedHosts ?? []).map((h) => h.toLowerCase()));
-  for (const origin of config.allowedOrigins ?? []) {
+  for (const origin of ownOrigins) {
     try {
       allowedHosts.add(new URL(origin).host.toLowerCase());
     } catch {
@@ -453,12 +457,9 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
    * carries `evil.com`, because that is the name the page was fetched from.
    */
   function isAllowedHost(raw: string): boolean {
-    const host = raw.toLowerCase();
-    if (allowedHosts.has(host)) return true;
-    // Strip the port; an IPv6 literal is bracketed, so scan past the bracket.
-    const name = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : (host.split(":")[0] ?? "");
-    if (name === "localhost" || name === "[::1]" || name === "::1") return true;
-    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
+    if (allowedHosts.has(raw.toLowerCase())) return true;
+    const name = hostnameOf(raw);
+    return name !== null && (isLoopbackName(name) || allowedHosts.has(name));
   }
 
   function isForeignOrigin(req: A2AppRequest): boolean {

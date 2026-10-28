@@ -16,3 +16,5 @@ serde_json = "1"
 # build is slow for exactly that reason, and fast ever after.
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+# Parses A2APP_PUBLIC_URL and Host header values (see network_policy).
+url = "2"

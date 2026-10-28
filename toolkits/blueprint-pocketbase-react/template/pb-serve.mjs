@@ -43,6 +43,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { isIPv4, isIPv6 } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -64,6 +65,57 @@ const migrationsDir = join(pbDir, "pb_migrations");
 const publicSrc = join(pbDir, "pb_public");
 
 const migrateMode = process.argv.includes("--migrate");
+
+/**
+ * Where to listen (A2APP_HOST, default loopback) and the address people and
+ * agents use (A2APP_PUBLIC_URL). The same rule every Agent App adapter applies:
+ * a bearer token must never cross a network in clear, so a non-loopback bind
+ * needs an https public URL, and a public URL may be plain http only when it
+ * names this machine (an SSH tunnel). The hooks read the normalized origin
+ * back from the environment PocketBase inherits.
+ */
+function isLoopbackName(name) {
+  const n = name.toLowerCase();
+  return n === "localhost" || n === "::1" || n === "[::1]" || (isIPv4(n) && n.split(".")[0] === "127");
+}
+function networkPolicy() {
+  const host = process.env.A2APP_HOST?.trim() || "127.0.0.1";
+  const raw = process.env.A2APP_PUBLIC_URL?.trim();
+  let pub = null;
+  if (raw) {
+    try {
+      pub = new URL(raw);
+    } catch {
+      throw new Error(`A2APP_PUBLIC_URL is not a URL: "${raw}".`);
+    }
+    if (pub.protocol !== "https:" && pub.protocol !== "http:") throw new Error(`A2APP_PUBLIC_URL must be an http(s) URL, not "${raw}".`);
+    if (pub.protocol === "http:" && !isLoopbackName(pub.hostname)) {
+      throw new Error(
+        `A2APP_PUBLIC_URL must be https: "${raw}" would send the agent token across a network in clear. ` +
+          `Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address.`,
+      );
+    }
+  }
+  if (!isLoopbackName(host) && pub?.protocol !== "https:") {
+    throw new Error(
+      `A2APP_HOST=${host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address ` +
+        `(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1.`,
+    );
+  }
+  return { host, publicUrl: pub ? pub.origin : null };
+}
+// `--migrate` binds nothing, so only a serving launch is held to it.
+let network = { host: "127.0.0.1", publicUrl: null };
+if (!migrateMode) {
+  try {
+    network = networkPolicy();
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
+if (network.publicUrl) process.env.A2APP_PUBLIC_URL = network.publicUrl;
+else delete process.env.A2APP_PUBLIC_URL;
 if (!migrateMode && !port) {
   console.error("no port to bind: set PORT in the environment or `port` in manifest.json");
   process.exit(1);
@@ -200,7 +252,7 @@ if (migrateMode) {
     [
       "serve",
       "--http",
-      `127.0.0.1:${port}`,
+      `${isIPv6(network.host) ? `[${network.host}]` : network.host}:${port}`,
       "--dir",
       dataDir,
       "--hooksDir",
@@ -212,7 +264,7 @@ if (migrateMode) {
       // PocketBase answers CORS for every origin by default; only the app's own
       // View should be able to read a response. The hooks also refuse a foreign
       // Origin outright — this keeps the browser from even seeing the answer.
-      `--origins=http://127.0.0.1:${port},http://localhost:${port}`,
+      `--origins=${[`http://127.0.0.1:${port}`, `http://localhost:${port}`, ...(network.publicUrl ? [network.publicUrl] : [])].join(",")}`,
       // The access middleware in pb/pb_hooks wraps every request, so each open
       // realtime connection holds a hook runtime for its whole life. The
       // default pool is 15; past it PocketBase builds a throwaway runtime per

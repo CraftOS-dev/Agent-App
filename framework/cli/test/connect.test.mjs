@@ -270,7 +270,7 @@ await withHome(async () => {
     ok("it is NOT reported as 'not an Agent App'", err !== null && !/Not an Agent App/.test(err.message));
     ok("the cause is named", err !== null && /forbidden_host/.test(err.message));
     ok("the fix is attributed to the owner", err !== null && /owner's to fix/.test(err.message));
-    ok("the setting to change is named", err !== null && /allowedHosts/.test(err.message));
+    ok("the setting to change is named", err !== null && /A2APP_PUBLIC_URL/.test(err.message));
     check("nothing is pinned for an app that would not answer", pinnedAppId(originOf(base)), null);
   } finally {
     await new Promise((resolve) => server.close(resolve));

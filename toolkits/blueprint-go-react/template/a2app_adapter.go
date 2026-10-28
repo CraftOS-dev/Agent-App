@@ -8,6 +8,12 @@
 // driver, so the stack builds without cgo), and the live database is a real
 // on-disk file inside the toolkit's declared lifecycle dataDir.
 //
+// Protocol 0.2 (spec/v0_2/auth.md) adds who a request acts for: principals,
+// delegated agent credentials stored only as hashes, the user ceiling, and on
+// `authMode: multi-user` accounts, sessions, invites, record ownership and
+// device-code sign-in. Parity oracle: adapters/adapter-core/src (auth.ts,
+// accounts.ts, credentials.ts, device.ts, server.ts).
+//
 // The pure validation rules below MUST match `@a2app/rules` — and the Python
 // port in blueprint-python-fastapi, which is this file's line-for-line oracle —
 // so a Go app and a Node app reject identical payloads identically, verified by
@@ -16,13 +22,19 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -45,7 +57,7 @@ type M = map[string]any
 
 const (
 	RULES_VERSION    = "0.1.0"
-	PROTOCOL_VERSION = "0.1"
+	PROTOCOL_VERSION = "0.2"
 	ADAPTER_VERSION  = "0.1.0"
 )
 
@@ -876,6 +888,351 @@ func (l *rateLimiter) check(caller, cls string) rateDecision {
 	return rateDecision{allowed: true, limit: limit}
 }
 
+/* --------------------------------------------------------- auth primitives */
+// The security primitives behind accounts, sessions, invites, device codes and
+// credentials (spec/v0_2/auth.md). Parity oracle: adapter-core auth.ts. Kept
+// apart from the served surface so each rule — what a secret looks like, how
+// it is stored, how a password is checked — is written once.
+//
+// Every secret the app hands out (tokens, session ids, invite codes, device
+// codes) is 256 random bits, returned once, and stored only as its SHA-256.
+// Passwords are PBKDF2-SHA256 at 600 000 iterations (OWASP), compared in
+// constant time.
+
+func randomBytes(n int) []byte {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		panic(err) // the OS entropy source failing is not a recoverable request error
+	}
+	return buf
+}
+
+// newSecret is 256 random bits, base64url (43 chars).
+func newSecret() string { return base64.RawURLEncoding.EncodeToString(randomBytes(32)) }
+
+// newToken is an agent credential token: `a2a_` + 256 random bits.
+func newToken() string { return "a2a_" + newSecret() }
+
+// hashSecret is how a secret is stored and looked up: hex SHA-256 of the
+// whole string.
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// newID is an id that is not a secret: `prefix_` + 64 random bits, hex.
+func newID(prefix string) string { return prefix + "_" + randomHex(8) }
+
+const (
+	pbkdf2Iterations = 600_000
+	pbkdf2KeyBytes   = 32
+	pbkdf2SaltBytes  = 16
+	passwordMin      = 10
+	passwordMax      = 256
+)
+
+// pbkdf2SHA256 is PBKDF2 (RFC 8018 §5.2) over HMAC-SHA256. Go 1.22's standard
+// library has none, and it is a few lines — not worth a module dependency.
+func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
+	prf := hmac.New(sha256.New, password)
+	out := make([]byte, 0, keyLen+prf.Size())
+	index := make([]byte, 4)
+	for block := uint32(1); len(out) < keyLen; block++ {
+		prf.Reset()
+		prf.Write(salt)
+		binary.BigEndian.PutUint32(index, block)
+		prf.Write(index)
+		u := prf.Sum(nil)
+		t := append([]byte(nil), u...)
+		for n := 1; n < iterations; n++ {
+			prf.Reset()
+			prf.Write(u)
+			u = prf.Sum(u[:0])
+			for i := range t {
+				t[i] ^= u[i]
+			}
+		}
+		out = append(out, t...)
+	}
+	return out[:keyLen]
+}
+
+// hashPassword is `pbkdf2_sha256$<iterations>$<salt b64>$<hash b64>` — the
+// format adapter-core writes, so a stored hash means the same on every stack.
+func hashPassword(password string, iterations int) string {
+	salt := randomBytes(pbkdf2SaltBytes)
+	key := pbkdf2SHA256([]byte(password), salt, iterations, pbkdf2KeyBytes)
+	return "pbkdf2_sha256$" + strconv.Itoa(iterations) + "$" +
+		base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key)
+}
+
+// verifyPassword is a constant-time check of password against a stored hash.
+// A malformed hash never matches.
+func verifyPassword(password, stored string) bool {
+	parts := strings.Split(stored, "$")
+	if len(parts) != 4 || parts[0] != "pbkdf2_sha256" {
+		return false
+	}
+	iterations, err := strconv.Atoi(parts[1])
+	if err != nil || iterations < 1 {
+		return false
+	}
+	salt, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	expected, err := base64.StdEncoding.DecodeString(parts[3])
+	if err != nil || len(expected) == 0 {
+		return false
+	}
+	actual := pbkdf2SHA256([]byte(password), salt, iterations, len(expected))
+	return subtle.ConstantTimeCompare(actual, expected) == 1
+}
+
+// Consonants only (RFC 8628 §6.1): no vowels, so no words; no look-alikes.
+const userCodeAlphabet = "BCDFGHJKLMNPQRSTVWXZ"
+
+// newUserCode is `XXXX-XXXX` from userCodeAlphabet.
+func newUserCode() string {
+	letters := make([]byte, 8)
+	for i := range letters {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(userCodeAlphabet))))
+		if err != nil {
+			panic(err)
+		}
+		letters[i] = userCodeAlphabet[n.Int64()]
+	}
+	return string(letters[:4]) + "-" + string(letters[4:])
+}
+
+// normalizeUserCode is a user code as typed: case and the dash do not matter.
+// "" when it is not one.
+func normalizeUserCode(input string) string {
+	letters := []rune{}
+	for _, c := range strings.ToUpper(input) {
+		if strings.ContainsRune(userCodeAlphabet, c) {
+			letters = append(letters, c)
+		}
+	}
+	if len(letters) != 8 {
+		return ""
+	}
+	return string(letters[:4]) + "-" + string(letters[4:])
+}
+
+// parseCookies is a `Cookie` header's name/value pairs (the first occurrence
+// of a name wins; a value this app could not have written is skipped).
+func parseCookies(header string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(header, ";") {
+		eq := strings.Index(part, "=")
+		if eq <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(part[:eq])
+		if _, seen := out[name]; seen {
+			continue
+		}
+		if value, err := url.PathUnescape(strings.TrimSpace(part[eq+1:])); err == nil {
+			out[name] = value
+		}
+	}
+	return out
+}
+
+// sessionCookie is a `Set-Cookie` value for the session cookie. A maxAge of 0
+// clears it.
+func sessionCookie(name, value string, maxAgeSeconds int, secure bool) string {
+	attrs := []string{name + "=" + url.PathEscape(value), "Path=/", "HttpOnly", "SameSite=Lax",
+		"Max-Age=" + strconv.Itoa(maxAgeSeconds)}
+	if secure {
+		attrs = append(attrs, "Secure")
+	}
+	return strings.Join(attrs, "; ")
+}
+
+// failureLimiter counts failures per key in a fixed window (sign-in failures
+// per login). In memory: a restart forgets them, which costs an attacker
+// nothing they could not get by waiting out the window.
+type failureLimiter struct {
+	mu      sync.Mutex
+	max     int
+	window  time.Duration
+	now     func() time.Time
+	windows map[string]failureWindow
+}
+
+type failureWindow struct {
+	count int
+	start time.Time
+}
+
+func newFailureLimiter(max int, window time.Duration, now func() time.Time) *failureLimiter {
+	return &failureLimiter{max: max, window: window, now: now, windows: map[string]failureWindow{}}
+}
+
+// retryAfter is the seconds until key may try again, or 0 when it may now.
+func (l *failureLimiter) retryAfter(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w, ok := l.windows[key]
+	if !ok {
+		return 0
+	}
+	elapsed := l.now().Sub(w.start)
+	if elapsed >= l.window {
+		delete(l.windows, key)
+		return 0
+	}
+	if w.count < l.max {
+		return 0
+	}
+	return int(math.Ceil((l.window - elapsed).Seconds()))
+}
+
+func (l *failureLimiter) fail(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := l.now()
+	w, ok := l.windows[key]
+	if !ok || t.Sub(w.start) >= l.window {
+		l.windows[key] = failureWindow{count: 1, start: t}
+		return
+	}
+	w.count++
+	l.windows[key] = w
+}
+
+func (l *failureLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.windows, key)
+}
+
+// normalizeLogin is a login as stored and compared: trimmed, lower-cased.
+func normalizeLogin(login string) string { return strings.ToLower(strings.TrimSpace(login)) }
+
+// jsLength is a string's length as the protocol's limits count it (UTF-16
+// code units, as JavaScript's .length does), so a limit means the same
+// characters on every stack.
+func jsLength(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+const isoLayout = "2006-01-02T15:04:05.000Z"
+
+// isoOf renders a time the way every timestamp on this surface is written.
+func isoOf(t time.Time) string { return t.UTC().Format(isoLayout) }
+
+// parseISO reads a timestamp this adapter wrote; false when it is not one.
+func parseISO(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	return t, err == nil
+}
+
+// orNull is an optional string field as served: an empty one is null.
+func orNull(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+/* -- rows the auth layer stores -- */
+
+// Grant is a stored credential (spec §2.1): one bearer token, held only as its
+// SHA-256, bound to one principal with a scope set. Every request it makes is
+// further limited to what that principal may do at that moment. The optional
+// fields hold "" for null — none of them can be empty when set.
+type Grant struct {
+	CredentialID string `json:"credentialId"`
+	// hex SHA-256 of the token
+	TokenHash string `json:"tokenHash"`
+	Principal string `json:"principal"`
+	AgentName string `json:"agentName"`
+	// as granted; `*` means every scope the app declares
+	Scopes    []string `json:"scopes"`
+	CreatedAt string   `json:"createdAt"`
+	// "" only for the admin credential, which never expires
+	ExpiresAt  string `json:"expiresAt"`
+	LastUsedAt string `json:"lastUsedAt"`
+	// set when revoked; the row is kept so the token is told so
+	RevokedAt string `json:"revokedAt"`
+	// a task credential: dead once that task is completed, failed or canceled
+	Task  string `json:"task"`
+	Admin bool   `json:"admin"`
+}
+
+// PrincipalInfo is who a principal is: `owner`, or an account on a
+// multi-user app.
+type PrincipalInfo struct {
+	ID     string
+	Name   string
+	Role   string // "owner" or "member"
+	Active bool
+}
+
+// Account is an account on a multi-user app (spec `account`, plus its
+// password hash, which never leaves the accounts routes).
+type Account struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Login        string `json:"login"`
+	Role         string `json:"role"`
+	Active       bool   `json:"active"`
+	CreatedAt    string `json:"createdAt"`
+	PasswordHash string `json:"passwordHash"`
+}
+
+type sessionRow struct {
+	Principal string `json:"principal"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+type inviteRow struct {
+	Role      string `json:"role"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+// deviceRow is one device-code sign-in in progress (spec §7).
+type deviceRow struct {
+	UserCode  string `json:"userCode"`
+	AgentName string `json:"agentName"`
+	// what the agent asked for
+	Scopes []string `json:"scopes"`
+	// the issued credential's lifetime
+	ExpiresInSeconds int    `json:"expiresInSeconds"`
+	CreatedAt        string `json:"createdAt"`
+	// when the codes stop working
+	ExpiresAt string `json:"expiresAt"`
+	Interval  int    `json:"interval"`
+	// unix ms of the last poll; nil before the first
+	LastPolledAt   *int64   `json:"lastPolledAt"`
+	Status         string   `json:"status"` // pending · approved · denied
+	ApprovedBy     string   `json:"approvedBy"`
+	ApprovedScopes []string `json:"approvedScopes"`
+}
+
+// The keyed tables the auth layer owns: accounts, sessions, invites and device
+// codes. Rows are keyed by id or by the hash of the secret that finds them; no
+// secret is ever a key or a value.
+const (
+	tableUsers    = "users"
+	tableSessions = "sessions"
+	tableInvites  = "invites"
+	tableDevices  = "devices"
+)
+
 /* ------------------------------------------------------------------- store */
 
 // The single-clause filter grammar this backend implements — `field = "value"`,
@@ -992,13 +1349,29 @@ func coerce(field M, value any) any {
 //
 // Idempotency keys persist because a restart is exactly when a retried POST
 // arrives — an in-memory table would return a duplicate record instead of the
-// 409 the protocol promises. The task/event plane, approvals, grants and audit
-// stay in memory: they are runtime queues and session state, not records.
+// 409 the protocol promises. Credentials and the auth tables (accounts,
+// sessions, invites, device codes) persist too, in tables of their own: they
+// are adapter state, never records, and a person must not lose their account
+// or their agents' access to a restart. The task/event plane and approvals
+// stay in memory: they are runtime queues, not records.
 //
 // Writes are durable when the call returns — there is no separate persist()
 // step. A record read from the SQLite store is a COPY: mutate it, then
 // putRecord() it back, or the change never happened.
+//
+// A Store is a handle on one shared storeState. The handle an operation runner
+// is given also knows who called the runner, so a task its trigger queues
+// records that person and the agent that takes it acts as them (spec/v0_2/
+// auth.md §6) — the adapter binds it, so no runner can forget to. Copying a
+// handle copies a pointer, never the state's mutex.
 type Store struct {
+	*storeState
+	// who called the runner holding this handle; "" for the app's own store,
+	// whose tasks run as the owner
+	caller string
+}
+
+type storeState struct {
 	Seed map[string][]M
 	// WantsSeed is true only when this store is genuinely fresh. NewSqliteStore
 	// sets it false when the database file already existed: re-seeding an
@@ -1018,9 +1391,13 @@ type Store struct {
 	taskOrder []string
 	events    []M
 	approvals map[string]bool
-	grants    map[string]M
-	taskSeq   int
-	eventSeq  int
+	// The in-memory variant's credentials (by credentialId, plus an index by
+	// token hash) and auth tables.
+	memGrants  *memTable
+	tokenIndex map[string]string
+	memAuth    map[string]*memTable
+	taskSeq    int
+	eventSeq   int
 	// The event types this app may emit, set by NewAdapter from the app's
 	// declarations. Empty means none were declared.
 	eventTypes map[string]bool
@@ -1032,7 +1409,7 @@ func newStoreState(seed map[string][]M) *Store {
 	if seed == nil {
 		seed = map[string][]M{}
 	}
-	return &Store{
+	return &Store{storeState: &storeState{
 		Seed:       seed,
 		WantsSeed:  true,
 		rows:       map[string]map[string]M{},
@@ -1040,9 +1417,46 @@ func newStoreState(seed map[string][]M) *Store {
 		memIdem:    map[string]string{},
 		tasks:      map[string]M{},
 		approvals:  map[string]bool{},
-		grants:     map[string]M{},
+		memGrants:  newMemTable(),
+		tokenIndex: map[string]string{},
+		memAuth:    map[string]*memTable{},
 		eventTypes: map[string]bool{},
 		dedup:      map[string]string{},
+	}}
+}
+
+// forCaller is this store as handed to an operation runner called by
+// `principal`: the same records and queue, with the caller bound to trigger.
+func (s *Store) forCaller(principal string) *Store {
+	return &Store{storeState: s.storeState, caller: principal}
+}
+
+// memTable is one keyed table of the in-memory variant. Rows are held as JSON,
+// so a read is a copy exactly as it is from SQLite, in insertion order.
+type memTable struct {
+	rows  map[string][]byte
+	order []string
+}
+
+func newMemTable() *memTable { return &memTable{rows: map[string][]byte{}} }
+
+func (t *memTable) put(key string, data []byte) {
+	if _, existed := t.rows[key]; !existed {
+		t.order = append(t.order, key)
+	}
+	t.rows[key] = data
+}
+
+func (t *memTable) remove(key string) {
+	if _, ok := t.rows[key]; !ok {
+		return
+	}
+	delete(t.rows, key)
+	for i, k := range t.order {
+		if k == key {
+			t.order = append(t.order[:i], t.order[i+1:]...)
+			break
+		}
 	}
 }
 
@@ -1079,6 +1493,12 @@ func NewSqliteStore(path string, seed map[string][]M) (*Store, error) {
 	for _, stmt := range []string{
 		"CREATE TABLE IF NOT EXISTS records (entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (entity, id))",
 		"CREATE TABLE IF NOT EXISTS idem (entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, PRIMARY KEY (entity, key))",
+		// Credentials, found by the hash of their token — never the token.
+		"CREATE TABLE IF NOT EXISTS grants (credential_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, data TEXT NOT NULL)",
+		"CREATE INDEX IF NOT EXISTS grants_by_token ON grants (token_hash)",
+		// The auth tables (users, sessions, invites, devices): adapter state,
+		// apart from the records table so the records API can never serve them.
+		"CREATE TABLE IF NOT EXISTS auth (tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (tbl, key))",
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			db.Close()
@@ -1132,8 +1552,27 @@ func (s *Store) allRecords(entity string) []M {
 	return out
 }
 
+// listRecords filters, sorts and pages one entity. `where` (field -> value) is
+// the adapter's own constraint — a member sees only the records it owns — so
+// it is applied first, before anything is counted or paged.
 func (s *Store) listRecords(entity string, query M) (M, error) {
 	items := s.allRecords(entity)
+	if where, ok := query["where"].(map[string]string); ok && len(where) > 0 {
+		kept := []M{}
+		for _, r := range items {
+			matches := true
+			for field, value := range where {
+				if v, ok := r[field].(string); !ok || v != value {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				kept = append(kept, r)
+			}
+		}
+		items = kept
+	}
 	if flt := getStr(query, "filter"); flt != "" {
 		pred, err := matchFilter(flt)
 		if err != nil {
@@ -1262,17 +1701,235 @@ func (s *Store) deleteRecord(entity, recID string) bool {
 }
 
 /* grants ---------------------------------------------------------------- */
+// Credentials, keyed by credentialId and found by the hash of their token.
 
-func (s *Store) putGrant(grant M) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.grants[getStr(grant, "token")] = grant
+func decodeGrant(data []byte) *Grant {
+	var g Grant
+	if json.Unmarshal(data, &g) != nil || g.TokenHash == "" {
+		return nil
+	}
+	return &g
 }
 
-func (s *Store) grantByToken(token string) M {
+// grantLocked is one grant by id; the caller holds s.mu.
+func (s *Store) grantLocked(credentialID string) *Grant {
+	if s.db == nil {
+		data, ok := s.memGrants.rows[credentialID]
+		if !ok {
+			return nil
+		}
+		return decodeGrant(data)
+	}
+	var data string
+	if s.db.QueryRow("SELECT data FROM grants WHERE credential_id = ?", credentialID).Scan(&data) != nil {
+		return nil
+	}
+	return decodeGrant([]byte(data))
+}
+
+// putGrantLocked writes one grant; the caller holds s.mu.
+func (s *Store) putGrantLocked(g Grant) {
+	data, err := json.Marshal(g)
+	if err != nil {
+		return
+	}
+	if s.db == nil {
+		if previous := s.grantLocked(g.CredentialID); previous != nil && previous.TokenHash != g.TokenHash {
+			delete(s.tokenIndex, previous.TokenHash)
+		}
+		s.memGrants.put(g.CredentialID, data)
+		s.tokenIndex[g.TokenHash] = g.CredentialID
+		return
+	}
+	s.db.Exec(
+		"INSERT INTO grants (credential_id, token_hash, data) VALUES (?, ?, ?) "+
+			"ON CONFLICT (credential_id) DO UPDATE SET token_hash = excluded.token_hash, data = excluded.data",
+		g.CredentialID, g.TokenHash, string(data))
+}
+
+func (s *Store) putGrant(g Grant) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.grants[token]
+	s.putGrantLocked(g)
+}
+
+func (s *Store) grantByID(credentialID string) *Grant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.grantLocked(credentialID)
+}
+
+func (s *Store) grantByTokenHash(tokenHash string) *Grant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		id, ok := s.tokenIndex[tokenHash]
+		if !ok {
+			return nil
+		}
+		return s.grantLocked(id)
+	}
+	var data string
+	if s.db.QueryRow("SELECT data FROM grants WHERE token_hash = ?", tokenHash).Scan(&data) != nil {
+		return nil
+	}
+	return decodeGrant([]byte(data))
+}
+
+// updateGrant changes one grant in a single step, so two requests touching the
+// same credential (a use stamping lastUsedAt, a revocation) cannot overwrite
+// each other's change. False when there is no such grant.
+func (s *Store) updateGrant(credentialID string, change func(*Grant)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := s.grantLocked(credentialID)
+	if g == nil {
+		return false
+	}
+	change(g)
+	s.putGrantLocked(*g)
+	return true
+}
+
+func (s *Store) deleteGrant(credentialID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		if g := s.grantLocked(credentialID); g != nil {
+			delete(s.tokenIndex, g.TokenHash)
+		}
+		s.memGrants.remove(credentialID)
+		return
+	}
+	s.db.Exec("DELETE FROM grants WHERE credential_id = ?", credentialID)
+}
+
+// listGrants is every grant, in the order they were first stored.
+func (s *Store) listGrants() []Grant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []Grant{}
+	if s.db == nil {
+		for _, id := range s.memGrants.order {
+			if g := decodeGrant(s.memGrants.rows[id]); g != nil {
+				out = append(out, *g)
+			}
+		}
+		return out
+	}
+	rows, err := s.db.Query("SELECT data FROM grants ORDER BY rowid")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var data string
+		if rows.Scan(&data) != nil {
+			continue
+		}
+		if g := decodeGrant([]byte(data)); g != nil {
+			out = append(out, *g)
+		}
+	}
+	return out
+}
+
+/* auth tables ------------------------------------------------------------ */
+// users · sessions · invites · devices, each row JSON under its key.
+
+func (s *Store) memAuthTable(table string) *memTable {
+	t, ok := s.memAuth[table]
+	if !ok {
+		t = newMemTable()
+		s.memAuth[table] = t
+	}
+	return t
+}
+
+// authRow decodes one row into out; false when there is none.
+func (s *Store) authRow(table, key string, out any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var data []byte
+	if s.db == nil {
+		raw, ok := s.memAuthTable(table).rows[key]
+		if !ok {
+			return false
+		}
+		data = raw
+	} else {
+		var text string
+		if s.db.QueryRow("SELECT data FROM auth WHERE tbl = ? AND key = ?", table, key).Scan(&text) != nil {
+			return false
+		}
+		data = []byte(text)
+	}
+	return json.Unmarshal(data, out) == nil
+}
+
+func (s *Store) putAuthRow(table, key string, row any) {
+	data, err := json.Marshal(row)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		s.memAuthTable(table).put(key, data)
+		return
+	}
+	s.db.Exec(
+		"INSERT INTO auth (tbl, key, data) VALUES (?, ?, ?) ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
+		table, key, string(data))
+}
+
+func (s *Store) deleteAuthRow(table, key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		s.memAuthTable(table).remove(key)
+		return
+	}
+	s.db.Exec("DELETE FROM auth WHERE tbl = ? AND key = ?", table, key)
+}
+
+// keyedRow is one auth-table row with the key it is stored under.
+type keyedRow[T any] struct {
+	key string
+	row T
+}
+
+// authRows is every row of one auth table, decoded, in insertion order.
+func authRows[T any](s *Store, table string) []keyedRow[T] {
+	type raw struct {
+		key  string
+		data []byte
+	}
+	found := []raw{}
+	s.mu.Lock()
+	if s.db == nil {
+		t := s.memAuthTable(table)
+		for _, key := range t.order {
+			found = append(found, raw{key, t.rows[key]})
+		}
+	} else if rows, err := s.db.Query("SELECT key, data FROM auth WHERE tbl = ? ORDER BY rowid", table); err == nil {
+		for rows.Next() {
+			var key, data string
+			if rows.Scan(&key, &data) == nil {
+				found = append(found, raw{key, []byte(data)})
+			}
+		}
+		rows.Close()
+	}
+	s.mu.Unlock()
+	out := []keyedRow[T]{}
+	for _, r := range found {
+		var row T
+		if json.Unmarshal(r.data, &row) == nil {
+			out = append(out, keyedRow[T]{r.key, row})
+		}
+	}
+	return out
 }
 
 /* idempotency / approvals ------------------------------------------------ */
@@ -1357,7 +2014,10 @@ func (s *Store) eventsSince(cursor string) M {
 	return M{"events": fresh, "nextCursor": next}
 }
 
-func (s *Store) enqueueTask(eventID, capability string, payload M, dedupKey string) M {
+// enqueueTask queues one task. `principal` is who asked for the work
+// (spec/v0_2/auth.md §6.1); "" for work the app queues on its own, recorded as
+// null and run as the owner.
+func (s *Store) enqueueTask(eventID, capability string, payload M, principal, dedupKey string) M {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.tasks[s.dedup[dedupKey]]; ok && dedupKey != "" {
@@ -1366,7 +2026,7 @@ func (s *Store) enqueueTask(eventID, capability string, payload M, dedupKey stri
 	s.taskSeq++
 	task := M{
 		"id": fmt.Sprintf("task_%d", s.taskSeq), "app": nil, "event": eventID, "status": "submitted",
-		"request": M{"capability": capability, "payload": payload}, "claim": nil,
+		"request": M{"capability": capability, "payload": payload, "principal": orNull(principal)}, "claim": nil,
 		"progress": M{}, "result": nil, "reason": nil, "ask": nil,
 		"createdAt": nowISO(), "updatedAt": nowISO(), "deliveries": 1,
 	}
@@ -1383,7 +2043,12 @@ func (s *Store) enqueueTask(eventID, capability string, payload M, dedupKey stri
 // through the store it is handed. The result is {"eventId", "taskId"}; taskId
 // is nil when no capability was named, because an event alone asks no agent
 // for work. An undeclared event type is an error, and nothing is emitted.
+//
+// A task records who asked for the work: the caller of the runner this store
+// was handed to, so the agent that takes it acts as that person (spec/v0_2/
+// auth.md §6). On the app's own store there is none — null, run as the owner.
 func (s *Store) trigger(etype string, payload M, capability string) (M, error) {
+	principal := s.caller
 	s.mu.Lock()
 	declared := len(s.eventTypes) == 0 || s.eventTypes[etype]
 	s.mu.Unlock()
@@ -1397,9 +2062,15 @@ func (s *Store) trigger(etype string, payload M, capability string) (M, error) {
 		// trigger firing twice must make one task. The event id is fresh per
 		// emit, so keying on it would deduplicate nothing. The occurrence is what
 		// the app asked for (type, capability, payload), serialized with sorted
-		// keys so key order cannot tell two identical triggers apart.
-		sum := sha256.Sum256([]byte(stableJSON(M{"type": etype, "capability": capability, "payload": payload})))
-		taskID = s.enqueueTask(getStr(ev, "id"), capability, payload, "sha256:"+hex.EncodeToString(sum[:]))["id"]
+		// keys so key order cannot tell two identical triggers apart. Who asked
+		// is part of it: the same request from two people is two tasks, each run
+		// as the person who asked.
+		occurrence := M{"type": etype, "capability": capability, "payload": payload}
+		if principal != "" {
+			occurrence["principal"] = principal
+		}
+		sum := sha256.Sum256([]byte(stableJSON(occurrence)))
+		taskID = s.enqueueTask(getStr(ev, "id"), capability, payload, principal, "sha256:"+hex.EncodeToString(sum[:]))["id"]
 	}
 	return M{"eventId": ev["id"], "taskId": taskID}, nil
 }
@@ -1466,27 +2137,47 @@ func approvalKeyFor(name string, args M) string {
 	return "ak_" + hex.EncodeToString(sum[:])[:32]
 }
 
-func randomHex(nBytes int) string {
-	buf := make([]byte, nBytes)
-	if _, err := rand.Read(buf); err != nil {
-		panic(err) // the OS entropy source failing is not a recoverable request error
-	}
-	return hex.EncodeToString(buf)
-}
+func randomHex(nBytes int) string { return hex.EncodeToString(randomBytes(nBytes)) }
 
 // OperationRunner is the signature schema.go implements: (args, ctx, store) ->
 // JSON-able result. Returning an error (or panicking) becomes operation_failed.
+// ctx is who is calling: {"credentialId", "agentName", "principal", "role"}.
+// An `owner` may touch every record; a `member` only the records it owns, and
+// a runner holds itself to the same rule for records it touches.
 type OperationRunner func(args M, ctx M, store *Store) (any, error)
+
+// The app's optional auth declarations (spec/v0_2/auth.md §3, §6.2), passed
+// to the adapter by main.go. They are declared here, empty, so a schema.go
+// that needs neither compiles unchanged; one that does sets them in its own
+// init(). See AdapterConfig.Capabilities and AdapterConfig.PermissionsOf.
+var (
+	CAPABILITIES   = map[string]M{}
+	PERMISSIONS_OF func(principal M) []string
+)
 
 // AdapterConfig is everything the wiring (main.go) hands the adapter.
 type AdapterConfig struct {
-	AppID          string
-	AppName        any // string, or nil for an unnamed app
-	Entities       map[string]M
-	Operations     []M
-	Store          *Store
-	Token          string
-	Modules        []M
+	AppID      string
+	AppName    any // string, or nil for an unnamed app
+	Entities   map[string]M
+	Operations []M
+	Store      *Store
+	// Token is the app's own .agent-token: its admin credential (spec/v0_2/
+	// auth.md §2.3) — principal `owner`, every scope, no expiry, never listed.
+	// It is seeded hashed at every boot, so a rotated file replaces the old one.
+	Token   string
+	Modules []M
+	// PermissionsOf is what a principal may do (spec §3), as scopes; `*` is
+	// every scope. It receives {"id", "name", "role", "active"} and is asked on
+	// every request: a credential's reach is its own scopes intersected with
+	// this. Nil: `*` for every active principal (record ownership still
+	// applies). An inactive principal has none.
+	PermissionsOf func(principal M) []string
+	// Capabilities is what the agent taking each capability's tasks needs, as
+	// {"<capability>": {"scopes": [...]}} (spec §6.2). A task's credential holds
+	// these, limited by what the person who queued it may do; a capability not
+	// listed gets `*`.
+	Capabilities   map[string]M
 	AllowedOrigins []string
 	// PublicURL is the origin people and agents reach the app at
 	// (A2APP_PUBLIC_URL, resolved by NetworkPolicy), or "" for loopback only.
@@ -1516,11 +2207,33 @@ type Adapter struct {
 	authMode       string
 	allowedOrigins map[string]bool
 	allowedHosts   map[string]bool
+	ownOrigins     []string
+	publicURL      string
 	runners        map[string]OperationRunner
+	permissionsOf  func(principal M) []string
+	capabilities   map[string]M
 	credentialHint string
 	env            string
 	appVersion     func() string
 	limiter        *rateLimiter
+	now            func() time.Time
+
+	// Accounts and sessions (authMode: multi-user). The cookie is per app:
+	// browsers do not separate cookies by port, so two apps on one machine
+	// would otherwise sign each other out.
+	multiUser         bool
+	sessionCookieName string
+	secureCookies     bool
+	signInFailures    *failureLimiter
+	// Checked against when a login does not exist, so a missing account takes
+	// as long to refuse as a wrong password and the timing does not say which.
+	dummyHash     string
+	dummyHashOnce sync.Once
+	// authMu makes each multi-step change to the auth tables one step: accepting
+	// an invite, changing a person, and every device-code transition. net/http
+	// serves concurrently, so without it a second acceptance of one invite, or
+	// two polls of one approved code, could both succeed.
+	authMu sync.Mutex
 
 	// dataVersion state — moves on every record write, so an open tab can
 	// re-read without reloading (see a2app-update.js). The boot component makes
@@ -1545,16 +2258,24 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		authMode:       cfg.AuthMode,
 		allowedOrigins: map[string]bool{},
 		allowedHosts:   map[string]bool{},
+		publicURL:      cfg.PublicURL,
 		runners:        cfg.Runners,
+		permissionsOf:  cfg.PermissionsOf,
+		capabilities:   cfg.Capabilities,
 		credentialHint: cfg.CredentialHint,
 		env:            cfg.Env,
 		appVersion:     cfg.AppVersion,
 		limiter:        newRateLimiter(defaultRateLimits, func() int64 { return time.Now().UnixMilli() }),
+		now:            time.Now,
 		bootMark:       strconv.FormatInt(time.Now().UnixMilli(), 36),
 	}
-	if a.authMode == "" {
+	if a.authMode != "multi-user" {
 		a.authMode = "none"
 	}
+	a.multiUser = a.authMode == "multi-user"
+	a.sessionCookieName = "a2app_session_" + a.appID
+	a.secureCookies = strings.HasPrefix(cfg.PublicURL, "https://")
+	a.signInFailures = newFailureLimiter(signInFailureMax, signInWindow, func() time.Time { return a.now() })
 	if a.credentialHint == "" {
 		a.credentialHint = "Read the app's .agent-token file (mode 0600) in the project directory."
 	}
@@ -1569,10 +2290,13 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 			"A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - " +
 				strings.Join(problems, "\n  - "))
 	}
-	origins := cfg.AllowedOrigins
+	// The public URL is one more origin of the app's own: people open the View
+	// there, and agents reach the app there.
+	origins := append([]string{}, cfg.AllowedOrigins...)
 	if cfg.PublicURL != "" {
-		origins = append(append([]string{}, origins...), cfg.PublicURL)
+		origins = append(origins, cfg.PublicURL)
 	}
+	a.ownOrigins = origins
 	for _, origin := range origins {
 		a.allowedOrigins[origin] = true
 		// The hosts this app answers to are derived from its own origins, so an
@@ -1589,10 +2313,30 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 	for _, e := range cfg.Events {
 		cfg.Store.eventTypes[getStr(e, "type")] = true
 	}
-	cfg.Store.putGrant(M{
-		"token": cfg.Token, "credentialId": "cred_local", "agentName": "local",
-		"principal": "owner", "scopes": []string{"*"},
-	})
+	// The app's own .agent-token is its admin credential, hashed on the way in
+	// and never written back. Re-seeding at every boot follows a rotated file.
+	if cfg.Token != "" {
+		seed := Grant{
+			CredentialID: "cred_local", TokenHash: hashSecret(cfg.Token), Principal: ownerPrincipal.ID,
+			AgentName: "local", Scopes: []string{"*"}, CreatedAt: isoOf(a.now()), Admin: true,
+		}
+		if existing := cfg.Store.grantByID(seed.CredentialID); existing != nil {
+			seed.CreatedAt, seed.LastUsedAt = existing.CreatedAt, existing.LastUsedAt
+		}
+		cfg.Store.putGrant(seed)
+	}
+	// Revoked and expired credentials are kept a while so their tokens are told
+	// why they stopped; after that they are gone.
+	now := a.now()
+	for _, g := range cfg.Store.listGrants() {
+		ended := g.RevokedAt
+		if expires, ok := parseISO(g.ExpiresAt); ended == "" && ok && !expires.After(now) {
+			ended = g.ExpiresAt
+		}
+		if at, ok := parseISO(ended); ok && now.Sub(at) > grantRetention {
+			cfg.Store.deleteGrant(g.CredentialID)
+		}
+	}
 	// Seed records (materialize server-managed read-only fields) — but only
 	// into a store that is genuinely fresh. A durable store that already holds
 	// a database refuses the seed: re-seeding on every boot would resurrect
@@ -1643,6 +2387,22 @@ func (a *Adapter) modelProblems() []string {
 		} else if !declared[module] {
 			problems = append(problems, `entity "`+name+`" names undeclared module "`+module+`"`)
 		}
+		if owned, ok := d["ownedBy"]; ok {
+			// The adapter writes the owner and the guard keeps clients from doing
+			// so, which only holds for a declared, read-only string field.
+			ownedBy := toStr(owned)
+			var owner M
+			for _, f := range fieldsOf(d) {
+				if getStr(f, "name") == ownedBy {
+					owner = f
+				}
+			}
+			if owner == nil {
+				problems = append(problems, `entity "`+name+`" is ownedBy "`+ownedBy+`", which is not one of its fields`)
+			} else if getStr(owner, "type") != "string" || !getBool(owner, "readOnly") {
+				problems = append(problems, `entity "`+name+`" is ownedBy "`+ownedBy+`", which must be a readOnly string field`)
+			}
+		}
 	}
 
 	for _, o := range a.operations {
@@ -1687,7 +2447,37 @@ func (a *Adapter) modelProblems() []string {
 				`operation "`+opName+`" declares appliesWhen but no entity: there is no record to evaluate it against`)
 		}
 	}
+
+	// A capability's scopes are what its task credentials hold, so one the app
+	// does not declare would be a grant of nothing — or a typo that silently
+	// leaves the agent unable to do its work.
+	declaredScopes := a.allScopes()
+	capabilityNames := make([]string, 0, len(a.capabilities))
+	for capability := range a.capabilities {
+		capabilityNames = append(capabilityNames, capability)
+	}
+	sort.Strings(capabilityNames)
+	for _, capability := range capabilityNames {
+		unknown := []string{}
+		for _, s := range scopeList(a.capabilities[capability]["scopes"]) {
+			if s != "*" && !declaredScopes[s] {
+				unknown = append(unknown, s)
+			}
+		}
+		if len(unknown) > 0 {
+			problems = append(problems, `capability "`+capability+`" needs scopes this app does not declare: `+strings.Join(unknown, ", "))
+		}
+	}
 	return problems
+}
+
+// scopeList reads a declared list of scope names ([]string or decoded []any).
+func scopeList(v any) []string {
+	out := []string{}
+	for _, s := range toAnyList(v) {
+		out = append(out, toStr(s))
+	}
+	return out
 }
 
 /* -- schema helpers ------------------------------------------------------- */
@@ -1764,6 +2554,8 @@ func (a *Adapter) identity() M {
 		// from appVersion/schemaVersion so it can re-read data without reloading.
 		"dataVersion": a.dataVersion(),
 		"serverNow":   nowISO(), "serverTzOffsetMinutes": 0,
+		"authMode":   a.authMode,
+		"accountUrl": accountURL,
 	}
 	if a.env != "" {
 		doc["env"] = a.env
@@ -2004,6 +2796,9 @@ func (a *Adapter) describeEntity(module, name string, d M, access accessView) M 
 	if getBool(d, "auth") {
 		level["auth"] = true
 	}
+	if ownedBy := getStr(d, "ownedBy"); ownedBy != "" {
+		level["ownedBy"] = ownedBy
+	}
 	return level
 }
 
@@ -2119,21 +2914,33 @@ func conventions() M {
 }
 
 /* -- IAM -------------------------------------------------------------------- */
+// Who a request acts for, decided once and in spec/v0_2/auth.md §9 order.
+// Parity oracle: adapter-core server.ts (credentialOf, resolve, authorize,
+// managerOf).
 
-func (a *Adapter) expandScopes(grant M) map[string]bool {
+const (
+	accountURL = "/_a2app/account"
+	// How long a revoked or expired credential is remembered (spec §2.1).
+	grantRetention = 30 * 24 * time.Hour
+	// lastUsedAt is written at most this often, so use does not mean a disk
+	// write per request.
+	lastUsedResolution = time.Minute
+)
+
+// renewHint is said to an agent whose credential stopped working (revoked,
+// expired, or its person deactivated): a new one is the person's to give.
+// Like the credential hint, it states a fact and never an instruction.
+const renewHint = "Ask the person this agent acts for to approve it again (a2app <app> login), or the app's owner for a new credential."
+
+// ownerPrincipal is the app's administrator: the admin credential, and the
+// only principal of an `authMode: none` app.
+var ownerPrincipal = PrincipalInfo{ID: "owner", Name: "Owner", Role: "owner", Active: true}
+
+var terminalTask = map[string]bool{"completed": true, "failed": true, "canceled": true}
+
+// allScopes is every scope the app declares: what `*` means.
+func (a *Adapter) allScopes() map[string]bool {
 	scopes := map[string]bool{}
-	declared, _ := grant["scopes"].([]string)
-	if declared == nil {
-		for _, s := range toAnyList(grant["scopes"]) {
-			declared = append(declared, toStr(s))
-		}
-	}
-	if !contains(declared, "*") {
-		for _, s := range declared {
-			scopes[s] = true
-		}
-		return scopes
-	}
 	for name := range a.entityDefs {
 		scopes["data:"+name+":read"] = true
 		scopes["data:"+name+":write"] = true
@@ -2144,15 +2951,140 @@ func (a *Adapter) expandScopes(grant M) map[string]bool {
 	return scopes
 }
 
-func (a *Adapter) credentialOf(headers map[string]string) M {
+func (a *Adapter) expandScopes(scopes []string) map[string]bool {
+	if contains(scopes, "*") {
+		return a.allScopes()
+	}
+	out := map[string]bool{}
+	for _, s := range scopes {
+		out[s] = true
+	}
+	return out
+}
+
+// permissions is what a principal may do now (spec §3), or nil when it may do
+// nothing.
+func (a *Adapter) permissions(info *PrincipalInfo) map[string]bool {
+	if info == nil || !info.Active {
+		return nil
+	}
+	if a.permissionsOf == nil {
+		return a.allScopes()
+	}
+	return a.expandScopes(a.permissionsOf(M{"id": info.ID, "name": info.Name, "role": info.Role, "active": info.Active}))
+}
+
+func intersect(x, y map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for s := range x {
+		if y[s] {
+			out[s] = true
+		}
+	}
+	return out
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// principalInfo is who a principal is, or nil when it is unknown.
+func (a *Adapter) principalInfo(id string) *PrincipalInfo {
+	if id == ownerPrincipal.ID {
+		owner := ownerPrincipal
+		return &owner
+	}
+	if !a.multiUser {
+		return nil
+	}
+	var account Account
+	if !a.store.authRow(tableUsers, id, &account) {
+		return nil
+	}
+	return &PrincipalInfo{ID: account.ID, Name: account.Name, Role: account.Role, Active: account.Active}
+}
+
+// presented is a usable credential, with the person it acts for and its
+// effective reach: its own scopes intersected with what that person may do.
+type presented struct {
+	grant Grant
+	info  PrincipalInfo
+	held  map[string]bool
+}
+
+// credentialOf is the credential this request presents, checked in the order
+// spec §9 gives: unknown, revoked (or its task is over), expired, then whether
+// the person it acts for may still act. Nil, with no refusal, when none was
+// presented.
+func (a *Adapter) credentialOf(headers map[string]string) (*presented, int, M) {
 	token := headers["x-a2app-token"]
 	if token == "" {
 		token = headers["x-lui-token"]
 	}
 	if token == "" {
-		return nil
+		return nil, 0, nil
 	}
-	return a.store.grantByToken(token)
+	grant := a.store.grantByTokenHash(hashSecret(token))
+	now := a.now()
+	if grant == nil {
+		status, body := errEnv(401, "credential_invalid", "This credential is not one this app issued.", M{"how": renewHint})
+		return nil, status, body
+	}
+	taskOver := false
+	if grant.Task != "" {
+		task := a.store.getTask(grant.Task)
+		taskOver = task == nil || terminalTask[getStr(task, "status")]
+	}
+	if grant.RevokedAt != "" || taskOver {
+		status, body := errEnv(401, "credential_revoked", "This credential was revoked.", M{"how": renewHint})
+		return nil, status, body
+	}
+	if expires, ok := parseISO(grant.ExpiresAt); ok && !expires.After(now) {
+		status, body := errEnv(401, "token_expired", "This credential expired at "+grant.ExpiresAt+".", M{"how": renewHint})
+		return nil, status, body
+	}
+	info := a.principalInfo(grant.Principal)
+	allowed := a.permissions(info)
+	if info == nil || allowed == nil {
+		status, body := errEnv(401, "principal_inactive", "The person this credential acts for is no longer active.", nil)
+		return nil, status, body
+	}
+	if last, ok := parseISO(grant.LastUsedAt); !ok || now.Sub(last) >= lastUsedResolution {
+		stamp := isoOf(now)
+		a.store.updateGrant(grant.CredentialID, func(g *Grant) { g.LastUsedAt = stamp })
+	}
+	return &presented{grant: *grant, info: *info, held: intersect(a.expandScopes(grant.Scopes), allowed)}, 0, nil
+}
+
+// sessionOf is the signed-in account behind this request's session cookie
+// (and the session's key), or nil.
+func (a *Adapter) sessionOf(headers map[string]string) (string, *Account) {
+	if !a.multiUser {
+		return "", nil
+	}
+	secret := parseCookies(headers["cookie"])[a.sessionCookieName]
+	if secret == "" {
+		return "", nil
+	}
+	key := hashSecret(secret)
+	var session sessionRow
+	if !a.store.authRow(tableSessions, key, &session) {
+		return "", nil
+	}
+	if expires, ok := parseISO(session.ExpiresAt); !ok || !expires.After(a.now()) {
+		a.store.deleteAuthRow(tableSessions, key)
+		return "", nil
+	}
+	var account Account
+	if !a.store.authRow(tableUsers, session.Principal, &account) || !account.Active {
+		return "", nil
+	}
+	return key, &account
 }
 
 // isAllowedHost reports whether a Host header value names this app: a loopback
@@ -2164,6 +3096,19 @@ func (a *Adapter) isAllowedHost(raw string) bool {
 	}
 	name := hostnameOf(host)
 	return isLoopbackName(name) || a.allowedHosts[name]
+}
+
+// hostRefusal is the `403 forbidden_host` reply for a request under a Host
+// this app does not answer to, else a nil body. Checked before every adapter
+// route and before the system pages main.go serves (the account page, the
+// update watcher), which are otherwise a free fingerprint of the app for a
+// rebound page: binding loopback does not stop a page on evil.com whose DNS
+// re-resolves to 127.0.0.1, but its Host header still says evil.com.
+func (a *Adapter) hostRefusal(host string) (int, M) {
+	if a.isAllowedHost(host) {
+		return 0, nil
+	}
+	return errEnv(403, "forbidden_host", "Refused: this app answers only on its own host, not \""+host+"\".", nil)
 }
 
 // hostnameOf is the host name in a Host value: `name`, `name:port` or `[v6]:port`.
@@ -2216,33 +3161,180 @@ func NetworkPolicy(hostEnv, publicURLEnv string) (host string, publicURL string,
 	return host, publicURL, nil
 }
 
-// authorize runs the fixed precedence: origin, then credential, then scope.
+// isForeignOrigin is a request whose Origin is not one of the app's own. No
+// Origin at all is a program, not a browser.
+func (a *Adapter) isForeignOrigin(headers map[string]string) bool {
+	origin, ok := headers["origin"]
+	return ok && !a.allowedOrigins[origin]
+}
+
+// isSameOrigin is true when the request carries one of the app's OWN origins.
+func (a *Adapter) isSameOrigin(headers map[string]string) bool {
+	origin, ok := headers["origin"]
+	return ok && a.allowedOrigins[origin]
+}
+
+// fromOwnPage is whether a request came from one of the app's own pages. A
+// browser marks same-origin fetches, GETs included, with Sec-Fetch-Site; a
+// program sends neither header. Used to pick which 401 to send, and to trust
+// a READ on a single-user app — never a change.
+func (a *Adapter) fromOwnPage(headers map[string]string) bool {
+	return a.isSameOrigin(headers) || headers["sec-fetch-site"] == "same-origin"
+}
+
+// unauthenticated is the 401 for a caller who presented nothing: the app's
+// own page on a multi-user app is sent to sign in; anyone else is told it
+// needs a credential.
+func (a *Adapter) unauthenticated(headers map[string]string, message string) (int, M) {
+	if a.multiUser && a.fromOwnPage(headers) {
+		return errEnv(401, "sign_in_required", "Sign in to use this app.", M{"signInUrl": accountURL + "#sign-in"})
+	}
+	return errEnv(401, codeAgentTokenRequired, message, M{"how": a.credentialHint})
+}
+
+// caller is who a request acts for, and the reach it was given.
+type caller struct {
+	// {"credentialId", "agentName", "principal", "role"} — what runners get
+	ctx M
+	// the scopes the request holds (a credential's are already intersected
+	// with its person's)
+	held map[string]bool
+	// an uncredentialled read on a single-user app, which the scope check does
+	// not apply to
+	anonymous bool
+	// the credential presented, if any
+	grant *Grant
+}
+
+func callContext(credentialID string, agentName any, principal, role string) M {
+	return M{"credentialId": credentialID, "agentName": agentName, "principal": principal, "role": role}
+}
+
+// resolve decides who the caller is, in a fixed order: a foreign origin is
+// refused; then the agent credential; then, on a multi-user app, the session
+// (a change must come from the app's own page); on `authMode: none`, the
+// app's own View is the owner. A non-nil refusal is the reply to send.
+func (a *Adapter) resolve(headers map[string]string, isWrite bool) (*caller, int, M) {
+	if a.isForeignOrigin(headers) {
+		status, body := errEnv(403, "forbidden_origin", "Refused: request Origin is not this app's own.", nil)
+		return nil, status, body
+	}
+	p, status, refusal := a.credentialOf(headers)
+	if refusal != nil {
+		return nil, status, refusal
+	}
+	if p != nil {
+		grant := p.grant
+		return &caller{ctx: callContext(grant.CredentialID, orNull(grant.AgentName), p.info.ID, p.info.Role), held: p.held, grant: &grant}, 0, nil
+	}
+	if a.multiUser {
+		if _, account := a.sessionOf(headers); account != nil {
+			// A signed-in change must come from this app's own page (CSRF, spec §4).
+			if isWrite && !a.isSameOrigin(headers) {
+				status, body := errEnv(403, "forbidden_origin", "A signed-in change must come from this app's own page.", nil)
+				return nil, status, body
+			}
+			held := a.permissions(a.principalInfo(account.ID))
+			if held == nil {
+				held = map[string]bool{}
+			}
+			return &caller{ctx: callContext("session", nil, account.ID, account.Role), held: held}, 0, nil
+		}
+		status, body := a.unauthenticated(headers, "This app needs a credential.")
+		return nil, status, body
+	}
+	// The app's own UI (same origin) is trusted: no credential needed. A
+	// browser sends Origin only on a change; on a read it marks the request
+	// with Sec-Fetch-Site, which a web page cannot forge. A local program can,
+	// but on this mode it already reads everything without a credential, so
+	// only a change is held to the stronger Origin rule.
+	if a.isSameOrigin(headers) || (!isWrite && a.fromOwnPage(headers)) {
+		owner := ownerPrincipal
+		return &caller{ctx: callContext("ui", nil, owner.ID, owner.Role), held: a.permissions(&owner)}, 0, nil
+	}
+	// A program write always needs a credential; an anonymous read on a
+	// single-user app proceeds as the owner.
+	if isWrite {
+		status, body := a.unauthenticated(headers, "This write requires an agent credential.")
+		return nil, status, body
+	}
+	return &caller{ctx: callContext("anonymous", nil, ownerPrincipal.ID, ownerPrincipal.Role), anonymous: true}, 0, nil
+}
+
+// authorize runs the fixed chain: origin, then credential, then scope.
 // A nil errBody means the caller may proceed with ctx.
 func (a *Adapter) authorize(headers map[string]string, scope string, isWrite bool) (ctx M, status int, errBody M) {
-	origin, hasOrigin := headers["origin"]
-	if hasOrigin && !a.allowedOrigins[origin] {
-		s, b := errEnv(403, "forbidden_origin", "Refused: request Origin is not this app's own.", nil)
+	c, status, refusal := a.resolve(headers, isWrite)
+	if refusal != nil {
+		return nil, status, refusal
+	}
+	if scope != "" && !c.anonymous && !c.held[scope] {
+		s, b := errEnv(403, codeInsufficientScope, "This credential does not hold "+scope+".", M{"required": scope})
 		return nil, s, b
 	}
-	if hasOrigin && a.allowedOrigins[origin] {
-		return M{"credentialId": "ui", "agentName": nil, "principal": "owner"}, 0, nil
+	return c.ctx, 0, nil
+}
+
+// manager is who may manage this app's accounts and credentials (spec §2.4).
+type manager struct {
+	principal string
+	role      string
+}
+
+// managerOf is the caller as a manager: a signed-in person, the app's own
+// View on `authMode: none`, or the admin credential. An agent's delegated
+// credential is never one. `write` applies the same-origin rule to a
+// signed-in change.
+func (a *Adapter) managerOf(headers map[string]string, write bool) (*manager, int, M) {
+	c, status, refusal := a.resolve(headers, write)
+	if refusal != nil {
+		return nil, status, refusal
 	}
-	grant := a.credentialOf(headers)
-	required := isWrite || a.authMode == "multi-user"
-	if grant == nil {
-		if required {
-			s, b := errEnv(401, codeAgentTokenRequired, "This write requires an agent credential.", M{"how": a.credentialHint})
-			return nil, s, b
+	if c.grant != nil {
+		if !c.grant.Admin {
+			status, body := errEnv(403, "not_a_manager", "An agent's credential cannot manage accounts or credentials.", nil)
+			return nil, status, body
 		}
-		return M{"credentialId": "anonymous", "agentName": nil, "principal": "owner"}, 0, nil
+		return &manager{principal: ownerPrincipal.ID, role: ownerPrincipal.Role}, 0, nil
 	}
-	if scope != "" {
-		if !a.expandScopes(grant)[scope] {
-			s, b := errEnv(403, codeInsufficientScope, "This credential does not hold "+scope+".", M{"required": scope})
-			return nil, s, b
-		}
+	if c.anonymous {
+		status, body := a.unauthenticated(headers, "Managing this app needs a credential.")
+		return nil, status, body
 	}
-	return M{"credentialId": grant["credentialId"], "agentName": grant["agentName"], "principal": grant["principal"]}, 0, nil
+	return &manager{principal: getStr(c.ctx, "principal"), role: getStr(c.ctx, "role")}, 0, nil
+}
+
+// publicOrigin is where this app is reached, for links handed to a person.
+// The Host header has already passed the host check by the time a route runs.
+func (a *Adapter) publicOrigin(headers map[string]string) string {
+	if a.publicURL != "" {
+		return a.publicURL
+	}
+	if host := headers["host"]; host != "" {
+		return "http://" + host
+	}
+	if len(a.ownOrigins) > 0 {
+		return a.ownOrigins[0]
+	}
+	return ""
+}
+
+// ownedOnly is whether ctx sees only the records it owns in this entity
+// (spec §5).
+func (a *Adapter) ownedOnly(d M, ctx M) bool {
+	return a.multiUser && getStr(d, "ownedBy") != "" && getStr(ctx, "role") != "owner"
+}
+
+// visible is the record if ctx may see it, else nil: another member's record
+// is indistinguishable from a missing one.
+func (a *Adapter) visible(d M, ctx M, rec M) M {
+	if rec == nil {
+		return nil
+	}
+	if a.ownedOnly(d, ctx) && getStr(rec, getStr(d, "ownedBy")) != getStr(ctx, "principal") {
+		return nil
+	}
+	return rec
 }
 
 func (a *Adapter) rateGate(headers map[string]string, cls string) (int, M) {
@@ -2263,42 +3355,56 @@ func (a *Adapter) rateGate(headers map[string]string, cls string) (int, M) {
 		M{"retryAfterSeconds": decision.retryAfterSeconds})
 }
 
-// isSameOrigin is true when the request carries one of the app's OWN origins —
-// the trusted browser-UI path authorize also honours.
-func (a *Adapter) isSameOrigin(headers map[string]string) bool {
-	origin, ok := headers["origin"]
-	return ok && a.allowedOrigins[origin]
-}
-
 /* -- dispatch ---------------------------------------------------------------- */
 
 // accessFor is what this caller may do, for rendering access on a describe
-// level. Mirrors authorize's precedence including its two bypasses — the app's
-// own UI and an anonymous read on a single-user app both reach a context
-// without meeting the scope check, so both genuinely have full access.
+// level. It asks resolve, exactly as authorize does: a caller it refuses has
+// no access; an anonymous read on a single-user app may read everything and
+// run read-only operations, but change nothing (authorize would 401 the
+// write, and an agent plans from what describe tells it); anyone else holds
+// the scopes their request was given.
 func (a *Adapter) accessFor(headers map[string]string) accessView {
-	if a.isSameOrigin(headers) {
+	c, _, refusal := a.resolve(headers, false)
+	if refusal != nil {
+		return accessView{
+			read:  func(string) bool { return false },
+			write: func(string) bool { return false },
+			run:   func(string) bool { return false },
+		}
+	}
+	if c.anonymous {
 		return accessView{
 			read:  func(string) bool { return true },
-			write: func(string) bool { return true },
-			run:   func(string) bool { return true },
+			write: func(string) bool { return false },
+			run:   func(o string) bool { return getBool(a.opByName[o], "readOnly") },
 		}
 	}
-	grant := a.credentialOf(headers)
-	if grant == nil {
-		allow := a.authMode != "multi-user"
-		return accessView{
-			read:  func(string) bool { return allow },
-			write: func(string) bool { return allow },
-			run:   func(string) bool { return allow },
-		}
-	}
-	held := a.expandScopes(grant)
+	held := c.held
 	return accessView{
 		read:  func(e string) bool { return held["data:"+e+":read"] },
 		write: func(e string) bool { return held["data:"+e+":write"] },
 		run:   func(o string) bool { return held["op:"+o] },
 	}
+}
+
+// reachAsScopes is the same reach written as the scope names a grant would
+// carry, so whoami and describe cannot disagree about one caller.
+func (a *Adapter) reachAsScopes(access accessView) []string {
+	scopes := map[string]bool{}
+	for name := range a.entityDefs {
+		if access.read(name) {
+			scopes["data:"+name+":read"] = true
+		}
+		if access.write(name) {
+			scopes["data:"+name+":write"] = true
+		}
+	}
+	for _, o := range a.operations {
+		if access.run(getStr(o, "name")) {
+			scopes["op:"+getStr(o, "name")] = true
+		}
+	}
+	return sortedKeys(scopes)
 }
 
 // handleDescribe serves one level of describe.
@@ -2361,12 +3467,13 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 	if status, body := a.rateGate(headers, "data"); body != nil {
 		return status, body
 	}
-	if _, status, body := a.authorize(headers, "data:"+entity+":read", false); body != nil {
-		return status, body
+	ctx, status, refusal := a.authorize(headers, "data:"+entity+":read", false)
+	if refusal != nil {
+		return status, refusal
 	}
 
 	recordID := segments[2]
-	record := a.store.getRecord(entity, recordID)
+	record := a.visible(d, ctx, a.store.getRecord(entity, recordID))
 	if record == nil {
 		return errEnv(404, "record_not_found", "No "+entity+` record "`+recordID+`".`, nil)
 	}
@@ -2426,13 +3533,17 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 	return 200, fitList(build, items)
 }
 
+// A miss is usually a guessed route, so it names the routes that answer.
+const unknownRouteMessage = "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them."
+
 var recordsRe = regexp.MustCompile(`^/api/collections/([^/]+)/records(?:/([^/]+))?$`)
 var opsRe = regexp.MustCompile(`^/api/ops/([^/]+)$`)
 var trailingSlashRe = regexp.MustCompile(`/+$`)
 
 // dispatch routes one protocol request: method, path, lower-cased headers,
-// parsed JSON body, query. It returns the status and the JSON payload.
-func (a *Adapter) dispatch(method, path string, headers map[string]string, body M, query map[string]string) (int, M) {
+// parsed JSON body, query. It returns the status, the JSON payload, and the
+// headers the reply carries beyond its content type (a session's Set-Cookie).
+func (a *Adapter) dispatch(method, path string, headers map[string]string, body M, query map[string]string) (int, M, map[string]string) {
 	lowered := map[string]string{}
 	for k, v := range headers {
 		lowered[strings.ToLower(k)] = v
@@ -2462,9 +3573,28 @@ func (a *Adapter) dispatch(method, path string, headers map[string]string, body 
 	// is otherwise a free fingerprint of the app for a rebound page: binding
 	// loopback does not stop a page on evil.com whose DNS re-resolves to
 	// 127.0.0.1, but its Host header still says evil.com.
-	if host, ok := headers["host"]; ok && !a.isAllowedHost(host) {
-		return errEnv(403, "forbidden_host", "Refused: this app answers only on its own host, not \""+host+"\".", nil)
+	if host, ok := headers["host"]; ok {
+		if status, refusal := a.hostRefusal(host); refusal != nil {
+			return status, refusal, nil
+		}
 	}
+	// Accounts, sessions and invites — the routes whose replies set the
+	// session cookie. They exist only on a multi-user app.
+	for _, prefix := range []string{"/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			if !a.multiUser {
+				status, refusal := errEnv(404, "not_multi_user", "This app has no accounts: its authMode is none.", nil)
+				return status, refusal, nil
+			}
+			return a.handleAccounts(method, path, headers, body)
+		}
+	}
+	status, payload := a.route(method, path, headers, body, q)
+	return status, payload, nil
+}
+
+// route answers every protocol path but the account routes.
+func (a *Adapter) route(method, path string, headers map[string]string, body M, q map[string]string) (int, M) {
 	if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
 		return 200, a.identity()
 	}
@@ -2494,19 +3624,47 @@ func (a *Adapter) dispatch(method, path string, headers map[string]string, body 
 		return a.handleDescribe(headers, segments, q)
 	}
 	if path == "/api/_a2app/whoami" {
-		grant := a.credentialOf(headers)
-		if grant == nil {
-			return errEnv(401, codeAgentTokenRequired, "whoami requires a credential.", nil)
+		// whoami answers whoever this app will actually serve, which is what
+		// authorize decides — so it asks the same question. The 401 that
+		// remains is the honest one: on a multi-user app with nothing
+		// presented, authorize really would refuse.
+		c, status, refusal := a.resolve(headers, false)
+		if refusal != nil {
+			return status, refusal
 		}
-		scopes := []string{}
-		for s := range a.expandScopes(grant) {
-			scopes = append(scopes, s)
+		var principalName, expiresAt any
+		if info := a.principalInfo(getStr(c.ctx, "principal")); info != nil {
+			principalName = info.Name
 		}
-		sort.Strings(scopes)
+		if c.grant != nil {
+			expiresAt = orNull(c.grant.ExpiresAt)
+		}
+		// The reach the request was given: a credential's scopes intersected
+		// with what its person may do now, or a person's own. An anonymous read
+		// on a single-user app was never scope-checked, so it reports the reach
+		// describe renders for it — one source, so the two cannot disagree.
+		scopes := sortedKeys(c.held)
+		if c.anonymous {
+			scopes = a.reachAsScopes(a.accessFor(headers))
+		}
 		return 200, M{
-			"a2app": true, "credentialId": grant["credentialId"], "agentName": grant["agentName"],
-			"principal": grant["principal"], "scopes": scopes,
+			"a2app": true, "credentialId": c.ctx["credentialId"], "agentName": c.ctx["agentName"],
+			"principal": c.ctx["principal"], "principalName": principalName, "role": c.ctx["role"],
+			"expiresAt": expiresAt, "scopes": scopes,
 		}
+	}
+	if strings.HasPrefix(path, "/api/_a2app/auth/") {
+		// Unauthenticated by design (an agent starts here with nothing), so it
+		// is metered like an operation before anything is looked up.
+		if status, limited := a.rateGate(headers, "ops"); limited != nil {
+			return status, limited
+		}
+		if status, reply, ok := a.handleDevice(method, path, headers, body); ok {
+			return status, reply
+		}
+	}
+	if path == "/api/_a2app/credentials" || strings.HasPrefix(path, "/api/_a2app/credentials/") {
+		return a.handleCredentials(method, path, headers, body)
 	}
 	if path == "/api/_a2app/context" {
 		if _, status, errBody := a.authorize(headers, "", false); errBody != nil {
@@ -2539,7 +3697,7 @@ func (a *Adapter) dispatch(method, path string, headers map[string]string, body 
 		return a.handleOperation(headers, m[1], body)
 	}
 
-	return errEnv(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.", nil)
+	return errEnv(404, "not_found", unknownRouteMessage, nil)
 }
 
 /* -- records ------------------------------------------------------------------ */
@@ -2646,17 +3804,22 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 	serverNow := nowISO()
 
 	if method == "GET" {
-		if _, status, errBody := a.authorize(headers, "data:"+entity+":read", false); errBody != nil {
+		ctx, status, errBody := a.authorize(headers, "data:"+entity+":read", false)
+		if errBody != nil {
 			return status, errBody
 		}
 		if recID != "" {
-			rec := a.store.getRecord(entity, recID)
+			rec := a.visible(d, ctx, a.store.getRecord(entity, recID))
 			if rec == nil {
 				return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
 			}
 			return 200, rec
 		}
-		result, err := a.store.listRecords(entity, queryToM(query))
+		listQuery := queryToM(query)
+		if a.ownedOnly(d, ctx) {
+			listQuery["where"] = map[string]string{getStr(d, "ownedBy"): getStr(ctx, "principal")}
+		}
+		result, err := a.store.listRecords(entity, listQuery)
 		if err != nil {
 			// Refuse, never ignore: unfiltered rows under a filter would be a
 			// 200 with the wrong records (see the grammar's comment).
@@ -2665,7 +3828,7 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		return 200, result
 	}
 
-	_, status, errBody := a.authorize(headers, "data:"+entity+":write", true)
+	ctx, status, errBody := a.authorize(headers, "data:"+entity+":write", true)
 	if errBody != nil {
 		return status, errBody
 	}
@@ -2676,6 +3839,9 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 	if method == "DELETE" {
 		if recID == "" {
 			return errEnv(400, "usage", "DELETE requires a record id.", nil)
+		}
+		if a.ownedOnly(d, ctx) && a.visible(d, ctx, a.store.getRecord(entity, recID)) == nil {
+			return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
 		}
 
 		// The app's referential rules bind THIS door too.
@@ -2743,15 +3909,25 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		}
 	}
 
+	// Backend write. The owner field is the adapter's to set: the guard has
+	// already refused a client that tried, because it is read-only.
 	var stored M
 	if method == "POST" {
-		stored = a.materialize(entity, body)
+		create := body
+		if ownedBy := getStr(d, "ownedBy"); ownedBy != "" {
+			create = M{}
+			for k, v := range body {
+				create[k] = v
+			}
+			create[ownedBy] = ctx["principal"]
+		}
+		stored = a.materialize(entity, create)
 		a.store.putRecord(entity, stored)
 	} else {
 		if recID == "" {
 			return errEnv(400, "usage", "PATCH requires a record id.", nil)
 		}
-		existing := a.store.getRecord(entity, recID)
+		existing := a.visible(d, ctx, a.store.getRecord(entity, recID))
 		if existing == nil {
 			return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
 		}
@@ -2839,14 +4015,16 @@ func (a *Adapter) handleOperation(headers map[string]string, name string, args M
 }
 
 // runOperation shields the surface from a runner that panics: app code failing
-// must answer operation_failed, never take the process down mid-request.
+// must answer operation_failed, never take the process down mid-request. The
+// runner's store is bound to its caller, so a task it queues is done by an
+// agent acting as whoever called it.
 func (a *Adapter) runOperation(runner OperationRunner, args M, ctx M) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%v", r)
 		}
 	}()
-	return runner(args, ctx, a.store)
+	return runner(args, ctx, a.store.forCaller(getStr(ctx, "principal")))
 }
 
 /* -- tasks / events ---------------------------------------------------------------- */
@@ -2982,14 +4160,54 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		task["status"] = "canceled"
 		a.store.saveTask(task)
 		return 200, taskWire(task)
+	case "credential":
+		// What the bridge runs the task's harness with (spec §6.2): the person
+		// who queued it, the capability's scopes, and no life past the task.
+		mgr, status, refusal := a.managerOf(headers, true)
+		if refusal != nil {
+			return status, refusal
+		}
+		if mgr.role != "owner" {
+			return errEnv(403, "not_a_manager", "Only an owner issues a task's credential.", nil)
+		}
+		if terminalTask[getStr(task, "status")] {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" already reached "+getStr(task, "status")+".", nil)
+		}
+		request, _ := task["request"].(M)
+		principal := getStr(request, "principal")
+		if principal == "" {
+			principal = ownerPrincipal.ID
+		}
+		info := a.principalInfo(principal)
+		if info == nil || !info.Active {
+			return errEnv(401, "principal_inactive", "The person who queued this task is no longer active.", nil)
+		}
+		agentName, problem := parseAgentName(body["agentName"])
+		if problem != "" {
+			return errEnv(400, "usage", problem, nil)
+		}
+		scopes := []string{"*"}
+		if declared, ok := a.capabilities[getStr(request, "capability")]["scopes"]; ok && declared != nil {
+			scopes = scopeList(declared)
+		}
+		token, grant := a.mintCredential(principal, agentName, scopes, taskCredentialSeconds, taskID)
+		return 201, M{"a2app": true, "token": token, "credential": credentialWire(grant, info.Name)}
 	}
 	return errEnv(404, "usage", `Unknown task action "`+action+`".`, nil)
 }
 
 func taskWire(t M) M {
+	// `principal` is who queued the task (null for the app's own work) — the
+	// person its agent acts as.
+	request := M{"principal": nil}
+	if r, ok := t["request"].(M); ok {
+		for k, v := range r {
+			request[k] = v
+		}
+	}
 	return M{
 		"id": t["id"], "app": t["app"], "event": t["event"], "status": t["status"],
-		"request": t["request"], "claim": t["claim"], "progress": t["progress"],
+		"request": request, "claim": t["claim"], "progress": t["progress"],
 		"result": t["result"], "reason": t["reason"], "createdAt": t["createdAt"],
 		"updatedAt": t["updatedAt"], "pollAfterMs": 2000,
 	}
@@ -2997,8 +4215,765 @@ func taskWire(t M) M {
 
 /* -- app -> agent -------------------------------------------------------------------- */
 
+// trigger emits a declared event and, when capability is non-empty, queues a
+// task — work the app queues on its own, so nobody asked: the task's principal
+// is null and its agent runs as the owner.
 func (a *Adapter) trigger(etype string, payload M, capability string) (M, error) {
 	return a.store.trigger(etype, payload, capability)
+}
+
+/* -- accounts, sessions, invites (multi-user) ---------------------------------------- */
+// spec/v0_2/auth.md §4. Parity oracle: adapter-core accounts.ts.
+//
+//   GET/POST/DELETE /api/_a2app/session        who is signed in · sign in · sign out
+//   POST /api/_a2app/invites                    a one-time setup link (owner manager)
+//   GET/POST /api/_a2app/invites/{code}         read · accept (creates the account)
+//   GET /api/_a2app/users                       every account (owner manager)
+//   PATCH /api/_a2app/users/{id}                activate/deactivate, change role
+//
+// Accounts are adapter state, never records: they are not served by the
+// records API, and a password hash never leaves this section.
+
+const (
+	sessionTTL       = 14 * 24 * time.Hour
+	inviteTTL        = 7 * 24 * time.Hour
+	signInFailureMax = 10
+	signInWindow     = 15 * time.Minute
+	loginMax         = 254
+	nameMax          = 100
+)
+
+// accountWire is the account as served: never its password hash.
+func accountWire(account Account) M {
+	return M{
+		"id": account.ID, "name": account.Name, "login": account.Login, "role": account.Role,
+		"active": account.Active, "createdAt": account.CreatedAt,
+	}
+}
+
+func accountReply(account Account) M {
+	reply := accountWire(account)
+	reply["a2app"] = true
+	return reply
+}
+
+// plain is a reply that sets no header.
+func plain(status int, body M) (int, M, map[string]string) { return status, body, nil }
+
+func (a *Adapter) sessionCookieHeader(value string, maxAge time.Duration) map[string]string {
+	return map[string]string{"Set-Cookie": sessionCookie(a.sessionCookieName, value, int(maxAge/time.Second), a.secureCookies)}
+}
+
+func (a *Adapter) accounts() []Account {
+	out := []Account{}
+	for _, r := range authRows[Account](a.store, tableUsers) {
+		out = append(out, r.row)
+	}
+	return out
+}
+
+func (a *Adapter) accountByLogin(login string) *Account {
+	for _, account := range a.accounts() {
+		if account.Login == login {
+			found := account
+			return &found
+		}
+	}
+	return nil
+}
+
+func (a *Adapter) activeOwners() int {
+	n := 0
+	for _, account := range a.accounts() {
+		if account.Role == "owner" && account.Active {
+			n++
+		}
+	}
+	return n
+}
+
+// handleAccounts routes one request under /api/_a2app/{session,invites,users}.
+func (a *Adapter) handleAccounts(method, path string, headers map[string]string, body M) (int, M, map[string]string) {
+	if body == nil {
+		body = M{}
+	}
+	switch {
+	case path == "/api/_a2app/session":
+		return a.handleSession(method, headers, body)
+	case path == "/api/_a2app/invites":
+		return plain(a.createInvite(method, headers, body))
+	case strings.HasPrefix(path, "/api/_a2app/invites/"):
+		return a.handleInvite(method, strings.TrimPrefix(path, "/api/_a2app/invites/"), headers, body)
+	case path == "/api/_a2app/users":
+		return plain(a.handleUsers(method, "", headers, body))
+	case strings.HasPrefix(path, "/api/_a2app/users/"):
+		return plain(a.handleUsers(method, strings.TrimPrefix(path, "/api/_a2app/users/"), headers, body))
+	}
+	return plain(errEnv(404, "not_found", unknownRouteMessage, nil))
+}
+
+func (a *Adapter) startSession(account Account, status int) (int, M, map[string]string) {
+	secret := newSecret()
+	created := a.now()
+	a.store.putAuthRow(tableSessions, hashSecret(secret), sessionRow{
+		Principal: account.ID, CreatedAt: isoOf(created), ExpiresAt: isoOf(created.Add(sessionTTL)),
+	})
+	return status, accountReply(account), a.sessionCookieHeader(secret, sessionTTL)
+}
+
+func (a *Adapter) handleSession(method string, headers map[string]string, body M) (int, M, map[string]string) {
+	switch method {
+	case "GET":
+		_, account := a.sessionOf(headers)
+		if account == nil {
+			return plain(errEnv(401, "sign_in_required", "Not signed in.", M{"signInUrl": accountURL + "#sign-in"}))
+		}
+		return 200, accountReply(*account), nil
+	case "DELETE":
+		if key, account := a.sessionOf(headers); account != nil {
+			a.store.deleteAuthRow(tableSessions, key)
+		}
+		return 200, M{"a2app": true, "ok": true}, a.sessionCookieHeader("", 0)
+	case "POST":
+	default:
+		return plain(errEnv(405, "usage", method+" not allowed on the session.", nil))
+	}
+
+	login, loginOK := body["login"].(string)
+	password, passwordOK := body["password"].(string)
+	if !loginOK || !passwordOK {
+		return plain(errEnv(400, "usage", "Sign in with { login, password }.", nil))
+	}
+	login = normalizeLogin(login)
+	if wait := a.signInFailures.retryAfter(login); wait > 0 {
+		return plain(errEnv(429, codeRateLimited, "Too many failed sign-ins for this login. Try again later.",
+			M{"retryAfterSeconds": wait}))
+	}
+	account := a.accountByLogin(login)
+	matches := false
+	if account != nil {
+		matches = verifyPassword(password, account.PasswordHash)
+	} else {
+		a.dummyHashOnce.Do(func() { a.dummyHash = hashPassword(newSecret(), pbkdf2Iterations) })
+		verifyPassword(password, a.dummyHash)
+	}
+	if account == nil || !matches || !account.Active {
+		a.signInFailures.fail(login)
+		return plain(errEnv(401, "sign_in_failed", "That login and password do not match an active account.", nil))
+	}
+	a.signInFailures.reset(login)
+	return a.startSession(*account, 200)
+}
+
+// accountProblem is the reason body is not a valid new account, or "".
+func accountProblem(body M) string {
+	name, ok := body["name"].(string)
+	if !ok || strings.TrimSpace(name) == "" || jsLength(strings.TrimSpace(name)) > nameMax {
+		return fmt.Sprintf("name must be 1–%d characters.", nameMax)
+	}
+	login, ok := body["login"].(string)
+	if !ok || normalizeLogin(login) == "" || jsLength(normalizeLogin(login)) > loginMax {
+		return fmt.Sprintf("login must be 1–%d characters.", loginMax)
+	}
+	password, ok := body["password"].(string)
+	if !ok || jsLength(password) < passwordMin || jsLength(password) > passwordMax {
+		return fmt.Sprintf("password must be %d–%d characters.", passwordMin, passwordMax)
+	}
+	return ""
+}
+
+// liveInvite is the invite behind code and its key, dropping it if it expired.
+func (a *Adapter) liveInvite(code string) (string, *inviteRow) {
+	key := hashSecret(code)
+	var invite inviteRow
+	if !a.store.authRow(tableInvites, key, &invite) {
+		return "", nil
+	}
+	if expires, ok := parseISO(invite.ExpiresAt); !ok || !expires.After(a.now()) {
+		a.store.deleteAuthRow(tableInvites, key)
+		return "", nil
+	}
+	return key, &invite
+}
+
+func (a *Adapter) createInvite(method string, headers map[string]string, body M) (int, M) {
+	if method != "POST" {
+		return errEnv(405, "usage", method+" not allowed on invites.", nil)
+	}
+	mgr, status, refusal := a.managerOf(headers, true)
+	if refusal != nil {
+		return status, refusal
+	}
+	if mgr.role != "owner" {
+		return errEnv(403, "not_a_manager", "Only an owner can invite people.", nil)
+	}
+	role := "member"
+	if v, ok := body["role"]; ok && v != nil {
+		s, _ := v.(string)
+		if s != "owner" && s != "member" {
+			return errEnv(400, "usage", `role is "owner" or "member".`, nil)
+		}
+		role = s
+	}
+	secret := newSecret()
+	created := a.now()
+	invite := inviteRow{Role: role, CreatedAt: isoOf(created), ExpiresAt: isoOf(created.Add(inviteTTL))}
+	a.store.putAuthRow(tableInvites, hashSecret(secret), invite)
+	return 201, M{
+		"a2app": true, "code": secret, "url": a.publicOrigin(headers) + accountURL + "#setup/" + secret,
+		"role": invite.Role, "expiresAt": invite.ExpiresAt,
+	}
+}
+
+func (a *Adapter) handleInvite(method, code string, headers map[string]string, body M) (int, M, map[string]string) {
+	const invalid = "This invite link is not valid: it was used, or it expired."
+	_, invite := a.liveInvite(code)
+	if invite == nil {
+		return plain(errEnv(404, "invite_invalid", invalid, nil))
+	}
+	if method == "GET" {
+		return 200, M{"a2app": true, "role": invite.Role, "expiresAt": invite.ExpiresAt}, nil
+	}
+	if method != "POST" {
+		return plain(errEnv(405, "usage", method+" not allowed on an invite.", nil))
+	}
+	if problem := accountProblem(body); problem != "" {
+		return plain(errEnv(400, "usage", problem, nil))
+	}
+	login := normalizeLogin(body["login"].(string))
+	if a.accountByLogin(login) != nil {
+		return plain(errEnv(409, "login_taken", "That login is already in use.", nil))
+	}
+	passwordHash := hashPassword(body["password"].(string), pbkdf2Iterations)
+	// The slow hash is done. From here to the write the checks and the write
+	// are one step, so a second acceptance of the same invite, or a second
+	// account racing for the same login, sees this one's result.
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	key, still := a.liveInvite(code)
+	if still == nil {
+		return plain(errEnv(404, "invite_invalid", invalid, nil))
+	}
+	if a.accountByLogin(login) != nil {
+		return plain(errEnv(409, "login_taken", "That login is already in use.", nil))
+	}
+	account := Account{
+		ID: newID("usr"), Name: strings.TrimSpace(body["name"].(string)), Login: login, Role: still.Role,
+		Active: true, CreatedAt: isoOf(a.now()), PasswordHash: passwordHash,
+	}
+	a.store.deleteAuthRow(tableInvites, key)
+	a.store.putAuthRow(tableUsers, account.ID, account)
+	return a.startSession(account, 201)
+}
+
+func (a *Adapter) handleUsers(method, id string, headers map[string]string, body M) (int, M) {
+	mgr, status, refusal := a.managerOf(headers, method != "GET")
+	if refusal != nil {
+		return status, refusal
+	}
+	if mgr.role != "owner" {
+		return errEnv(403, "not_a_manager", "Only an owner can manage people.", nil)
+	}
+	if id == "" {
+		if method != "GET" {
+			return errEnv(405, "usage", method+" not allowed on users.", nil)
+		}
+		accounts := a.accounts()
+		sort.SliceStable(accounts, func(i, j int) bool { return accounts[i].CreatedAt < accounts[j].CreatedAt })
+		users := []M{}
+		for _, account := range accounts {
+			users = append(users, accountWire(account))
+		}
+		return 200, M{"a2app": true, "users": users}
+	}
+	if method != "PATCH" {
+		return errEnv(405, "usage", method+" not allowed on a user.", nil)
+	}
+	// One step from the read to the write: two owners demoting each other at
+	// once must not both pass the last-owner check.
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	var account Account
+	if !a.store.authRow(tableUsers, id, &account) {
+		return errEnv(404, "not_found", `No account "`+id+`".`, nil)
+	}
+	next := account
+	if v, ok := body["active"]; ok {
+		active, isBool := v.(bool)
+		if !isBool {
+			return errEnv(400, "usage", "active is true or false.", nil)
+		}
+		next.Active = active
+	}
+	if v, ok := body["role"]; ok {
+		role, _ := v.(string)
+		if role != "owner" && role != "member" {
+			return errEnv(400, "usage", `role is "owner" or "member".`, nil)
+		}
+		next.Role = role
+	}
+	losesOwner := account.Role == "owner" && account.Active && (next.Role != "owner" || !next.Active)
+	if losesOwner && a.activeOwners() == 1 {
+		return errEnv(409, "last_owner", "This is the last active owner. Make someone else an owner first.", nil)
+	}
+	a.store.putAuthRow(tableUsers, next.ID, next)
+	return 200, accountReply(next)
+}
+
+/* -- credentials -------------------------------------------------------------------- */
+// spec/v0_2/auth.md §2, §8. Parity oracle: adapter-core credentials.ts.
+//
+//   GET /api/_a2app/credentials          a manager's own (an owner: everyone's)
+//   POST /api/_a2app/credentials         issue one; the token is in this reply only
+//   DELETE /api/_a2app/credentials/{id}  revoke (a manager, or the credential itself)
+//
+// Every credential this app issues is made by mintCredential: a 256-bit token
+// returned once, stored as its SHA-256, bound to one principal, always
+// expiring. Whatever its scopes say, each request it makes is limited to what
+// that principal may do at the time (credentialOf).
+
+const (
+	defaultExpiresSeconds = 30 * 24 * 60 * 60
+	minExpiresSeconds     = 60
+	maxExpiresSeconds     = 365 * 24 * 60 * 60
+	// A task credential's lifetime (spec §6.2); its task ending kills it sooner.
+	taskCredentialSeconds = 60 * 60
+)
+
+// credentialWire is a credential as listed: never its token or the token's hash.
+func credentialWire(g Grant, principalName any) M {
+	return M{
+		"credentialId": g.CredentialID, "principal": g.Principal, "principalName": principalName,
+		"agentName": orNull(g.AgentName), "scopes": g.Scopes, "createdAt": g.CreatedAt,
+		"expiresAt": orNull(g.ExpiresAt), "lastUsedAt": orNull(g.LastUsedAt), "task": orNull(g.Task),
+	}
+}
+
+// mintCredential issues a credential: it stores the token's hash and returns
+// the token — once — with the grant. `task` is "" except for a task credential.
+func (a *Adapter) mintCredential(principal, agentName string, scopes []string, expiresInSeconds int, task string) (string, Grant) {
+	token := newToken()
+	now := a.now()
+	grant := Grant{
+		CredentialID: newID("cred"), TokenHash: hashSecret(token), Principal: principal, AgentName: agentName,
+		Scopes: scopes, CreatedAt: isoOf(now), ExpiresAt: isoOf(now.Add(time.Duration(expiresInSeconds) * time.Second)),
+		Task: task,
+	}
+	a.store.putGrant(grant)
+	return token, grant
+}
+
+// parseAgentName is the optional agent name a caller gave a credential,
+// checked: "" for none, or the reason it cannot be used.
+func parseAgentName(value any) (name string, problem string) {
+	if value == nil {
+		return "", ""
+	}
+	s, ok := value.(string)
+	if !ok || strings.TrimSpace(s) == "" || jsLength(s) > 100 {
+		return "", "agentName is 1–100 characters."
+	}
+	return strings.TrimSpace(s), ""
+}
+
+// parseGrantRequest is the scopes and lifetime a caller asked for, checked, or
+// the reason they cannot be granted. `scopes` defaults to `*`; every entry
+// must be `*` or a scope the app declares.
+func parseGrantRequest(body M, declared map[string]bool) (scopes []string, expiresInSeconds int, problem string) {
+	raw, ok := body["scopes"]
+	if !ok || raw == nil {
+		raw = []any{"*"}
+	}
+	items := toAnyList(raw)
+	if len(items) == 0 {
+		return nil, 0, `scopes is a non-empty list of scope names (or ["*"]).`
+	}
+	asked := []string{}
+	for _, item := range items {
+		s, isString := item.(string)
+		if !isString {
+			return nil, 0, `scopes is a non-empty list of scope names (or ["*"]).`
+		}
+		asked = append(asked, s)
+	}
+	unknown := []string{}
+	for _, s := range asked {
+		if s != "*" && !declared[s] {
+			unknown = append(unknown, s)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, 0, "Not scopes this app declares: " + strings.Join(unknown, ", ") + "."
+	}
+	expiresInSeconds = defaultExpiresSeconds
+	if v, present := body["expiresIn"]; present && v != nil {
+		n, isNumber := asFloat(v)
+		if !isNumber || n != math.Trunc(n) || n < minExpiresSeconds || n > maxExpiresSeconds {
+			return nil, 0, fmt.Sprintf("expiresIn is a whole number of seconds from %d to %d (365 days).",
+				minExpiresSeconds, maxExpiresSeconds)
+		}
+		expiresInSeconds = int(n)
+	}
+	seen := map[string]bool{}
+	for _, s := range asked {
+		if !seen[s] {
+			seen[s] = true
+			scopes = append(scopes, s)
+		}
+	}
+	return scopes, expiresInSeconds, ""
+}
+
+// principalName is a principal's name as listed, or nil when it is unknown.
+func (a *Adapter) principalName(id string) any {
+	if info := a.principalInfo(id); info != nil {
+		return info.Name
+	}
+	return nil
+}
+
+// liveGrant is a credential that can still make a request: not the admin
+// credential, not revoked, not expired, its task not over.
+func (a *Adapter) liveGrant(g Grant) bool {
+	if g.Admin || g.RevokedAt != "" {
+		return false
+	}
+	if expires, ok := parseISO(g.ExpiresAt); ok && !expires.After(a.now()) {
+		return false
+	}
+	if g.Task != "" {
+		task := a.store.getTask(g.Task)
+		if task == nil || terminalTask[getStr(task, "status")] {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Adapter) handleCredentials(method, path string, headers map[string]string, body M) (int, M) {
+	if body == nil {
+		body = M{}
+	}
+	if path == "/api/_a2app/credentials" {
+		switch method {
+		case "GET":
+			return a.listCredentials(headers)
+		case "POST":
+			return a.issueCredential(headers, body)
+		}
+		return errEnv(405, "usage", method+" not allowed on credentials.", nil)
+	}
+	if method != "DELETE" {
+		return errEnv(405, "usage", "A credential is revoked with DELETE.", nil)
+	}
+	return a.revokeCredential(headers, strings.TrimPrefix(path, "/api/_a2app/credentials/"))
+}
+
+func (a *Adapter) listCredentials(headers map[string]string) (int, M) {
+	mgr, status, refusal := a.managerOf(headers, false)
+	if refusal != nil {
+		return status, refusal
+	}
+	grants := []Grant{}
+	for _, g := range a.store.listGrants() {
+		if a.liveGrant(g) && (mgr.role == "owner" || g.Principal == mgr.principal) {
+			grants = append(grants, g)
+		}
+	}
+	sort.SliceStable(grants, func(i, j int) bool { return grants[i].CreatedAt > grants[j].CreatedAt })
+	credentials := []M{}
+	for _, g := range grants {
+		credentials = append(credentials, credentialWire(g, a.principalName(g.Principal)))
+	}
+	return 200, M{"a2app": true, "credentials": credentials}
+}
+
+func (a *Adapter) issueCredential(headers map[string]string, body M) (int, M) {
+	mgr, status, refusal := a.managerOf(headers, true)
+	if refusal != nil {
+		return status, refusal
+	}
+	principal := mgr.principal
+	if v, ok := body["principal"]; ok && v != nil {
+		s, isString := v.(string)
+		if !isString {
+			return errEnv(400, "usage", `principal is an account id (or "owner").`, nil)
+		}
+		principal = s
+	}
+	if principal != mgr.principal && mgr.role != "owner" {
+		return errEnv(403, "not_a_manager", "Only an owner can issue a credential for someone else.", nil)
+	}
+	info := a.principalInfo(principal)
+	if info == nil || !info.Active {
+		return errEnv(400, "usage", `"`+principal+`" is not an active account of this app.`, nil)
+	}
+	agentName, problem := parseAgentName(body["agentName"])
+	if problem != "" {
+		return errEnv(400, "usage", problem, nil)
+	}
+	scopes, expiresIn, problem := parseGrantRequest(body, a.allScopes())
+	if problem != "" {
+		return errEnv(400, "usage", problem, nil)
+	}
+	token, grant := a.mintCredential(principal, agentName, scopes, expiresIn, "")
+	return 201, M{"a2app": true, "token": token, "credential": credentialWire(grant, info.Name)}
+}
+
+func (a *Adapter) revokeCredential(headers map[string]string, id string) (int, M) {
+	grant := a.store.grantByID(id)
+	if grant == nil {
+		return errEnv(404, "not_found", `No credential "`+id+`".`, nil)
+	}
+	if grant.Admin {
+		return errEnv(403, "not_a_manager", "The admin credential is the app's .agent-token: rotate that file instead.", nil)
+	}
+	// A credential may always revoke itself — the one thing an agent may do
+	// with credentials — so an agent can hand back access it no longer needs.
+	p, _, _ := a.credentialOf(headers)
+	if p == nil || p.grant.CredentialID != id {
+		mgr, status, refusal := a.managerOf(headers, true)
+		if refusal != nil {
+			return status, refusal
+		}
+		if mgr.role != "owner" && grant.Principal != mgr.principal {
+			return errEnv(404, "not_found", `No credential "`+id+`".`, nil)
+		}
+	}
+	stamp := isoOf(a.now())
+	a.store.updateGrant(id, func(g *Grant) {
+		if g.RevokedAt == "" {
+			g.RevokedAt = stamp
+		}
+	})
+	return 200, M{"a2app": true, "ok": true, "revoked": id}
+}
+
+/* -- device-code sign-in ---------------------------------------------------------------- */
+// spec/v0_2/auth.md §7 (RFC 8628 shape). Parity oracle: adapter-core device.ts.
+//
+//   POST /api/_a2app/auth/device               an agent asks; gets a code to show
+//   GET  /api/_a2app/auth/device/{userCode}     the person reviews (a manager)
+//   POST /api/_a2app/auth/device/{userCode}     the person approves or denies
+//   POST /api/_a2app/auth/token                 the agent polls; gets its credential
+//
+// The person approves on the app's own account page, signed in as themselves;
+// the credential issued acts for them, with the scopes they approved. No
+// password or session ever reaches the agent. Codes live 10 minutes, are single
+// use, and the device code is stored only as its hash. Every transition runs
+// under authMu, so a code is approved, denied or redeemed exactly once.
+
+const (
+	deviceCodeTTLSeconds      = 600
+	devicePollIntervalSeconds = 5
+	deviceSlowDownStepSeconds = 5
+)
+
+// handleDevice routes one request under /api/_a2app/auth/; handled is false
+// for a path that is not one of its routes.
+func (a *Adapter) handleDevice(method, path string, headers map[string]string, body M) (status int, reply M, handled bool) {
+	if body == nil {
+		body = M{}
+	}
+	routed := func(status int, reply M) (int, M, bool) { return status, reply, true }
+	switch {
+	case path == "/api/_a2app/auth/device":
+		if method != "POST" {
+			return routed(errEnv(405, "usage", "Start a sign-in with POST.", nil))
+		}
+		return routed(a.startDevice(headers, body))
+	case path == "/api/_a2app/auth/token":
+		if method != "POST" {
+			return routed(errEnv(405, "usage", "Poll with POST.", nil))
+		}
+		return routed(a.pollDevice(body))
+	case strings.HasPrefix(path, "/api/_a2app/auth/device/"):
+		code := strings.TrimPrefix(path, "/api/_a2app/auth/device/")
+		switch method {
+		case "GET":
+			return routed(a.reviewDevice(headers, code))
+		case "POST":
+			return routed(a.decideDevice(headers, code, body))
+		}
+		return routed(errEnv(405, "usage", method+" not allowed on a sign-in request.", nil))
+	}
+	return 0, nil, false
+}
+
+// liveDevices is every sign-in still in progress, dropping the expired as it goes.
+func (a *Adapter) liveDevices() []keyedRow[deviceRow] {
+	now := a.now()
+	live := []keyedRow[deviceRow]{}
+	for _, r := range authRows[deviceRow](a.store, tableDevices) {
+		if expires, ok := parseISO(r.row.ExpiresAt); ok && expires.After(now) {
+			live = append(live, r)
+		} else {
+			a.store.deleteAuthRow(tableDevices, r.key)
+		}
+	}
+	return live
+}
+
+// pendingDevice is the sign-in waiting under a user code as typed, or nil.
+func (a *Adapter) pendingDevice(input string) *keyedRow[deviceRow] {
+	code := normalizeUserCode(input)
+	if code == "" {
+		return nil
+	}
+	for _, r := range a.liveDevices() {
+		if r.row.UserCode == code && r.row.Status == "pending" {
+			found := r
+			return &found
+		}
+	}
+	return nil
+}
+
+func (a *Adapter) startDevice(headers map[string]string, body M) (int, M) {
+	scopes, expiresIn, problem := parseGrantRequest(body, a.allScopes())
+	if problem != "" {
+		return errEnv(400, "usage", problem, nil)
+	}
+	agentName := ""
+	if v, present := body["agentName"]; present {
+		s, ok := v.(string)
+		if !ok || strings.TrimSpace(s) == "" || jsLength(s) > 100 {
+			return errEnv(400, "usage", "agentName is 1–100 characters.", nil)
+		}
+		agentName = strings.TrimSpace(s)
+	}
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	taken := map[string]bool{}
+	for _, r := range a.liveDevices() {
+		taken[r.row.UserCode] = true
+	}
+	userCode := newUserCode()
+	for taken[userCode] {
+		userCode = newUserCode()
+	}
+	deviceCode := newSecret()
+	now := a.now()
+	a.store.putAuthRow(tableDevices, hashSecret(deviceCode), deviceRow{
+		UserCode: userCode, AgentName: agentName, Scopes: scopes, ExpiresInSeconds: expiresIn,
+		CreatedAt: isoOf(now), ExpiresAt: isoOf(now.Add(deviceCodeTTLSeconds * time.Second)),
+		Interval: devicePollIntervalSeconds, Status: "pending",
+	})
+	approve := a.publicOrigin(headers) + accountURL + "#approve"
+	return 200, M{
+		"a2app": true, "deviceCode": deviceCode, "userCode": userCode,
+		"verificationUri": approve, "verificationUriComplete": approve + "/" + userCode,
+		"expiresIn": deviceCodeTTLSeconds, "interval": devicePollIntervalSeconds,
+	}
+}
+
+func (a *Adapter) pollDevice(body M) (int, M) {
+	deviceCode, ok := body["deviceCode"].(string)
+	if !ok {
+		return errEnv(400, "usage", "Poll with { deviceCode }.", nil)
+	}
+	key := hashSecret(deviceCode)
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	var row deviceRow
+	found := a.store.authRow(tableDevices, key, &row)
+	now := a.now()
+	if expires, ok := parseISO(row.ExpiresAt); !found || !ok || !expires.After(now) {
+		if found {
+			a.store.deleteAuthRow(tableDevices, key)
+		}
+		return errEnv(400, "expired_token", "This sign-in request expired or was already used. Start again.", nil)
+	}
+	if row.Status == "denied" {
+		a.store.deleteAuthRow(tableDevices, key)
+		return errEnv(400, "access_denied", "The person declined this agent's request.", nil)
+	}
+	if row.Status == "approved" && row.ApprovedBy != "" && row.ApprovedScopes != nil {
+		// Single use: the row goes before the credential is handed out.
+		a.store.deleteAuthRow(tableDevices, key)
+		info := a.principalInfo(row.ApprovedBy)
+		if info == nil || !info.Active {
+			return errEnv(400, "access_denied", "The person who approved this is no longer active.", nil)
+		}
+		token, grant := a.mintCredential(row.ApprovedBy, row.AgentName, row.ApprovedScopes, row.ExpiresInSeconds, "")
+		return 200, M{"a2app": true, "token": token, "credential": credentialWire(grant, info.Name)}
+	}
+	polledAt := now.UnixMilli()
+	if row.LastPolledAt != nil && polledAt-*row.LastPolledAt < int64(row.Interval)*1000 {
+		row.Interval += deviceSlowDownStepSeconds
+		row.LastPolledAt = &polledAt
+		a.store.putAuthRow(tableDevices, key, row)
+		return errEnv(400, "slow_down", fmt.Sprintf("Polling too fast: wait %d s between polls.", row.Interval),
+			M{"interval": row.Interval})
+	}
+	row.LastPolledAt = &polledAt
+	a.store.putAuthRow(tableDevices, key, row)
+	return errEnv(400, "authorization_pending", "Waiting for the person to approve.", M{"interval": row.Interval})
+}
+
+const deviceCodeInvalid = "No sign-in request with that code is waiting: it was used, or it expired."
+
+func (a *Adapter) reviewDevice(headers map[string]string, userCode string) (int, M) {
+	if _, status, refusal := a.managerOf(headers, false); refusal != nil {
+		return status, refusal
+	}
+	found := a.pendingDevice(userCode)
+	if found == nil {
+		return errEnv(404, "device_code_invalid", deviceCodeInvalid, nil)
+	}
+	row := found.row
+	return 200, M{
+		"a2app": true, "userCode": row.UserCode, "agentName": orNull(row.AgentName), "scopes": row.Scopes,
+		"expiresIn": row.ExpiresInSeconds, "expiresAt": row.ExpiresAt,
+	}
+}
+
+func (a *Adapter) decideDevice(headers map[string]string, userCode string, body M) (int, M) {
+	mgr, status, refusal := a.managerOf(headers, true)
+	if refusal != nil {
+		return status, refusal
+	}
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	found := a.pendingDevice(userCode)
+	if found == nil {
+		return errEnv(404, "device_code_invalid", deviceCodeInvalid, nil)
+	}
+	row := found.row
+	approve, ok := body["approve"].(bool)
+	if !ok {
+		return errEnv(400, "usage", "Decide with { approve: true | false }.", nil)
+	}
+	if !approve {
+		row.Status = "denied"
+		a.store.putAuthRow(tableDevices, found.key, row)
+		return 200, M{"a2app": true, "ok": true, "status": "denied"}
+	}
+	// The person may only narrow what was asked for.
+	scopes := row.Scopes
+	if v, present := body["scopes"]; present {
+		approved, _, problem := parseGrantRequest(M{"scopes": v}, a.allScopes())
+		if problem != "" {
+			return errEnv(400, "usage", problem, nil)
+		}
+		wider := []string{}
+		if !contains(row.Scopes, "*") {
+			for _, s := range approved {
+				if s == "*" || !contains(row.Scopes, s) {
+					wider = append(wider, s)
+				}
+			}
+		}
+		if len(wider) > 0 {
+			return errEnv(400, "usage", "Approval can only narrow what the agent asked for, not add "+strings.Join(wider, ", ")+".", nil)
+		}
+		scopes = approved
+	}
+	row.Status = "approved"
+	row.ApprovedBy = mgr.principal
+	row.ApprovedScopes = scopes
+	a.store.putAuthRow(tableDevices, found.key, row)
+	return 200, M{"a2app": true, "ok": true, "status": "approved"}
 }
 
 /* ------------------------------------------------------------------ self-test */
@@ -3163,6 +5138,8 @@ func selftest() int {
 			check("a fresh database file wants the seed", first.WantsSeed, true)
 			first.putRecord("tasks", M{"id": "t1", "title": "persisted", "status": "todo"})
 			first.idemPut("tasks", "key-1", "t1")
+			first.putGrant(Grant{CredentialID: "cred_a", TokenHash: hashSecret("token-a"), Principal: "owner", Scopes: []string{"*"}})
+			first.putAuthRow(tableUsers, "usr_a", Account{ID: "usr_a", Login: "a", Role: "member", Active: true})
 			check("sqlite get returns what was put", getStr(first.getRecord("tasks", "t1"), "title"), "persisted")
 			ids := []string{}
 			if result, err := first.listRecords("tasks", M{"filter": `status = "todo"`}); err == nil {
@@ -3180,6 +5157,14 @@ func selftest() int {
 				check("an existing database refuses the seed", second.WantsSeed, false)
 				check("records survive a restart", getStr(second.getRecord("tasks", "t1"), "title"), "persisted")
 				check("idempotency keys survive a restart", second.idemGet("tasks", "key-1"), "t1")
+				restored := second.grantByTokenHash(hashSecret("token-a"))
+				check("credentials survive a restart, found by their token's hash", restored != nil && restored.CredentialID == "cred_a", true)
+				var account Account
+				check("accounts survive a restart", second.authRow(tableUsers, "usr_a", &account) && account.Login == "a", true)
+				second.putGrant(Grant{CredentialID: "cred_a", TokenHash: hashSecret("token-b"), Principal: "owner", Scopes: []string{"*"}})
+				check("a rotated token replaces the old one", second.grantByTokenHash(hashSecret("token-a")) == nil, true)
+				check("…with the new one in force", second.grantByTokenHash(hashSecret("token-b")) != nil, true)
+				check("an updated grant keeps one row", len(second.listGrants()), 1)
 				check("delete removes the row", second.deleteRecord("tasks", "t1"), true)
 				check("a second delete reports not-found", second.deleteRecord("tasks", "t1"), false)
 				second.Close()
@@ -3204,8 +5189,12 @@ func selftest() int {
 		check("an IPv6 loopback literal is answered", hostApp.isAllowedHost("[::1]:9931"), true)
 		check("a rebound host is refused", hostApp.isAllowedHost("evil.example.com"), false)
 		check("a lookalike host is refused", hostApp.isAllowedHost("localhost.evil.example.com"), false)
-		status, _ := hostApp.dispatch("GET", "/api/_a2app", map[string]string{"host": "evil.example.com"}, nil, nil)
+		status, _, _ := hostApp.dispatch("GET", "/api/_a2app", map[string]string{"host": "evil.example.com"}, nil, nil)
 		check("dispatch refuses a foreign host before identity", status, 403)
+		_, refusal := hostApp.hostRefusal("evil.example.com")
+		check("the system pages refuse it the same way", refusal["code"], "forbidden_host")
+		_, refusal = hostApp.hostRefusal("127.0.0.1:9931")
+		check("…and answer on the app's own", refusal == nil, true)
 		check("the public origin is the app's own", hostApp.allowedOrigins["https://crm.example.com"], true)
 	}
 	policy := func(host, public string) string {
@@ -3224,10 +5213,206 @@ func selftest() int {
 	check("a plain-http tunnel to loopback is allowed", policy("", "http://localhost:9000"), "127.0.0.1 http://localhost:9000")
 	check("a public URL that is not a URL is refused", policy("", "crm.example.com"), "refused")
 
+	// 8. Auth primitives (spec/v0_2/auth.md): what a secret looks like, how a
+	//    password is stored and checked, user codes, cookies, the sign-in limit.
+	//    The vector below was written by adapter-core's hashPassword, so a hash
+	//    stored by either stack verifies on the other.
+	const nodeVector = "pbkdf2_sha256$600000$7o2srHKClZ25zLELDgxsaw==$MM/kuhkZzCVSbCeUoHjL0058JRF/QmSic77+nfQavl8="
+	check("an adapter-core password hash verifies", verifyPassword("correct horse battery staple", nodeVector), true)
+	check("…and refuses the wrong password", verifyPassword("correct horse battery stapler", nodeVector), false)
+	check("a second adapter-core vector verifies",
+		verifyPassword("a long enough password", "pbkdf2_sha256$1000$16IqCFLklIKzgdi6G+LrRg==$NAcqReE2pGwC/SaXVCiZtbar7S7nTq4+ro3KIkMmq8Y="), true)
+	hashed := hashPassword("a long enough password", 1000)
+	check("a hash round-trips", verifyPassword("a long enough password", hashed), true)
+	check("…and refuses another password", verifyPassword("another long password", hashed), false)
+	check("a hash has adapter-core's shape", regexp.MustCompile(`^pbkdf2_sha256\$1000\$[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=$`).MatchString(hashed), true)
+	check("every hash is salted", hashPassword("a long enough password", 1000) != hashed, true)
+	check("a malformed hash never matches", verifyPassword("x", "pbkdf2_sha256$0$AA==$AA=="), false)
+	check("…nor another scheme's", verifyPassword("x", "bcrypt$10$abc$def"), false)
+	check("a token is a2a_ + 256 bits", regexp.MustCompile(`^a2a_[A-Za-z0-9_-]{43}$`).MatchString(newToken()), true)
+	check("a secret is stored as its hex sha256", hashSecret("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+	check("a user code is 8 consonants", regexp.MustCompile(`^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$`).MatchString(newUserCode()), true)
+	check("a user code ignores case and the dash", normalizeUserCode("bcdf ghjk"), "BCDF-GHJK")
+	check("…and is refused when it is not one", normalizeUserCode("AEIO-BCDF"), "")
+	check("cookies: first occurrence wins, values decoded, junk skipped",
+		parseCookies("=z; a=1; b=x%20y; a=2; c; d=%zz"), map[string]string{"a": "1", "b": "x y"})
+	check("the session cookie's attributes",
+		sessionCookie("a2app_session_x", "v", 60, true), "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=60; Secure")
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	limiter := newFailureLimiter(10, 15*time.Minute, func() time.Time { return clock })
+	for i := 0; i < 9; i++ {
+		limiter.fail("bob")
+	}
+	check("nine sign-in failures do not lock a login", limiter.retryAfter("bob"), 0)
+	limiter.fail("bob")
+	check("the tenth locks it for the window", limiter.retryAfter("bob"), 900)
+	clock = clock.Add(15 * time.Minute)
+	check("…which ends", limiter.retryAfter("bob"), 0)
+	declaredSet := map[string]bool{"data:notes:read": true, "data:notes:write": true}
+	grantScopes, grantExpires, grantProblem := parseGrantRequest(M{}, declaredSet)
+	check("a grant request defaults to * for 30 days", []any{grantScopes, grantExpires, grantProblem},
+		[]any{[]string{"*"}, 30 * 24 * 60 * 60, ""})
+	grantScopes, _, _ = parseGrantRequest(M{"scopes": []any{"data:notes:read", "data:notes:read"}}, declaredSet)
+	check("…keeps each scope once", grantScopes, []string{"data:notes:read"})
+	_, _, grantProblem = parseGrantRequest(M{"scopes": []any{"data:other:read"}}, declaredSet)
+	check("…refuses a scope the app does not declare", grantProblem, "Not scopes this app declares: data:other:read.")
+	_, _, grantProblem = parseGrantRequest(M{"expiresIn": 59.0}, declaredSet)
+	check("…and a lifetime under a minute", grantProblem != "", true)
+
+	// 9. The resolution order and the ceiling, through dispatch on a
+	//    multi-user app: each refusal, effective scopes, ownership through a
+	//    credential and a session, CSRF, task credentials.
+	notes := map[string]M{"notes": {"module": "core", "ownedBy": "owner", "fields": []M{
+		{"name": "title", "type": "string"},
+		{"name": "owner", "type": "string", "readOnly": true},
+	}}}
+	authApp, err := NewAdapter(AdapterConfig{
+		AppID: "selftest", Store: NewStore(nil), Token: "admin-token", Modules: []M{{"name": "core"}},
+		Entities: notes, AuthMode: "multi-user", AllowedOrigins: []string{"http://127.0.0.1:9931"},
+		Operations: []M{{"name": "review-note", "module": "core", "params": M{"note": M{"type": "string"}}}},
+		// A runner written the 0.1 way: it never names who asked.
+		Runners: map[string]OperationRunner{
+			"review-note": func(args M, _ M, store *Store) (any, error) {
+				return store.trigger("note.review", M{"note": args["note"]}, "review")
+			},
+		},
+		Events:       []M{{"type": "note.review"}},
+		Capabilities: map[string]M{"review": {"scopes": []string{"data:notes:read"}}},
+		PermissionsOf: func(p M) []string {
+			if getStr(p, "role") == "owner" {
+				return []string{"*"}
+			}
+			return []string{"data:notes:read", "op:review-note"}
+		},
+	})
+	if err != nil {
+		failures = append(failures, "could not build a multi-user adapter: "+err.Error())
+	} else {
+		call := func(method, path string, headers map[string]string, body M) (int, M) {
+			status, reply, _ := authApp.dispatch(method, path, headers, body, nil)
+			return status, reply
+		}
+		as := func(token string) map[string]string { return map[string]string{"x-a2app-token": token} }
+		codeOf := func(_ int, reply M) any { return reply["code"] }
+		statusOf := func(status int, _ M) int { return status }
+		alice := Account{ID: "usr_alice", Name: "Alice", Login: "alice", Role: "owner", Active: true, CreatedAt: nowISO()}
+		bob := Account{ID: "usr_bob", Name: "Bob", Login: "bob", Role: "member", Active: true, CreatedAt: nowISO()}
+		authApp.store.putAuthRow(tableUsers, alice.ID, alice)
+		authApp.store.putAuthRow(tableUsers, bob.ID, bob)
+		aliceToken, _ := authApp.mintCredential(alice.ID, "", []string{"*"}, 3600, "")
+		bobToken, bobGrant := authApp.mintCredential(bob.ID, "suite", []string{"*"}, 3600, "")
+
+		_, identity := call("GET", "/api/_a2app", nil, nil)
+		check("identity speaks 0.2 and says how people sign in",
+			[]any{identity["protocol"], identity["authMode"], identity["accountUrl"]}, []any{"0.2", "multi-user", "/_a2app/account"})
+		_, admin := call("GET", "/api/_a2app/whoami", as("admin-token"), nil)
+		check("the admin credential acts as the owner", []any{admin["principal"], admin["role"], admin["scopes"]},
+			[]any{"owner", "owner", []string{"data:notes:read", "data:notes:write", "op:review-note"}})
+		_, who := call("GET", "/api/_a2app/whoami", as(bobToken), nil)
+		check("a `*` credential is held to its person's permissions",
+			[]any{who["principal"], who["principalName"], who["role"], who["scopes"]},
+			[]any{"usr_bob", "Bob", "member", []string{"data:notes:read", "op:review-note"}})
+		check("…so it cannot write", codeOf(call("POST", "/api/collections/notes/records", as(bobToken), M{"title": "x"})), codeInsufficientScope)
+		_, created := call("POST", "/api/collections/notes/records", as(aliceToken), M{"title": "Alice's"})
+		check("a record is owned by whoever created it", created["owner"], "usr_alice")
+		check("the owner field is the adapter's to write",
+			codeOf(call("POST", "/api/collections/notes/records", as(aliceToken), M{"title": "x", "owner": "usr_bob"})), codeReadOnlyField)
+		_, listed := call("GET", "/api/collections/notes/records", as(bobToken), nil)
+		check("a member does not list another's records", len(toMList(listed["items"])), 0)
+		check("…nor read one by id", statusOf(call("GET", "/api/collections/notes/records/"+getStr(created, "id"), as(bobToken), nil)), 404)
+		check("an unknown token is refused", codeOf(call("GET", "/api/_a2app/whoami", as("a2a_nonsense"), nil)), "credential_invalid")
+		check("an agent's credential manages nothing", codeOf(call("GET", "/api/_a2app/credentials", as(bobToken), nil)), "not_a_manager")
+
+		bob.Active = false
+		authApp.store.putAuthRow(tableUsers, bob.ID, bob)
+		check("deactivating a person stops their agents", codeOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), "principal_inactive")
+		bob.Active = true
+		authApp.store.putAuthRow(tableUsers, bob.ID, bob)
+		check("…and reactivating restores them", statusOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), 200)
+
+		authApp.store.putAuthRow(tableSessions, hashSecret("bob-session"), sessionRow{
+			Principal: bob.ID, CreatedAt: nowISO(), ExpiresAt: isoOf(time.Now().Add(time.Hour)),
+		})
+		session := map[string]string{"cookie": "a2app_session_selftest=bob-session", "origin": "http://127.0.0.1:9931"}
+		_, sessionWho := call("GET", "/api/_a2app/whoami", session, nil)
+		check("a session acts as its person, within their permissions",
+			[]any{sessionWho["credentialId"], sessionWho["principal"], sessionWho["scopes"]},
+			[]any{"session", "usr_bob", []string{"data:notes:read", "op:review-note"}})
+		check("a signed-in change needs the app's own Origin",
+			codeOf(call("POST", "/api/collections/notes/records", map[string]string{"cookie": session["cookie"]}, M{"title": "x"})), "forbidden_origin")
+		check("a stranger is told to bring a credential",
+			codeOf(call("GET", "/api/collections/notes/records", nil, nil)), codeAgentTokenRequired)
+		check("…and the app's own page to sign in",
+			codeOf(call("GET", "/api/collections/notes/records", map[string]string{"sec-fetch-site": "same-origin"}, nil)), "sign_in_required")
+
+		_, ran := call("POST", "/api/ops/review-note", session, M{"note": getStr(created, "id")})
+		fired, _ := ran["result"].(M)
+		taskID := toStr(fired["taskId"])
+		_, task := call("GET", "/api/_a2app/tasks/"+taskID, as("admin-token"), nil)
+		request, _ := task["request"].(M)
+		check("a task records who called the runner that queued it", request["principal"], "usr_bob")
+		appFired, _ := authApp.trigger("note.review", M{"note": "app"}, "review")
+		_, appTask := call("GET", "/api/_a2app/tasks/"+toStr(appFired["taskId"]), as("admin-token"), nil)
+		appRequest, _ := appTask["request"].(M)
+		check("work the app queues itself records nobody", hasKey(appRequest, "principal") && appRequest["principal"] == nil, true)
+		check("a member cannot issue a task's credential",
+			codeOf(call("POST", "/api/_a2app/tasks/"+taskID+"/credential", session, nil)), "not_a_manager")
+		taskStatus, taskCred := call("POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), M{"agentName": "bridge"})
+		credential, _ := taskCred["credential"].(M)
+		check("the admin credential issues it, for that person, the capability's scopes, and that task",
+			[]any{taskStatus, credential["principal"], credential["scopes"], credential["task"]},
+			[]any{201, "usr_bob", []string{"data:notes:read"}, taskID})
+		taskToken := getStr(taskCred, "token")
+		check("…and it works while the task is open", statusOf(call("GET", "/api/_a2app/whoami", as(taskToken), nil)), 200)
+		openTask := authApp.store.getTask(taskID)
+		openTask["status"] = "completed"
+		authApp.store.saveTask(openTask)
+		check("…and is dead once the task is over", codeOf(call("GET", "/api/_a2app/whoami", as(taskToken), nil)), "credential_revoked")
+		check("…and none is issued for a finished task",
+			codeOf(call("POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), nil)), codeTaskNotClaimable)
+
+		authApp.store.updateGrant(bobGrant.CredentialID, func(g *Grant) { g.ExpiresAt = isoOf(time.Now().Add(-time.Second)) })
+		check("an expired credential says so", codeOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), "token_expired")
+		aliceGrant := authApp.store.grantByTokenHash(hashSecret(aliceToken))
+		check("a credential revokes itself", statusOf(call("DELETE", "/api/_a2app/credentials/"+aliceGrant.CredentialID, as(aliceToken), nil)), 200)
+		check("…and is told so after", codeOf(call("GET", "/api/_a2app/whoami", as(aliceToken), nil)), "credential_revoked")
+		check("the admin credential cannot be revoked through the API",
+			codeOf(call("DELETE", "/api/_a2app/credentials/cred_local", as("admin-token"), nil)), "not_a_manager")
+	}
+
+	// 10. Declarations the auth layer depends on are checked at construction,
+	//     and a single-user app has one principal and no accounts.
+	_, err = NewAdapter(AdapterConfig{
+		AppID: "selftest", Store: NewStore(nil), Modules: []M{{"name": "core"}}, Entities: notes,
+		Capabilities: map[string]M{"review": {"scopes": []string{"data:other:read"}}},
+	})
+	check("a capability's undeclared scope is refused at boot", err != nil && strings.Contains(err.Error(), `capability "review"`), true)
+	_, err = NewAdapter(AdapterConfig{
+		AppID: "selftest", Store: NewStore(nil), Modules: []M{{"name": "core"}},
+		Entities: map[string]M{"notes": {"module": "core", "ownedBy": "owner", "fields": []M{{"name": "owner", "type": "string"}}}},
+	})
+	check("ownedBy must name a readOnly string field", err != nil && strings.Contains(err.Error(), "must be a readOnly string field"), true)
+	if soloApp, err := NewAdapter(AdapterConfig{
+		AppID: "solo", Store: NewStore(nil), Token: "admin-token", Modules: []M{{"name": "core"}}, Entities: notes,
+	}); err != nil {
+		failures = append(failures, "could not build a single-user adapter: "+err.Error())
+	} else {
+		status, anonymous, _ := soloApp.dispatch("GET", "/api/_a2app/whoami", nil, nil, nil)
+		check("a single-user app reads anonymously as the owner, read-only",
+			[]any{status, anonymous["principal"], anonymous["scopes"]}, []any{200, "owner", []string{"data:notes:read"}})
+		status, _, _ = soloApp.dispatch("POST", "/api/collections/notes/records", nil, M{"title": "x"}, nil)
+		check("…and needs a credential to write", status, 401)
+		_, stored, _ := soloApp.dispatch("POST", "/api/collections/notes/records", map[string]string{"x-a2app-token": "admin-token"}, M{"title": "x"}, nil)
+		check("…where every record is the owner's", stored["owner"], "owner")
+		_, refusal, _ := soloApp.dispatch("GET", "/api/_a2app/session", nil, nil, nil)
+		check("…and there are no accounts", refusal["code"], "not_multi_user")
+	}
+
 	if len(failures) > 0 {
 		fmt.Println("a2app_adapter selftest FAILED:\n  - " + strings.Join(failures, "\n  - "))
 		return 1
 	}
-	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)")
+	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, " +
+		"host and network policy, auth primitives, resolution order and ceiling)")
 	return 0
 }

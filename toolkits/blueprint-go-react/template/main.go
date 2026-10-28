@@ -577,7 +577,12 @@ func serveApp() {
 		// The update watcher lives at the project root, not inside the View
 		// build: it is system-owned, and the View is the agent's to rewrite
 		// entirely.
-		aliases:          map[string]string{"/_a2app/update.js": "a2app-update.js"},
+		aliases: map[string]string{
+			"/_a2app/update.js": "a2app-update.js",
+			// The framework's account page: sign in, invites, people, connected
+			// agents. The same file in every blueprint.
+			"/_a2app/account": "a2app-account.html",
+		},
 		fingerprintExtra: []string{"schema.go"},
 		// An author who wants to move the marker by hand can bump
 		// manifest.appVersion.
@@ -597,10 +602,18 @@ func serveApp() {
 		Entities:   ENTITIES,
 		Operations: OPERATIONS,
 		Store:      store,
-		Token:      agentToken(),
+		// The app's own .agent-token is its admin credential (spec/v0_2/
+		// auth.md §2.3): it manages accounts and credentials, and is never
+		// handed to an agent harness.
+		Token: agentToken(),
 		// Modules are declared in the manifest and are what describe's root
 		// level lists; every entity and operation names one.
-		Modules:        toMList(manifest["modules"]),
+		Modules: toMList(manifest["modules"]),
+		// What each person may do (spec/v0_2/auth.md §3), when schema.go says;
+		// every agent acting for them is limited to the same.
+		PermissionsOf: PERMISSIONS_OF,
+		// What each capability's agent may do (spec/v0_2/auth.md §6.2).
+		Capabilities:   CAPABILITIES,
 		AllowedOrigins: []string{fmt.Sprintf("http://localhost:%d", port), fmt.Sprintf("http://127.0.0.1:%d", port)},
 		PublicURL:      publicURL,
 		Runners:        OPERATION_RUNNERS,
@@ -673,16 +686,20 @@ func serveApp() {
 				query[k] = vs[len(vs)-1]
 			}
 		}
-		status, payload := func() (status int, payload M) {
+		status, payload, replyHeaders := func() (status int, payload M, replyHeaders map[string]string) {
 			// Fail open internally: an adapter bug never 500s the whole app
 			// silently — it answers with a machine-readable adapter error.
 			defer func() {
 				if p := recover(); p != nil {
-					status, payload = 500, M{"a2app": true, "ok": false, "code": "adapter_error", "message": fmt.Sprint(p)}
+					status, payload, replyHeaders = 500, M{"a2app": true, "ok": false, "code": "adapter_error", "message": fmt.Sprint(p)}, nil
 				}
 			}()
 			return adapter.dispatch(method, r.URL.Path, headers, body, query)
 		}()
+		// The session cookie, when a reply signs someone in or out.
+		for name, value := range replyHeaders {
+			w.Header().Set(name, value)
+		}
 		writeJSON(w, status, payload)
 	}
 
@@ -714,6 +731,14 @@ func serveApp() {
 		if path == "/.well-known/a2app.json" || path == "/api" || strings.HasPrefix(path, "/api/") {
 			apiHandler(rec, r)
 			return
+		}
+		// The system pages (the account page, the update watcher) answer only
+		// on the app's own hosts, like every adapter route.
+		if _, system := view.aliases[path]; system {
+			if status, refusal := adapter.hostRefusal(r.Host); refusal != nil {
+				writeJSON(rec, status, refusal)
+				return
+			}
 		}
 		view.serveHTTP(rec, r)
 	})

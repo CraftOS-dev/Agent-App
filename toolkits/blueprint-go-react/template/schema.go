@@ -17,6 +17,13 @@
 // wants references to outlive the record says so on the field with
 // `"onDelete": "ignore"`; there is deliberately no cascade or detach.
 //
+// WHOSE RECORDS. `ownedBy` names a read-only string field the adapter fills
+// with the caller's principal on create. On a multi-user app a member then
+// lists, reads, changes and deletes only its own records (anyone else's answer
+// 404), and the owner sees all; on a single-user app every record is the
+// owner's. Operation runners get the caller as `ctx` ({"principal", "role"})
+// and hold themselves to the same rule — see `mine` below.
+//
 // This starter models a to-do list. Replace it with your own entities.
 package main
 
@@ -30,8 +37,19 @@ var ENTITIES = map[string]M{
 			{"name": "due", "type": "string", "max": 10, "dayKey": true},
 			{"name": "notes", "type": "string", "max": 2000},
 			{"name": "created", "type": "datetime", "readOnly": true},
+			{"name": "owner", "type": "string", "readOnly": true},
 		},
+		"ownedBy": "owner",
 	},
+}
+
+// mine is the record if ctx may touch it: an owner may touch any task, a
+// member only its own.
+func mine(ctx M, rec M) M {
+	if rec != nil && (getStr(ctx, "role") == "owner" || getStr(rec, "owner") == getStr(ctx, "principal")) {
+		return rec
+	}
+	return nil
 }
 
 // TWO FILES, ONE TRUTH: every operation lives HERE and in `operations.json`,
@@ -95,37 +113,73 @@ var EVENTS = []M{
 	{"type": "task.needs_triage"},
 }
 
+// Two optional declarations. The adapter declares both empty, so they are set
+// here, in init(), and an app that needs neither leaves them out.
+//
+// CAPABILITIES is what the agent taking each capability's tasks may do, as
+// scopes. The bridge runs it with a credential that acts for the person who
+// asked, holds only these, and dies with the task — so an agent asked to
+// triage cannot do more than triage, nor more than that person could. A
+// capability left out gets `*`, still within the person's own reach.
+//
+// PERMISSIONS_OF (unset here) is what each person may do on a multi-user app:
+// the scopes they may use (`data:<entity>:read|write`, `op:<name>`, `*`),
+// given {"id", "name", "role", "active"}. Every agent acting for them is
+// limited to the same, on every request. Unset, everyone active may use
+// everything (their records stay their own). To narrow it, add to init():
+//
+//	PERMISSIONS_OF = func(p M) []string {
+//		if getStr(p, "role") == "owner" {
+//			return []string{"*"}
+//		}
+//		return []string{"data:tasks:read", "data:tasks:write", "op:request-triage"}
+//	}
+func init() {
+	CAPABILITIES = map[string]M{
+		"triage": {"scopes": []string{"data:tasks:read", "data:tasks:write"}},
+	}
+}
+
 // Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
 // these for a declared operation; a destructive op is gated by approval first.
+// `ctx` is who is calling: {"credentialId", "agentName", "principal", "role"}.
 // `store` is the live SQLite-backed store — read with store.getRecord /
 // store.listRecords, write with store.putRecord / store.deleteRecord.
 // Writes are durable when the call returns; there is no separate persist()
 // step. A record fetched from the store is a COPY: mutate it, then
 // putRecord() it back, or the change never happened. store.trigger(type,
-// payload, capability) emits a declared event (see `request-triage` below).
+// payload, capability) emits a declared event (see `request-triage` below);
+// a task it queues is done by an agent acting as the caller — the adapter
+// binds the store it hands each runner to whoever called it.
 var OPERATION_RUNNERS = map[string]OperationRunner{
-	"clear-done": func(_ M, _ M, store *Store) (any, error) {
+	"clear-done": func(_ M, ctx M, store *Store) (any, error) {
 		result, err := store.listRecords("tasks", M{})
 		if err != nil {
 			return nil, err
 		}
 		removed := 0
 		for _, rec := range toMList(result["items"]) {
-			if rec["status"] == "done" && store.deleteRecord("tasks", getStr(rec, "id")) {
+			if rec["status"] == "done" && mine(ctx, rec) != nil && store.deleteRecord("tasks", getStr(rec, "id")) {
 				removed++
 			}
 		}
 		return M{"removed": removed}, nil
 	},
-	"count-tasks": func(_ M, _ M, store *Store) (any, error) {
+	"count-tasks": func(_ M, ctx M, store *Store) (any, error) {
 		result, err := store.listRecords("tasks", M{})
 		if err != nil {
 			return nil, err
 		}
-		return M{"count": result["totalItems"]}, nil
+		count := 0
+		for _, rec := range toMList(result["items"]) {
+			if mine(ctx, rec) != nil {
+				count++
+			}
+		}
+		return M{"count": count}, nil
 	},
-	"complete-task": func(args M, _ M, store *Store) (any, error) {
-		task := store.getRecord("tasks", getStr(args, "task"))
+	"complete-task": func(args M, ctx M, store *Store) (any, error) {
+		task := mine(ctx, store.getRecord("tasks", getStr(args, "task")))
 		if task == nil {
 			return M{"ok": false, "reason": "no such task"}, nil
 		}
@@ -144,8 +198,9 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 	// never a copy of the data, which would be stale by the time it is read.
 	// Nothing here can widen what the agent may do: the payload is data on the
 	// other side, and the capability names the kind of work, not a command.
-	"request-triage": func(args M, _ M, store *Store) (any, error) {
-		task := store.getRecord("tasks", getStr(args, "task"))
+	// The task records this runner's caller, and the agent acts as them.
+	"request-triage": func(args M, ctx M, store *Store) (any, error) {
+		task := mine(ctx, store.getRecord("tasks", getStr(args, "task")))
 		if task == nil {
 			return M{"ok": false, "reason": "no such task"}, nil
 		}
@@ -162,6 +217,6 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 // test data you add at runtime does not carry to a fresh DB.
 var SEED = map[string][]M{
 	"tasks": {
-		{"id": "task_welcome", "title": "Welcome — edit or delete me", "status": "todo", "created": "2026-01-01T00:00:00Z"},
+		{"id": "task_welcome", "title": "Welcome — edit or delete me", "status": "todo", "created": "2026-01-01T00:00:00Z", "owner": "owner"},
 	},
 }

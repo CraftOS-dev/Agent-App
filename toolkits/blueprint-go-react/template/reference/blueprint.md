@@ -27,7 +27,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `schema.go` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `SEED`, each entity carrying `module`/`summary`/`fields`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
+| `schema.go` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `SEED`, each entity carrying `module`/`summary`/`fields` (and `ownedBy` when its records belong to their creator); its `init()` sets the optional `CAPABILITIES` and `PERMISSIONS_OF`, which the adapter declares empty. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Byte-mirror of `OPERATIONS`. |
 | `index.html` | **YOURS** | the Vite entry: links `tokens.css`/`ui.css`, mounts `#root`, loads `src/main.jsx`. |
 | `src/main.jsx` | **YOURS** | React root: StrictMode + ToastProvider + App; imports `updater.js` to start the update watcher. |
@@ -49,6 +49,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `main.go` | SYSTEM (hash-locked) | the server + tooling flags: serves the records API, identity, describe, the built View (`dist/`), `/_a2app/update.js`; `--selftest`, `--check-ops`, `--promote-check`. Never edit. |
 | `a2app_adapter.go` | SYSTEM (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `dist/` | build output | the compiled View (`npm run build`). Git-ignored; served by `main.go`. Never edit by hand. |
 | `data/` | runtime | the live SQLite database (git-ignored, created on first boot). Never edit by hand; never commit. |
 
@@ -146,7 +147,8 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
 ```
 
 - **Runner signature:** `func(args M, ctx M, store *Store) (any, error)` —
-  return any JSON-able result. `store` is the SQLite-backed record store —
+  return any JSON-able result. `ctx` is who is calling (`{"credentialId",
+  "agentName", "principal", "role"}`). `store` is the SQLite-backed record store —
   `listRecords(entity, query)` · `getRecord(entity, id)` ·
   `putRecord(entity, record)` · `deleteRecord(entity, id)`. Writes are durable
   when the call returns; there is no separate persist() step. Returning an
@@ -251,6 +253,14 @@ The starter's `request-triage` operation is the worked example.
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
   data.
+- **The agent acts as whoever asked.** The `store` a runner is handed is
+  bound to its caller, so the task records that person — you pass nothing —
+  and the bridge runs the agent with a credential for them: it sees and changes
+  only what they could, and dies when the task ends. Say what the work needs in
+  `CAPABILITIES`, set in `schema.go`'s `init()` —
+  `CAPABILITIES = map[string]M{"triage": {"scopes": []string{"data:tasks:read", "data:tasks:write"}}}`
+  — and the credential holds no more; a capability left out gets `*`, still
+  within that person's reach.
 - There is **no declarative trigger manifest**, and none is coming — what the
   agent does is the agent's decision, which is what keeps a compromised app from
   steering it. Do not invent a manifest format.
@@ -263,11 +273,40 @@ or a harness polling `a2app <dir> tasks next --wait`.
 
 **Show the queued work in the View.** Keep the returned `taskId` on the record
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+only while it is unfinished. The View needs no credential for this read: on a
+single-user app it is trusted, and on a multi-user app the person's session
+makes it. A 404 means the task has been pruned, so drop the indicator. Don't
+retry it. Render queued → working (`progress.step`) → done or failed (`reason`,
+plus a way to ask again). The creator skill lists the states. A button that goes
+quiet after it queues work looks broken.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself — they are never records — and the
+View needs no auth code of its own:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`. A
+  request from the View with no session answers `401 sign_in_required`, and
+  `src/api.js` sends the person there; it sends them back afterwards.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Whose records.** `"ownedBy": "<field>"` on an entity names a `readOnly`
+  string field the adapter fills with the creator's principal. A member then
+  lists, reads, changes and deletes only its own records (anyone else's answer
+  404); an owner sees all. The starter's `tasks` is owned by `owner`.
+- **Runners** get the caller as `ctx` (`{"principal", "role", …}`) and must
+  hold themselves to the same rule for records they touch — the starter's
+  `mine(ctx, rec)` helper in `schema.go` is the pattern.
+- **What each person may do.** `PERMISSIONS_OF`, set in `schema.go`'s
+  `init()`, returns the scopes a person may use; every agent acting for them is
+  limited to the same, on every request. Unset (the default), everyone active
+  may use everything.
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's and nothing is filtered.
 
 ## Reaching the app from another machine
 

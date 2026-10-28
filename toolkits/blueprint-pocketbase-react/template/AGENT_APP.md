@@ -24,7 +24,9 @@ derives entities from the live collection schema, so it cannot drift.
   (string, required), `status` (enum: todo/doing/done), `due` (day key
   YYYY-MM-DD), `notes` (string), `agentTask` (the queue task an agent is, or
   was last, working on; set by `request-triage`, declared read-only in
-  `pb/pb_hooks/operations.js`).
+  `pb/pb_hooks/operations.js`), `owner` (whose task it is: filled by the
+  adapter with the creator, `ownedBy` in `operations.js`; on a multi-user app
+  a member sees only its own).
 
 ## Operations
 Declared in `operations.json`, run by the same-named runner in

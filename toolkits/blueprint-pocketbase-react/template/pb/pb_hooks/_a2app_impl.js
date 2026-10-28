@@ -22,7 +22,7 @@
 
 const A2APP = {
   ADAPTER_VERSION: "0.1.0",
-  PROTOCOL_VERSION: "0.1",
+  PROTOCOL_VERSION: "0.2",
 };
 
 /* --------------------------------------------------------------- identity */
@@ -74,12 +74,14 @@ function identity(e) {
 
   return e.json(200, {
     a2app: true,
-    protocol: "0.1",
-    adapterVersion: "0.1.0",
+    protocol: A2APP.PROTOCOL_VERSION,
+    adapterVersion: A2APP.ADAPTER_VERSION,
     app: { id: manifest.id, name: manifest.name || null },
     schemaVersion: rules.schemaVersion(entities),
     serverNow: new Date().toISOString(),
     serverTzOffsetMinutes: 0,
+    authMode: manifest.authMode === "multi-user" ? "multi-user" : "none",
+    accountUrl: rules.AUTH.ACCOUNT_URL,
   });
 
   function mapFields(col) {
@@ -148,23 +150,18 @@ function describe(e, segments) {
   const query = e.requestInfo().query || {};
 
   const appPart = readAppPart();
-  if (appPart.problems.length > 0) {
+  const code = appCode();
+  const entities = liveEntities();
+  const problems = appPart.problems.concat(declarationProblems(code, entities, appPart.operations));
+  if (problems.length > 0) {
     // Refuse rather than serve a describe that omits real capability while
     // answering 200 — the same refusal `createA2App` makes at boot on the stacks
     // that have a boot.
-    return e.json(500, {
-      a2app: true,
-      ok: false,
-      code: "inconsistent_app_part",
-      message: "The app's declarations are inconsistent and cannot be served.",
-      problems: appPart.problems,
-    });
+    return inconsistentAppPart(e, problems);
   }
   const modules = appPart.modules;
   const operations = appPart.operations;
   const entityModule = appPart.entityModule;
-
-  const entities = liveEntities();
 
   // The scope model gates only the record levels here (they read real records);
   // the shallower levels publish shape, never values.
@@ -209,8 +206,10 @@ function describe(e, segments) {
   if (segments.length === 2) return e.json(200, entityLevel(moduleName, entityName, def));
 
   // From here describe serves record VALUES, so the caller is checked as for
-  // any other read of records.
-  if (authorize(e, false) === null) return;
+  // any other read of records — including whose records it may see (spec
+  // §5): another member's record answers exactly like a missing one.
+  const ctx = authorize(e, { scope: `data:${entityName}:read`, isWrite: false });
+  if (ctx === null) return;
   const recordId = segments[2];
   let record = null;
   try {
@@ -218,6 +217,8 @@ function describe(e, segments) {
   } catch (_e) {
     record = null;
   }
+  const ownerField = code.ownedBy[entityName];
+  if (record && ownerField && isMultiUser() && ctx.role !== "owner" && record.getString(ownerField) !== ctx.principal) record = null;
   if (!record) {
     return e.json(404, {
       a2app: true, ok: false, code: "record_not_found",
@@ -374,7 +375,7 @@ function describe(e, segments) {
       if (o.idempotent) decl.idempotent = true;
       return decl;
     });
-    return {
+    const level = {
       level: "entity",
       path: `${moduleName}/${name}`,
       label: rules.labelField(def),
@@ -383,6 +384,8 @@ function describe(e, segments) {
       operations: ops,
       next: [`describe/${moduleName}/${name}/{id}`, `data ${name} list`],
     };
+    if (code.ownedBy[name]) level.ownedBy = code.ownedBy[name];
+    return level;
   }
 
   function recordLevel(moduleName, name, def, values) {
@@ -551,6 +554,11 @@ function describe(e, segments) {
  *
  * Only requests reach this hook. A runner writing through `a2app.app.save()`
  * does not, which is how it sets a field the app declares read-only.
+ *
+ * On create it also records whose record this is (spec/v0_2/auth.md §5): the
+ * `ownedBy` field the app declares gets the caller's principal — the account
+ * `nativeGate` made `e.auth`, or `owner`. PocketBase's collection rules then
+ * decide who sees it.
  */
 function guard(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
@@ -585,15 +593,18 @@ function guard(e) {
   // Fields the app declares read-only are written by its own runners, never by
   // a client. The PocketBase dashboard is the exception: a signed-in superuser
   // is the owner editing by hand, and the dashboard sends every field on save.
-  if (!e.hasSuperuserAuth()) {
-    const code = appCode();
+  // `nativeGate` marks that request; an agent acting for the owner is also
+  // a superuser to PocketBase, but it is held to the app's rules.
+  const dashboard = e.hasSuperuserAuth() && e.get(DASHBOARD) === true;
+  const code = appCode();
+  if (!dashboard) {
     if (code.problem !== null) {
       // Fail closed: which fields are read-only is declared in operations.js,
       // so while it cannot load, a client write could overwrite one unnoticed.
       // Thrown, not written: inside a batch only an error rolls the batch back.
       throw new ApiError(503, `Writes are paused (app_code_unavailable): pb/pb_hooks/operations.js could not be loaded (${code.problem}).`, {});
     }
-    rules.markReadOnly(fields, code.readOnly[col.name]);
+    rules.markReadOnly(fields, readOnlyOf(code)[col.name]);
   }
 
   // The raw submitted data (before coercion).
@@ -612,6 +623,14 @@ function guard(e) {
       got: first.got,
       violations: violations,
     });
+  }
+
+  // The owner is the adapter's to set, and the guard has already refused a
+  // client that tried. The dashboard may name one by hand.
+  const ownerField = code.ownedBy[col.name];
+  if (ownerField && e.record.isNew() && !(dashboard && body[ownerField])) {
+    const auth = info.auth;
+    e.record.set(ownerField, auth && auth.collection().name === ACCOUNTS ? auth.id : OWNER);
   }
 
   e.next();
@@ -734,11 +753,38 @@ function deleteGuard(e) {
  */
 
 const TOKEN_FILE = ".agent-token";
-const LOCAL_GRANT = { credentialId: "cred_local", agentName: "local", principal: "owner" };
 const CREDENTIAL_HINT = "Read the app's .agent-token file (mode 0600) in the project directory, and send it as X-A2App-Token.";
+/** Said to an agent whose credential stopped working (revoked, expired, or its
+ *  person deactivated): a new one is the person's to give. */
+const RENEW_HINT = "Ask the person this agent acts for to approve it again (a2app <app> login), or the app's owner for a new credential.";
 
-/** Create the adapter's own tables. Idempotent; runs on every bootstrap. */
+/** The principal of the admin credential and of an `authMode: none` app. */
+const OWNER = "owner";
+const OWNER_INFO = { id: OWNER, name: "Owner", role: "owner", active: true };
+/** The app's own `.agent-token`: the admin credential (spec/v0_2/auth.md §2.3). */
+const ADMIN_GRANT = { credentialId: "cred_local", agentName: "local", principal: OWNER, scopes: ["*"] };
+/** PocketBase's auth collection that holds the accounts of a multi-user app. */
+const ACCOUNTS = "users";
+/** Request-store key `nativeGate` sets on a request it passed as the PocketBase
+ *  dashboard (a signed-in superuser, not an agent acting for the owner). */
+const DASHBOARD = "a2app.dashboard";
+
+/**
+ * Create the adapter's own tables. Idempotent; runs on every bootstrap.
+ *
+ * Credentials, sessions, invites and device requests are adapter state like
+ * the queue (spec/v0_2/auth.md): tables in data.db, never collections, every
+ * secret stored as its SHA-256. Accounts are the one exception, kept as
+ * records of PocketBase's `users` collection so collection rules can name them
+ * (`@request.auth.id`); the accounts migration locks that collection.
+ *
+ * Then the app's `.agent-token` is seeded as the admin credential, hashed on
+ * the way in — again at every boot, so a rotated file replaces the old token
+ * and a deleted one revokes it — and credentials that ended more than 30 days
+ * ago are pruned.
+ */
 function ensureStore(app) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
   const statements = [
     "CREATE TABLE IF NOT EXISTS _a2app_tasks (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, dedup TEXT, body TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS _a2app_tasks_status ON _a2app_tasks (status)",
@@ -748,8 +794,43 @@ function ensureStore(app) {
     "CREATE TABLE IF NOT EXISTS _a2app_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, body TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS _a2app_approvals (key TEXT PRIMARY KEY, expires INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS _a2app_idempotency (scope TEXT NOT NULL, key TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (scope, key))",
+    // Credentials are found by the SHA-256 of their token, never the token.
+    "CREATE TABLE IF NOT EXISTS _a2app_grants (credential_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, body TEXT NOT NULL)",
+    // Keyed by the SHA-256 of the session secret, invite code or device code.
+    "CREATE TABLE IF NOT EXISTS _a2app_sessions (key TEXT PRIMARY KEY, body TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS _a2app_invites (key TEXT PRIMARY KEY, body TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS _a2app_devices (key TEXT PRIMARY KEY, body TEXT NOT NULL)",
   ];
   for (let i = 0; i < statements.length; i++) app.db().newQuery(statements[i]).execute();
+
+  const db = app.db();
+  const nowMs = Date.now();
+  let token = "";
+  try {
+    token = toString($os.readFile(`${__hooks}/../../${TOKEN_FILE}`)).trim();
+  } catch (_none) {
+    token = ""; // no credential minted yet
+  }
+  const existing = grantById(db, ADMIN_GRANT.credentialId);
+  if (token === "") {
+    if (existing) deleteGrant(db, ADMIN_GRANT.credentialId);
+  } else {
+    putGrant(db, {
+      credentialId: ADMIN_GRANT.credentialId,
+      tokenHash: $security.sha256(token),
+      principal: ADMIN_GRANT.principal,
+      agentName: ADMIN_GRANT.agentName,
+      scopes: ADMIN_GRANT.scopes,
+      createdAt: existing ? existing.createdAt : new Date(nowMs).toISOString(),
+      expiresAt: null,
+      lastUsedAt: existing ? existing.lastUsedAt : null,
+      revokedAt: null,
+      task: null,
+      admin: true,
+    });
+  }
+  const all = listGrants(db);
+  for (let i = 0; i < all.length; i++) if (rules.grantPrunable(all[i], nowMs)) deleteGrant(db, all[i].credentialId);
 }
 
 /* ------------------------------------------------------------- envelopes */
@@ -801,136 +882,422 @@ function readDeclaredOperations() {
   }
 }
 
-/** The app-owned seam: `pb/pb_hooks/operations.js` exports `{ events, runners, readOnly }`.
- *  Absent is a valid app (no operations, no events); broken is reported. */
+/** The app-owned seam: `pb/pb_hooks/operations.js` exports `{ events, runners,
+ *  readOnly, ownedBy, capabilities, permissionsOf? }`. Absent is a valid app (no
+ *  operations, no events); broken is reported. */
 function appCode() {
+  const none = (problem) => ({ events: [], runners: {}, readOnly: {}, ownedBy: {}, capabilities: {}, permissionsOf: null, problem: problem });
   try {
-    if (!$os.stat(`${__hooks}/operations.js`)) return { events: [], runners: {}, readOnly: {}, problem: null };
+    if (!$os.stat(`${__hooks}/operations.js`)) return none(null);
   } catch (_absent) {
-    return { events: [], runners: {}, readOnly: {}, problem: null };
+    return none(null);
   }
   try {
     const mod = require(`${__hooks}/operations.js`);
-    return { events: mod.events || [], runners: mod.runners || {}, readOnly: mod.readOnly || {}, problem: null };
+    return {
+      events: mod.events || [],
+      runners: mod.runners || {},
+      readOnly: mod.readOnly || {},
+      ownedBy: mod.ownedBy || {},
+      capabilities: mod.capabilities || {},
+      permissionsOf: typeof mod.permissionsOf === "function" ? mod.permissionsOf : null,
+      problem: null,
+    };
   } catch (err) {
-    return { events: [], runners: {}, readOnly: {}, problem: String(err) };
+    return none(String(err));
   }
 }
 
-/** The fields the app declares read-only, as `{ collection: [field, ...] }`.
- *  PocketBase has no read-only flag for a field, so the app says it here
- *  (`readOnly` in operations.js), the same thing a schema's `readOnly: true`
+/** The fields clients may not write, as `{ collection: [field, ...] }`: those
+ *  the app declares read-only, and the field each owned collection records its
+ *  owner in (`ownedBy`). PocketBase has no read-only flag for a field, so the
+ *  app says it in operations.js, the same thing a schema's `readOnly: true`
  *  says on the other stacks. Describe publishes it, the fingerprint covers it,
  *  and the guard refuses a client write to it. */
+function readOnlyOf(code) {
+  const out = {};
+  for (const name in code.readOnly) out[name] = code.readOnly[name].slice();
+  for (const name in code.ownedBy) (out[name] = out[name] || []).push(code.ownedBy[name]);
+  return out;
+}
+
 function readOnlyDeclared() {
-  return appCode().readOnly;
+  return readOnlyOf(appCode());
+}
+
+/** The 0.2 declarations in operations.js that do not fit the app — an `ownedBy`
+ *  naming no string field, a capability needing scopes the app does not declare.
+ *  adapter-core refuses these at construction; here, like the rest of the app
+ *  part, they are reported by describe (`entities` maps a collection to its
+ *  protocol fields). */
+function declarationProblems(code, entities, operations) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const shaped = {};
+  for (const name in entities) shaped[name] = { fields: entities[name] };
+  const declared = rules.declaredScopes(Object.keys(entities), operations.map((o) => o.name));
+  return rules.ownedByProblems(shaped, code.ownedBy).concat(rules.capabilityProblems(code.capabilities, declared));
+}
+
+function inconsistentAppPart(e, problems) {
+  return e.json(500, {
+    a2app: true,
+    ok: false,
+    code: "inconsistent_app_part",
+    message: "The app's declarations are inconsistent and cannot be served.",
+    problems: problems,
+  });
 }
 
 /* ---------------------------------------------------------------- access */
 
-/**
- * Who is calling, decided in a fixed order: host, origin, credential. Returns
- * the call context, or null once the refusal has been written — the caller
- * must then return without writing anything else. (`e.json` returns nothing to
- * pass along, so a refusal cannot be handed back as a value.)
+/*
+ * Who is calling, decided in the order spec/v0_2/auth.md §9 gives — the same
+ * for PocketBase's own routes (`nativeGate`) and the adapter's (`authorize`):
  *
- *   host        Only a loopback name. A page on evil.com whose DNS re-resolves
- *               to 127.0.0.1 is same-origin as far as the browser knows and
- *               sends no Origin on a GET; its Host header still says evil.com.
- *   origin      A foreign browser origin is refused. The app's own View
- *               (Origin equal to this host) is the owner on a single-user app;
- *               on a multi-user app it needs a signed-in PocketBase user.
- *   credential  The agent token from `.agent-token`, sent as X-A2App-Token. A
- *               write always needs one; a read needs one on a multi-user app.
+ *   host        a loopback name, or the host of A2APP_PUBLIC_URL. A page on
+ *               evil.com whose DNS re-resolves to 127.0.0.1 is same-origin as
+ *               far as the browser knows and sends no Origin on a GET; its
+ *               Host header still says evil.com.
+ *   origin      a foreign browser origin is refused.
+ *   credential  X-A2App-Token, found by its SHA-256: unknown, revoked (or its
+ *               task is over), expired, then whether its person may still act.
+ *               It reaches its own scopes ∩ what its person may do now.
+ *   session     multi-user: the account behind the session cookie, and a
+ *               change must carry the app's own Origin (CSRF). Single-user:
+ *               the app's own View, as the owner.
+ *   nothing     single-user reads proceed as the owner; anything else is 401,
+ *               `sign_in_required` when it came from the app's own page.
+ *
+ * What a principal may do — `permissionsOf` in operations.js, `*` by default —
+ * is read on every request, never cached across requests. While operations.js
+ * cannot load, nothing that depends on it is served (503 app_code_unavailable).
  */
-function authorize(e, isWrite) {
+
+/** What one request's access decision reads: the mode, the app code, and every
+ *  scope the app declares (what `*` means). */
+function accessEnv() {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  return {
+    multiUser: isMultiUser(),
+    code: appCode(),
+    declared: rules.declaredScopes(entityNames(), readDeclaredOperations().map((o) => o.name)),
+  };
+}
+
+function isMultiUser() {
+  const manifest = readManifest();
+  return !!manifest && manifest.authMode === "multi-user";
+}
+
+/** The entities: the app's base collections (PocketBase's own start with `_`). */
+function entityNames() {
+  const out = [];
+  const collections = $app.findAllCollections("base");
+  for (let i = 0; i < collections.length; i++) if (collections[i].name.indexOf("_") !== 0) out.push(collections[i].name);
+  return out;
+}
+
+function callCtx(credentialId, agentName, info) {
+  return { credentialId: credentialId, agentName: agentName, principal: info.id, role: info.role };
+}
+
+/** What a principal may do now (spec §3), expanded; null when it may do
+ *  nothing — an unknown principal, or an account that is not active. */
+function permissions(info, env) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (!info || !info.active) return null;
+  const granted = env.code.permissionsOf
+    ? env.code.permissionsOf({ id: info.id, name: info.name, role: info.role, active: info.active })
+    : ["*"];
+  return rules.expandScopes(Array.isArray(granted) ? granted : [], env.declared);
+}
+
+/** The X-A2App-Token this request presents, or "". */
+function presentedToken(e) {
+  return header(e, "X-A2App-Token") || header(e, "X-LUI-Token");
+}
+
+/**
+ * The credential this request presents, checked: null when none was presented,
+ * `{ refusal }` when it cannot be used, else the caller it makes — with the
+ * account it acts for (null for the owner) and its effective scopes.
+ */
+function credentialOf(e, env) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const token = presentedToken(e);
+  if (token === "") return null;
+  const db = $app.db();
+  const grant = grantByTokenHash(db, $security.sha256(token));
+  if (grant === null) {
+    return { refusal: refusal(401, "credential_invalid", "This credential is not one this app issued.", { how: RENEW_HINT }) };
+  }
+  const nowMs = Date.now();
+  const state = rules.grantRefusal(grant, grant.task === null ? null : loadTask(db, grant.task), nowMs);
+  if (state === "credential_revoked") return { refusal: refusal(401, state, "This credential was revoked.", { how: RENEW_HINT }) };
+  if (state === "token_expired") {
+    return { refusal: refusal(401, state, `This credential expired at ${grant.expiresAt}.`, { how: RENEW_HINT }) };
+  }
+  if (env.code.problem !== null) return { refusal: codeUnavailable(env.code.problem) };
+  const account = grant.principal !== OWNER && env.multiUser ? accountById(grant.principal) : null;
+  const info = grant.principal === OWNER ? OWNER_INFO : account ? infoOf(account) : null;
+  const allowed = permissions(info, env);
+  if (allowed === null) {
+    return { refusal: refusal(401, "principal_inactive", "The person this credential acts for is no longer active.") };
+  }
+  if (rules.lastUsedDue(grant, nowMs)) {
+    grant.lastUsedAt = new Date(nowMs).toISOString();
+    putGrant(db, grant);
+  }
+  return {
+    ctx: callCtx(grant.credentialId, grant.agentName, info),
+    held: rules.intersectScopes(rules.expandScopes(grant.scopes, env.declared), allowed),
+    grant: grant,
+    account: account,
+  };
+}
+
+/** The signed-in account behind this request's session cookie, if it is still
+ *  active (a deactivated account's sessions stop on its next request). */
+function sessionOf(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const secret = rules.parseCookies(header(e, "Cookie"))[sessionCookieName()];
+  if (!secret) return null;
+  const db = $app.db();
+  const key = $security.sha256(secret);
+  const session = rowBody(db, "_a2app_sessions", key);
+  if (session === null) return null;
+  if (Date.parse(session.expiresAt) <= Date.now()) {
+    deleteRow(db, "_a2app_sessions", key);
+    return null;
+  }
+  const account = accountById(session.principal);
+  return account && account.getBool("active") ? { key: key, account: account } : null;
+}
+
+/**
+ * The caller, or `{ refusal }`. `held` is the caller's effective scopes, or
+ * "anonymous" for an uncredentialled read on a single-user app, which the scope
+ * check does not apply to. `account` is the `users` record it acts for.
+ */
+function resolve(e, isWrite, env) {
+  if (originOf(e) === "foreign") return { refusal: FOREIGN_ORIGIN };
+  const presented = credentialOf(e, env);
+  if (presented !== null) return presented;
+  if (env.multiUser) {
+    const session = sessionOf(e);
+    if (session === null) return { refusal: unauthenticated(e, true, "This app needs a credential.") };
+    if (isWrite && originOf(e) !== "own") return { refusal: CROSS_SITE_CHANGE };
+    if (env.code.problem !== null) return { refusal: codeUnavailable(env.code.problem) };
+    const info = infoOf(session.account);
+    return { ctx: callCtx("session", null, info), held: permissions(info, env) || [], grant: null, account: session.account };
+  }
+  // The app's own View is trusted as the owner. A browser sends Origin only on
+  // a change; on a read it marks the request with Sec-Fetch-Site, which a web
+  // page cannot forge. A local program can, but on this mode it already reads
+  // everything without a credential, so only a change needs the Origin.
+  if (originOf(e) === "own" || (!isWrite && fromOwnPage(e))) {
+    if (env.code.problem !== null) return { refusal: codeUnavailable(env.code.problem) };
+    return { ctx: callCtx("ui", null, OWNER_INFO), held: permissions(OWNER_INFO, env) || [], grant: null, account: null };
+  }
+  if (isWrite) return { refusal: unauthenticated(e, false, "This write requires an agent credential.") };
+  return { ctx: callCtx("anonymous", null, OWNER_INFO), held: "anonymous", grant: null, account: null };
+}
+
+/**
+ * The adapter's routes: host, then the caller, then the scope. Returns the
+ * call context `{ credentialId, agentName, principal, role }`, or null once the
+ * refusal has been written — the caller must then return without writing
+ * anything else. (`e.json` returns nothing to pass along, so a refusal cannot
+ * be handed back as a value.)
+ */
+function authorize(e, opts) {
   const hostRefusal = refuseHost(e);
   if (hostRefusal) return deny(e, hostRefusal);
+  const caller = resolve(e, opts.isWrite, accessEnv());
+  if (caller.refusal) return deny(e, caller.refusal);
+  if (opts.scope && caller.held !== "anonymous" && caller.held.indexOf(opts.scope) === -1) return deny(e, insufficientScope(opts.scope));
+  return caller.ctx;
+}
 
-  const manifest = readManifest();
-  const multiUser = !!manifest && manifest.authMode === "multi-user";
-
-  const origin = originOf(e);
-  if (origin === "foreign") return deny(e, FOREIGN_ORIGIN);
-  if (origin === "own") {
-    if (!multiUser) return { credentialId: "ui", agentName: null, principal: "owner" };
-    if (e.auth) return { credentialId: "ui", agentName: null, principal: String(e.auth.id) };
+/**
+ * The caller as a manager of accounts and credentials (spec §2.4): a signed-in
+ * person, the app's own View on a single-user app, or the admin credential —
+ * never an agent's delegated credential. `{ principal, role }`, or null once
+ * the refusal has been written.
+ */
+function managerOf(e, write) {
+  const env = accessEnv();
+  const caller = resolve(e, write, env);
+  if (caller.refusal) return deny(e, caller.refusal);
+  if (caller.grant) {
+    if (!caller.grant.admin) return deny(e, refusal(403, "not_a_manager", "An agent's credential cannot manage accounts or credentials."));
+    return { principal: OWNER, role: "owner" };
   }
-
-  const token = agentToken(e);
-  if (token === "valid") {
-    return { credentialId: LOCAL_GRANT.credentialId, agentName: LOCAL_GRANT.agentName, principal: LOCAL_GRANT.principal };
-  }
-  if (isWrite || multiUser || token === "wrong") {
-    // A token that does not match is refused even for a read: an agent holding
-    // a stale credential should learn so, not be served as anonymous.
-    return deny(e, tokenRefusal(token));
-  }
-  return { credentialId: "anonymous", agentName: null, principal: "owner" };
+  if (caller.ctx.credentialId === "anonymous") return deny(e, unauthenticated(e, env.multiUser, "Managing this app needs a credential."));
+  return { principal: caller.ctx.principal, role: caller.ctx.role };
 }
 
 /**
  * The same rule in front of PocketBase's OWN routes — records, realtime, file
- * downloads, batch — which never pass through `authorize`. Without it the
- * starter's public collection rules ("" = anyone) meant any web page open in
- * the owner's browser could read, create and delete records, and any local
- * process could write without the agent token.
+ * downloads, batch — which never pass through `authorize`. PocketBase serves
+ * those itself and decides what each caller sees with collection rules
+ * evaluated against `e.auth`, so this is where the caller becomes `e.auth`:
  *
- *   host        loopback only, as above (DNS rebinding).
- *   origin      a foreign browser origin is refused; the app's own View passes.
- *   superuser   a signed-in superuser (the PocketBase dashboard) passes.
- *   multi-user  PocketBase's own collection rules decide from here: that is what
- *               they are for once the app has real users.
- *   single-user a program (no Origin) may read records; writing one needs the
- *               agent token, and a wrong token is refused even for a read.
- *               Auth endpoints (sign-in, password reset) carry their own
- *               credentials and only get the host and origin checks.
+ *   an account (its session, or a credential acting for it)
+ *               that `users` record — the collection rules decide what it sees;
+ *   the owner (the admin credential, or one minted for `owner`)
+ *               the app's superuser, the one pb-serve.mjs ensures from
+ *               `.superuser`: the owner sees everything;
+ *   the single-user View, an anonymous single-user read
+ *               nobody, as before: the starter's rules are public there.
+ *
+ * Before that, the caller's scopes are enforced here, as they are on every
+ * adapter route: `data:<collection>:read` for record and file reads,
+ * `data:<collection>:write` for record writes and for every request in a
+ * batch. Realtime is for signed-in people, not agent credentials: its
+ * subscriptions are not per-scope. A signed-in superuser — the PocketBase
+ * dashboard, by its own Authorization header — passes as itself. Auth
+ * endpoints carry their own credentials and only get the host and origin
+ * checks; the accounts migration turns off sign-in on `users`, so the
+ * adapter's session is the only way in.
  *
  * The adapter's own routes get the host and origin checks here too (identity
  * and describe would otherwise answer a rebound Host); their handlers decide
- * the credential with `authorize`. The static View passes untouched.
+ * the caller with `authorize`. The static View passes untouched.
  *
  * This middleware wraps the whole request, so a realtime connection holds a
  * hook runtime for as long as it is open; pb-serve.mjs sizes the pool for it.
  */
 function nativeGate(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
   const method = String(e.request.method || "GET").toUpperCase();
   if (method === "OPTIONS") return e.next(); // CORS preflight: --origins answers it
   const path = String(e.request.url.path || "");
   let kind = null;
-  if (/^\/api\/collections\/[^/]+\/records(\/|$)/.test(path)) kind = method === "GET" || method === "HEAD" ? "read" : "write";
-  else if (path === "/api/realtime" || path.indexOf("/api/files/") === 0) kind = "read";
+  if (RECORDS_PATH.test(path)) kind = method === "GET" || method === "HEAD" ? "read" : "write";
+  else if (path === "/api/realtime") kind = "realtime";
+  else if (path.indexOf("/api/files/") === 0) kind = "read";
   else if (path === "/api/batch") kind = "write";
   else if (path.indexOf("/api/collections/") === 0) kind = "auth";
-  else if (path === "/api/_a2app" || path.indexOf("/api/_a2app/") === 0 || path.indexOf("/api/ops/") === 0) kind = "adapter";
+  else if (path === "/api/_a2app" || path.indexOf("/api/_a2app/") === 0 || path.indexOf("/api/ops/") === 0 || path === rules.AUTH.ACCOUNT_URL) kind = "adapter";
   if (kind === null) return e.next();
 
-  const refusal = refuseHost(e) || (originOf(e) === "foreign" ? FOREIGN_ORIGIN : null) || credentialRefusal(e, kind);
-  if (refusal) return fail(e, refusal.status, refusal.code, refusal.message, refusal.extra);
+  const early = refuseHost(e) || (originOf(e) === "foreign" ? FOREIGN_ORIGIN : null);
+  if (early) return failWith(e, early);
+  if (kind === "adapter" || kind === "auth") return e.next();
+
+  if (presentedToken(e) === "" && e.hasSuperuserAuth()) {
+    e.set(DASHBOARD, true);
+    return e.next();
+  }
+
+  const caller = resolve(e, kind === "write", accessEnv());
+  if (caller.refusal) return failWith(e, caller.refusal);
+  if (kind === "realtime" && caller.grant) {
+    return failWith(e, refusal(403, "insufficient_scope", "Realtime is for signed-in people: an agent credential reads records through the records API, where its scopes apply."));
+  }
+  if (caller.held !== "anonymous") {
+    const needed = requiredScopes(e, kind, path);
+    for (let i = 0; i < needed.length; i++) if (caller.held.indexOf(needed[i]) === -1) return failWith(e, insufficientScope(needed[i]));
+  }
+  if (caller.account) {
+    e.auth = caller.account;
+  } else if (caller.grant) {
+    const superuser = ownerAuth();
+    if (superuser === null) {
+      return fail(e, 503, "owner_unavailable", "The app's superuser (.superuser) cannot be found, so a credential acting for the owner cannot be served.");
+    }
+    e.auth = superuser;
+  }
   return e.next();
 }
 
-function credentialRefusal(e, kind) {
-  if (kind === "read" && agentToken(e) === "wrong") return tokenRefusal("wrong");
-  if (kind !== "write" || e.hasSuperuserAuth() || originOf(e) === "own") return null;
-  const manifest = readManifest();
-  if (manifest && manifest.authMode === "multi-user") return null;
-  const token = agentToken(e);
-  return token === "valid" ? null : tokenRefusal(token);
+const RECORDS_PATH = /^\/api\/collections\/([^/]+)\/records(\/|$)/;
+
+/** The scopes a request to PocketBase's own routes needs. A collection that
+ *  does not exist needs none: PocketBase answers it with a 404. */
+function requiredScopes(e, kind, path) {
+  const scopes = [];
+  const need = (idOrName, access) => {
+    const name = collectionName(idOrName);
+    if (name !== null) scopes.push(`data:${name}:${access}`);
+  };
+  const records = path.match(RECORDS_PATH);
+  const file = path.match(/^\/api\/files\/([^/]+)\//);
+  if (records) need(records[1], kind === "write" ? "write" : "read");
+  else if (file) need(file[1], "read");
+  else if (path === "/api/batch") {
+    const requests = bodyOf(e).requests;
+    for (let i = 0; Array.isArray(requests) && i < requests.length; i++) {
+      const url = String((requests[i] && requests[i].url) || "").split("?")[0];
+      const sub = url.match(RECORDS_PATH);
+      if (sub) need(sub[1], "write");
+    }
+  }
+  return scopes;
 }
 
-const FOREIGN_ORIGIN = { status: 403, code: "forbidden_origin", message: "Refused: request Origin is not this app's own." };
+/** A collection's name from the id or name a route was given, or null. */
+function collectionName(idOrName) {
+  try {
+    return $app.findCachedCollectionByNameOrId(idOrName).name;
+  } catch (_missing) {
+    return null;
+  }
+}
+
+/** The superuser pb-serve.mjs ensures from `.superuser`: who the owner is to
+ *  PocketBase's collection rules. */
+function ownerAuth() {
+  try {
+    const su = JSON.parse(toString($os.readFile(`${__hooks}/../../.superuser`)));
+    return $app.findAuthRecordByEmail("_superusers", String(su.email));
+  } catch (_missing) {
+    return null;
+  }
+}
+
+const FOREIGN_ORIGIN = { status: 403, code: "forbidden_origin", message: "Refused: request Origin is not this app's own.", extra: {} };
+/** A signed-in change must come from this app's own page (CSRF, spec §4). */
+const CROSS_SITE_CHANGE = { status: 403, code: "forbidden_origin", message: "A signed-in change must come from this app's own page.", extra: {} };
+
+function refusal(status, code, message, extra) {
+  return { status: status, code: code, message: message, extra: extra || {} };
+}
+
+function insufficientScope(scope) {
+  return refusal(403, "insufficient_scope", `This credential does not hold ${scope}.`, { required: scope });
+}
+
+function codeUnavailable(problem) {
+  return refusal(503, "app_code_unavailable", `Requests are paused (app_code_unavailable): pb/pb_hooks/operations.js could not be loaded (${problem}).`);
+}
+
+/** No usable caller: from the app's own page on a multi-user app, the person is
+ *  asked to sign in; anything else is told how to get a credential. */
+function unauthenticated(e, multiUser, message) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (multiUser && fromOwnPage(e)) {
+    return refusal(401, "sign_in_required", "Sign in to use this app.", { signInUrl: `${rules.AUTH.ACCOUNT_URL}#sign-in` });
+  }
+  return refusal(401, "agent_token_required", message, { how: CREDENTIAL_HINT });
+}
+
+/** Whether a request came from one of the app's own pages. Only ever used to
+ *  pick which 401 to send, and on a single-user app to trust a View read —
+ *  a browser marks same-origin fetches, GETs included, with Sec-Fetch-Site. */
+function fromOwnPage(e) {
+  return originOf(e) === "own" || header(e, "Sec-Fetch-Site") === "same-origin";
+}
 
 /** A refusal if the Host is not one this app answers to, else null: a loopback
- *  name, or the host of A2APP_PUBLIC_URL. A page on evil.com whose DNS
- *  re-resolves to 127.0.0.1 sends no Origin on a GET, but its Host header still
- *  says evil.com. */
+ *  name, or the host of A2APP_PUBLIC_URL. */
 function refuseHost(e) {
   const host = String(e.request.host || "").toLowerCase();
   const name = hostnameOf(host);
   const pub = publicOrigin();
   if (isLoopbackName(name) || (pub !== "" && name === hostnameOf(pub.slice(pub.indexOf("//") + 2)))) return null;
-  return { status: 403, code: "forbidden_host", message: `Refused: this app answers only on its own host, not "${host}".` };
+  return refusal(403, "forbidden_host", `Refused: this app answers only on its own host, not "${host}".`);
 }
 
 /** "none" (a program, or a same-origin GET), "own" (this app's View) or "foreign".
@@ -949,6 +1316,12 @@ function publicOrigin() {
   return String($os.getenv("A2APP_PUBLIC_URL") || "").toLowerCase();
 }
 
+/** Where this app is reached, for links handed to a person (an invite, a device
+ *  approval). The Host header has passed the host check by now. */
+function publicLink(e) {
+  return publicOrigin() || `http://${String(e.request.host || "")}`;
+}
+
 /** The host name in a Host value: `name`, `name:port`, or `[v6]:port`. */
 function hostnameOf(host) {
   return host.indexOf("[") === 0 ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
@@ -965,31 +1338,13 @@ function isLoopbackName(name) {
   return true;
 }
 
-/** "none", "valid" or "wrong": the agent token from `.agent-token`, sent as X-A2App-Token. */
-function agentToken(e) {
-  const presented = header(e, "X-A2App-Token") || header(e, "X-LUI-Token");
-  if (presented === "") return "none";
-  let expected = "";
-  try {
-    expected = toString($os.readFile(`${__hooks}/../../${TOKEN_FILE}`)).trim();
-  } catch (_none) {
-    expected = ""; // no credential minted: nothing can match it
-  }
-  return expected !== "" && $security.equal(presented, expected) ? "valid" : "wrong";
+function failWith(e, r) {
+  return fail(e, r.status, r.code, r.message, r.extra);
 }
 
-function tokenRefusal(token) {
-  return {
-    status: 401,
-    code: "agent_token_required",
-    message: token === "wrong" ? "The agent credential presented is not this app's." : "This write requires an agent credential.",
-    extra: { how: CREDENTIAL_HINT },
-  };
-}
-
-/** Write a refusal from `authorize` and return null, which tells the caller to stop. */
-function deny(e, refusal) {
-  fail(e, refusal.status, refusal.code, refusal.message, refusal.extra);
+/** Write a refusal and return null, which tells the caller to stop. */
+function deny(e, r) {
+  failWith(e, r);
   return null;
 }
 
@@ -1010,6 +1365,98 @@ function saveTask(db, task) {
   db.newQuery("UPDATE _a2app_tasks SET status = {:status}, body = {:body} WHERE id = {:id}")
     .bind({ id: task.id, status: task.status, body: JSON.stringify(task) })
     .execute();
+}
+
+/* Keyed tables — sessions, invites, device requests — hold one JSON body per
+ * key, the key being the SHA-256 of the secret that finds the row. `table` is
+ * always one of the names in ensureStore, never caller input. */
+
+function rowBody(db, table, key) {
+  const found = rows(db, `SELECT body FROM ${table} WHERE key = {:key}`, { key: key }, { body: "" });
+  return found.length ? JSON.parse(found[0].body) : null;
+}
+
+function putRowBody(db, table, key, body) {
+  db.newQuery(`INSERT OR REPLACE INTO ${table} (key, body) VALUES ({:key}, {:body})`).bind({ key: key, body: JSON.stringify(body) }).execute();
+}
+
+/** Delete one row; returns how many went, so a single-use row is used once. */
+function deleteRow(db, table, key) {
+  return db.newQuery(`DELETE FROM ${table} WHERE key = {:key}`).bind({ key: key }).execute().rowsAffected();
+}
+
+function allRows(db, table) {
+  const found = rows(db, `SELECT key, body FROM ${table}`, {}, { key: "", body: "" });
+  const out = [];
+  for (let i = 0; i < found.length; i++) out.push({ key: found[i].key, body: JSON.parse(found[i].body) });
+  return out;
+}
+
+/* Grants (spec/v0_2/auth.md §2.1): one row per credential, found by the hex
+ * SHA-256 of its token. No token is ever stored. */
+
+function grantByTokenHash(db, tokenHash) {
+  const found = rows(db, "SELECT body FROM _a2app_grants WHERE token_hash = {:hash}", { hash: tokenHash }, { body: "" });
+  return found.length ? JSON.parse(found[0].body) : null;
+}
+
+function grantById(db, credentialId) {
+  const found = rows(db, "SELECT body FROM _a2app_grants WHERE credential_id = {:id}", { id: credentialId }, { body: "" });
+  return found.length ? JSON.parse(found[0].body) : null;
+}
+
+function putGrant(db, grant) {
+  db.newQuery("INSERT OR REPLACE INTO _a2app_grants (credential_id, token_hash, body) VALUES ({:id}, {:hash}, {:body})")
+    .bind({ id: grant.credentialId, hash: grant.tokenHash, body: JSON.stringify(grant) })
+    .execute();
+}
+
+function deleteGrant(db, credentialId) {
+  db.newQuery("DELETE FROM _a2app_grants WHERE credential_id = {:id}").bind({ id: credentialId }).execute();
+}
+
+function listGrants(db) {
+  const found = rows(db, "SELECT body FROM _a2app_grants", {}, { body: "" });
+  const out = [];
+  for (let i = 0; i < found.length; i++) out.push(JSON.parse(found[i].body));
+  return out;
+}
+
+/** 256 random bits, base64url (43 characters): a token, session, invite or
+ *  device code. Returned once; only its SHA-256 is kept. */
+function newSecret() {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  return $security.randomStringWithAlphabet(42, rules.SECRET_ALPHABET) + $security.randomStringWithAlphabet(1, rules.SECRET_LAST_ALPHABET);
+}
+
+/** An id that is not a secret: `prefix_` + 64 random bits, hex. */
+function newId(prefix) {
+  return `${prefix}_${$security.randomStringWithAlphabet(16, "0123456789abcdef")}`;
+}
+
+/**
+ * Issue a credential (spec §2): a token returned once, its SHA-256 stored, bound
+ * to one principal, always expiring. `input` is { principal, agentName, scopes,
+ * expiresInSeconds, task? }. Every credential this app issues is made here.
+ */
+function mintCredential(db, input) {
+  const token = "a2a_" + newSecret();
+  const nowMs = Date.now();
+  const grant = {
+    credentialId: newId("cred"),
+    tokenHash: $security.sha256(token),
+    principal: input.principal,
+    agentName: input.agentName,
+    scopes: input.scopes,
+    createdAt: new Date(nowMs).toISOString(),
+    expiresAt: new Date(nowMs + input.expiresInSeconds * 1000).toISOString(),
+    lastUsedAt: null,
+    revokedAt: null,
+    task: input.task || null,
+    admin: false,
+  };
+  putGrant(db, grant);
+  return { token: token, grant: grant };
 }
 
 /** Return abandoned claims to the queue (or fail them, once exhausted). Read
@@ -1038,12 +1485,15 @@ function sweep(app) {
 
 /**
  * Emit a declared event and, when `capability` is given, queue a task for an
- * agent. The same occurrence (type, capability, payload) dedupes to one task,
- * even after it finished — a re-ask names the previous task in its payload.
- * `app` is the app (or the transaction) to write through; `env` is what
- * `triggerEnv()` read, so a runner that fires many times reads it once.
+ * agent. The same occurrence (type, capability, payload, who asked) dedupes to
+ * one task, even after it finished — a re-ask names the previous task in its
+ * payload. `principal` is who asked (spec/v0_2/auth.md §6.1): the caller of the
+ * operation that fires it, null for work the app queues on its own; the agent
+ * that takes the task acts as them. `app` is the app (or the transaction) to
+ * write through; `env` is what `triggerEnv()` read, so a runner that fires many
+ * times reads it once.
  */
-function triggerWith(app, env, type, payload, capability) {
+function triggerWith(app, env, type, payload, capability, principal) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
   if (typeof type !== "string" || type === "") throw new Error("trigger needs an event type");
   if (!rules.eventDeclared(env.events, type)) {
@@ -1065,14 +1515,14 @@ function triggerWith(app, env, type, payload, capability) {
 
   let taskId = null;
   if (typeof capability === "string" && capability !== "") {
-    const dedup = "sha256:" + $security.sha256(rules.occurrenceText(type, capability, plain));
+    const dedup = "sha256:" + $security.sha256(rules.occurrenceText(type, capability, plain, principal));
     const existing = rows(db, "SELECT id FROM _a2app_tasks WHERE dedup = {:dedup}", { dedup: dedup }, { id: "" });
     if (existing.length) {
       taskId = existing[0].id;
     } else {
       const task = rules.newTask({
         id: "tsk_" + $security.randomStringWithAlphabet(16, hex),
-        app: appId, event: event.id, capability: capability, payload: plain, dedupKey: dedup, now: now,
+        app: appId, event: event.id, capability: capability, payload: plain, principal: principal, dedupKey: dedup, now: now,
       });
       db.newQuery("INSERT INTO _a2app_tasks (id, status, dedup, body) VALUES ({:id}, {:status}, {:dedup}, {:body})")
         .bind({ id: task.id, status: task.status, dedup: dedup, body: JSON.stringify(task) })
@@ -1090,17 +1540,19 @@ function triggerEnv() {
 }
 
 /** `trigger` for code outside an operation (a record hook, a cron job). Inside
- *  an operation, use the `a2app.trigger` the runner is handed instead.
+ *  an operation, use the `a2app.trigger` the runner is handed instead. Work
+ *  queued this way is the app's own: nobody asked for it, so it runs as the
+ *  owner.
  *
  *  It runs in a transaction of its own, so the event and its task land together
  *  or not at all. Code already inside a transaction passes it as `txApp`:
  *  opening a second one there would wait forever on the first, because
  *  PocketBase writes through a single connection. */
 function trigger(type, payload, capability, txApp) {
-  if (txApp) return triggerWith(txApp, triggerEnv(), type, payload, capability);
+  if (txApp) return triggerWith(txApp, triggerEnv(), type, payload, capability, null);
   let fired = null;
   $app.runInTransaction((tx) => {
-    fired = triggerWith(tx, triggerEnv(), type, payload, capability);
+    fired = triggerWith(tx, triggerEnv(), type, payload, capability, null);
   });
   return fired;
 }
@@ -1123,7 +1575,7 @@ function runOperation(e, name) {
   for (let i = 0; i < decls.length; i++) if (decls[i].name === name) decl = decls[i];
   if (!decl) return fail(e, 404, "unknown_operation", `No declared operation "${name}".`);
 
-  const ctx = authorize(e, decl.readOnly !== true);
+  const ctx = authorize(e, { scope: `op:${name}`, isWrite: decl.readOnly !== true });
   if (ctx === null) return;
   const args = bodyOf(e);
 
@@ -1204,7 +1656,9 @@ function runOperation(e, name) {
       }
       const a2app = {
         app: tx,
-        trigger: (type, payload, capability) => triggerWith(tx, env, type, payload, capability),
+        // The caller is who asked for the work, so the agent that takes the
+        // task acts as them (spec/v0_2/auth.md §6).
+        trigger: (type, payload, capability) => triggerWith(tx, env, type, payload, capability, ctx.principal),
         task: (id) => {
           const found = loadTask(tx.db(), String(id));
           if (!found) return null;
@@ -1263,7 +1717,7 @@ function operationError(status, code, message, extra) {
 /** GET /api/_a2app/tasks[?status=] */
 function listTasks(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  if (authorize(e, false) === null) return;
+  if (authorize(e, { scope: null, isWrite: false }) === null) return;
   sweep($app);
   const status = queryParam(e, "status");
   const found = status
@@ -1277,20 +1731,21 @@ function listTasks(e) {
 /** GET /api/_a2app/tasks/{id} */
 function getTask(e, id) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  if (authorize(e, false) === null) return;
+  if (authorize(e, { scope: null, isWrite: false }) === null) return;
   sweep($app);
   const task = loadTask($app.db(), id);
   if (!task) return fail(e, 404, "task_not_found", `No task "${id}".`);
   return e.json(200, rules.taskWire(task));
 }
 
-/** POST /api/_a2app/tasks/{id}/{claim|progress|complete|cancel} */
+/** POST /api/_a2app/tasks/{id}/{claim|progress|complete|cancel|credential} */
 function taskAction(e, id, action) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  const ctx = authorize(e, true);
+  const ctx = authorize(e, { scope: null, isWrite: true });
   if (ctx === null) return;
   sweep($app);
   const body = bodyOf(e);
+  if (action === "credential") return taskCredential(e, id, body);
   let outcome = null;
   $app.runInTransaction((tx) => {
     const task = loadTask(tx.db(), id);
@@ -1305,12 +1760,47 @@ function taskAction(e, id, action) {
   return e.json(200, rules.taskWire(outcome.task));
 }
 
+/**
+ * POST /api/_a2app/tasks/{id}/credential — what the bridge runs the task's
+ * harness with (spec/v0_2/auth.md §6.2): a credential for the person who
+ * queued the task, holding the scopes the app declares its capability needs
+ * (`capabilities` in operations.js, else `*`) and always limited by what that
+ * person may do; an hour at most, and dead once the task ends.
+ */
+function taskCredential(e, id, body) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const task = loadTask($app.db(), id);
+  if (!task) return fail(e, 404, "task_not_found", `No task "${id}".`);
+  const manager = managerOf(e, true);
+  if (manager === null) return;
+  if (manager.role !== "owner") return fail(e, 403, "not_a_manager", "Only an owner issues a task's credential.");
+  if (rules.TERMINAL.indexOf(task.status) !== -1) {
+    return fail(e, 409, "task_not_claimable", `Task ${id} already reached ${task.status}.`);
+  }
+  const principal = task.request.principal || OWNER;
+  const info = principalInfo(principal);
+  if (!info || !info.active) return fail(e, 401, "principal_inactive", "The person who queued this task is no longer active.");
+  const agentName = rules.parseAgentName(body.agentName);
+  if (agentName !== null && typeof agentName === "object") return fail(e, 400, "usage", agentName.problem);
+  const env = accessEnv();
+  const problems = rules.capabilityProblems(env.code.capabilities, env.declared);
+  if (problems.length > 0) return inconsistentAppPart(e, problems);
+  const minted = mintCredential($app.db(), {
+    principal: principal,
+    agentName: agentName,
+    scopes: rules.capabilityScopes(env.code.capabilities, task.request.capability),
+    expiresInSeconds: rules.AUTH.TASK_CREDENTIAL_SECONDS,
+    task: task.id,
+  });
+  return e.json(201, { a2app: true, token: minted.token, credential: rules.credentialWire(minted.grant, info.name) });
+}
+
 /* ---------------------------------------------------------------- events */
 
 /** GET /api/_a2app/events[?since=<cursor>] */
 function listEvents(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  if (authorize(e, false) === null) return;
+  if (authorize(e, { scope: null, isWrite: false }) === null) return;
   const since = Number(queryParam(e, "since")) || 0;
   const found = rows($app.db(), "SELECT seq, body FROM _a2app_events WHERE seq > {:since} ORDER BY seq", { since: since }, { seq: 0, body: "" });
   const events = [];
@@ -1325,7 +1815,7 @@ function listEvents(e) {
 /** GET /api/_a2app/context — what the person is looking at. This View does not
  *  publish a selection, so the answer is the honest empty one. */
 function context(e) {
-  if (authorize(e, false) === null) return;
+  if (authorize(e, { scope: null, isWrite: false }) === null) return;
   return e.json(200, { a2app: true, view: null, selected: [] });
 }
 
@@ -1335,10 +1825,577 @@ function operationMethod(e) {
   return fail(e, 405, "usage", "Operations are POST-only.");
 }
 
+/* ---------------------------------------------------------------- whoami */
+
+/**
+ * GET /api/_a2app/whoami — who this app will serve this caller as, asking the
+ * same question `authorize` asks: the credential, its person, until when, and
+ * its effective scopes. An anonymous read on a single-user app was never
+ * scope-checked, so it reports what it may actually do there: read, and run
+ * read-only operations.
+ */
+function whoami(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const env = accessEnv();
+  const caller = resolve(e, false, env);
+  if (caller.refusal) return failWith(e, caller.refusal);
+  let scopes = caller.held;
+  if (scopes === "anonymous") {
+    const reads = entityNames().map((name) => `data:${name}:read`);
+    const ops = readDeclaredOperations().filter((o) => o.readOnly === true).map((o) => `op:${o.name}`);
+    scopes = reads.concat(ops);
+  }
+  const info = caller.ctx.principal === OWNER ? OWNER_INFO : caller.account ? infoOf(caller.account) : null;
+  return e.json(200, {
+    a2app: true,
+    credentialId: caller.ctx.credentialId,
+    agentName: caller.ctx.agentName,
+    principal: caller.ctx.principal,
+    principalName: info ? info.name : null,
+    role: caller.ctx.role,
+    expiresAt: caller.grant ? caller.grant.expiresAt : null,
+    scopes: scopes.slice().sort(),
+  });
+}
+
+/* -------------------------------------------------------------- accounts */
+
+/*
+ * Accounts, sessions and invites on a multi-user app (spec/v0_2/auth.md §4):
+ *
+ *   GET/POST/DELETE /api/_a2app/session        who is signed in · sign in · sign out
+ *   POST /api/_a2app/invites                    a one-time setup link (owner manager)
+ *   GET/POST /api/_a2app/invites/{code}         read · accept (creates the account)
+ *   GET /api/_a2app/users                       every account (owner manager)
+ *   PATCH /api/_a2app/users/{id}                activate/deactivate, change role
+ *
+ * An account is a record of PocketBase's `users` collection — so collection
+ * rules can say `@request.auth.id` and `@request.auth.role` — which the
+ * accounts migration locks: no rule lets anyone list, create or change one, and
+ * PocketBase's own sign-in is off. These routes are the only way in.
+ *
+ * Passwords use that collection's password field. bcrypt reads at most 72
+ * bytes and a password may be 256 characters, so the field holds the bcrypt of
+ * the password's SHA-256 (`passwordKey`).
+ */
+
+function notMultiUser(e) {
+  return fail(e, 404, "not_multi_user", "This app has no accounts: its authMode is none.");
+}
+
+function sessionCookieName() {
+  const manifest = readManifest();
+  return `a2app_session_${manifest && manifest.id ? manifest.id : ""}`;
+}
+
+/** Session cookies are `Secure` when the app is reached over https. */
+function secureCookies() {
+  return publicOrigin().indexOf("https:") === 0;
+}
+
+function passwordKey(password) {
+  return $security.sha256(password);
+}
+
+function accountById(id) {
+  try {
+    return $app.findRecordById(ACCOUNTS, String(id));
+  } catch (_missing) {
+    return null;
+  }
+}
+
+function accountByLogin(app, login) {
+  try {
+    return app.findFirstRecordByData(ACCOUNTS, "login", login);
+  } catch (_missing) {
+    return null;
+  }
+}
+
+function infoOf(account) {
+  return {
+    id: account.id,
+    name: account.getString("name"),
+    role: account.getString("role") === "owner" ? "owner" : "member",
+    active: account.getBool("active"),
+  };
+}
+
+/** Who a principal is: `owner`, or an account on a multi-user app; null when
+ *  it is unknown. */
+function principalInfo(id) {
+  if (id === OWNER) return OWNER_INFO;
+  if (!isMultiUser()) return null;
+  const account = accountById(id);
+  return account ? infoOf(account) : null;
+}
+
+/** The account as served: never its password. */
+function accountWire(account) {
+  const created = String(account.getDateTime("created").string());
+  return {
+    id: account.id,
+    name: account.getString("name"),
+    login: account.getString("login"),
+    role: account.getString("role"),
+    active: account.getBool("active"),
+    createdAt: created === "" ? null : created.replace(" ", "T"),
+  };
+}
+
+/** Checked when a login does not exist, so a missing account takes as long to
+ *  refuse as a wrong password and the timing does not say which. One unsaved
+ *  record whose password was set once, shared by every hook runtime. */
+function unknownAccount() {
+  return $app.store().getOrSet("a2app.unknownAccount", () => {
+    const record = new Record($app.findCollectionByNameOrId(ACCOUNTS));
+    record.setPassword(passwordKey(newSecret()));
+    return record;
+  });
+}
+
+function startSession(e, account, status) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const secret = newSecret();
+  const createdAt = Date.now();
+  putRowBody($app.db(), "_a2app_sessions", $security.sha256(secret), {
+    principal: account.id,
+    createdAt: new Date(createdAt).toISOString(),
+    expiresAt: new Date(createdAt + rules.AUTH.SESSION_TTL_MS).toISOString(),
+  });
+  e.response.header().add("Set-Cookie", rules.sessionCookie(sessionCookieName(), secret, {
+    maxAgeSeconds: rules.AUTH.SESSION_TTL_MS / 1000,
+    secure: secureCookies(),
+  }));
+  return e.json(status, Object.assign({ a2app: true }, accountWire(account)));
+}
+
+/** GET/POST/DELETE /api/_a2app/session */
+function session(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (!isMultiUser()) return notMultiUser(e);
+  const method = String(e.request.method).toUpperCase();
+  if (method === "GET") {
+    const current = sessionOf(e);
+    if (current === null) return fail(e, 401, "sign_in_required", "Not signed in.", { signInUrl: `${rules.AUTH.ACCOUNT_URL}#sign-in` });
+    return e.json(200, Object.assign({ a2app: true }, accountWire(current.account)));
+  }
+  if (method === "DELETE") {
+    const current = sessionOf(e);
+    if (current !== null) deleteRow($app.db(), "_a2app_sessions", current.key);
+    e.response.header().add("Set-Cookie", rules.sessionCookie(sessionCookieName(), "", { maxAgeSeconds: 0, secure: secureCookies() }));
+    return e.json(200, { a2app: true, ok: true });
+  }
+
+  const body = bodyOf(e);
+  if (typeof body.login !== "string" || typeof body.password !== "string") return fail(e, 400, "usage", "Sign in with { login, password }.");
+  const login = rules.normalizeLogin(body.login);
+  // Failures are counted per login in PocketBase's app store, which every
+  // hook runtime shares; a restart forgets them, which costs an attacker
+  // nothing they could not get by waiting out the window.
+  const store = $app.store();
+  const key = `a2app.signInFailures.${login}`;
+  const windowOf = (raw) => (typeof raw === "string" && raw !== "" ? JSON.parse(raw) : null);
+  const limit = rules.signInRetryAfter(windowOf(store.get(key)), Date.now());
+  if (limit.lapsed) store.remove(key);
+  if (limit.wait > 0) {
+    return fail(e, 429, "rate_limited", "Too many failed sign-ins for this login. Try again later.", { retryAfterSeconds: limit.wait });
+  }
+  const account = accountByLogin($app, login);
+  let matches = false;
+  if (account) matches = account.validatePassword(passwordKey(body.password));
+  else unknownAccount().validatePassword(passwordKey(body.password));
+  if (!account || !matches || !account.getBool("active")) {
+    store.setFunc(key, (old) => JSON.stringify(rules.signInFailed(windowOf(old), Date.now())));
+    return fail(e, 401, "sign_in_failed", "That login and password do not match an active account.");
+  }
+  store.remove(key);
+  return startSession(e, account, 200);
+}
+
+/** The invite behind a code, while it is still good. */
+function liveInvite(code) {
+  const db = $app.db();
+  const key = $security.sha256(code);
+  const invite = rowBody(db, "_a2app_invites", key);
+  if (invite === null) return null;
+  if (Date.parse(invite.expiresAt) <= Date.now()) {
+    deleteRow(db, "_a2app_invites", key);
+    return null;
+  }
+  return { key: key, invite: invite };
+}
+
+/** POST /api/_a2app/invites — a one-time setup link (an owner manager). */
+function createInvite(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (!isMultiUser()) return notMultiUser(e);
+  const manager = managerOf(e, true);
+  if (manager === null) return;
+  if (manager.role !== "owner") return fail(e, 403, "not_a_manager", "Only an owner can invite people.");
+  const body = bodyOf(e);
+  const role = body.role === undefined || body.role === null ? "member" : body.role;
+  if (role !== "owner" && role !== "member") return fail(e, 400, "usage", 'role is "owner" or "member".');
+  const secret = newSecret();
+  const createdAt = Date.now();
+  const invite = { role: role, createdAt: new Date(createdAt).toISOString(), expiresAt: new Date(createdAt + rules.AUTH.INVITE_TTL_MS).toISOString() };
+  putRowBody($app.db(), "_a2app_invites", $security.sha256(secret), invite);
+  return e.json(201, {
+    a2app: true,
+    code: secret,
+    url: `${publicLink(e)}${rules.AUTH.ACCOUNT_URL}#setup/${secret}`,
+    role: invite.role,
+    expiresAt: invite.expiresAt,
+  });
+}
+
+/** GET/POST /api/_a2app/invites/{code} — read an invite, or accept it. */
+function invite(e, code) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (!isMultiUser()) return notMultiUser(e);
+  const invalid = () => fail(e, 404, "invite_invalid", "This invite link is not valid: it was used, or it expired.");
+  const found = liveInvite(code);
+  if (found === null) return invalid();
+  if (String(e.request.method).toUpperCase() === "GET") return e.json(200, { a2app: true, role: found.invite.role, expiresAt: found.invite.expiresAt });
+
+  const body = bodyOf(e);
+  const problem = rules.accountProblem(body);
+  if (problem) return fail(e, 400, "usage", problem);
+  const login = rules.normalizeLogin(body.login);
+  if (accountByLogin($app, login)) return fail(e, 409, "login_taken", "That login is already in use.");
+  const account = new Record($app.findCollectionByNameOrId(ACCOUNTS));
+  account.set("name", body.name.trim());
+  account.set("login", login);
+  account.set("role", found.invite.role);
+  account.set("active", true);
+  account.setPassword(passwordKey(body.password));
+  // Using the invite and creating the account are one step: a second
+  // acceptance of the same invite, or a second account racing for the same
+  // login, sees this one's result.
+  let outcome = "created";
+  try {
+    $app.runInTransaction((tx) => {
+      if (deleteRow(tx.db(), "_a2app_invites", found.key) !== 1) {
+        outcome = "invite_invalid";
+        return;
+      }
+      if (accountByLogin(tx, login)) {
+        outcome = "login_taken";
+        throw new Error("a2app: rolled back"); // keeps the invite for another try
+      }
+      tx.save(account);
+    });
+  } catch (err) {
+    if (outcome === "created") throw err;
+  }
+  if (outcome === "invite_invalid") return invalid();
+  if (outcome === "login_taken") return fail(e, 409, "login_taken", "That login is already in use.");
+  return startSession(e, account, 201);
+}
+
+/** GET /api/_a2app/users, PATCH /api/_a2app/users/{id} (an owner manager). */
+function users(e, id) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  if (!isMultiUser()) return notMultiUser(e);
+  const method = String(e.request.method).toUpperCase();
+  const manager = managerOf(e, method !== "GET");
+  if (manager === null) return;
+  if (manager.role !== "owner") return fail(e, 403, "not_a_manager", "Only an owner can manage people.");
+
+  if (id === null) {
+    const records = $app.findAllRecords(ACCOUNTS);
+    const all = [];
+    for (let i = 0; i < records.length; i++) all.push(accountWire(records[i]));
+    all.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    return e.json(200, { a2app: true, users: all });
+  }
+  const account = accountById(id);
+  if (account === null) return fail(e, 404, "not_found", `No account "${id}".`);
+  const body = bodyOf(e);
+  if (body.active !== undefined && typeof body.active !== "boolean") return fail(e, 400, "usage", "active is true or false.");
+  if (body.role !== undefined && body.role !== "owner" && body.role !== "member") return fail(e, 400, "usage", 'role is "owner" or "member".');
+  const was = infoOf(account);
+  const next = {
+    role: body.role === "owner" || body.role === "member" ? body.role : was.role,
+    active: typeof body.active === "boolean" ? body.active : was.active,
+  };
+  // Counted and changed in one transaction, so two owners demoting each other
+  // at once cannot leave the app with none.
+  let lastOwner = false;
+  $app.runInTransaction((tx) => {
+    const owners = tx.countRecords(ACCOUNTS, $dbx.hashExp({ role: "owner", active: true }));
+    if (rules.losesLastOwner(was, next, owners)) {
+      lastOwner = true;
+      return;
+    }
+    account.set("role", next.role);
+    account.set("active", next.active);
+    tx.save(account);
+  });
+  if (lastOwner) return fail(e, 409, "last_owner", "This is the last active owner. Make someone else an owner first.");
+  return e.json(200, Object.assign({ a2app: true }, accountWire(account)));
+}
+
+/* ----------------------------------------------------------- credentials */
+
+/*
+ * Delegated agent credentials (spec/v0_2/auth.md §2, §8):
+ *
+ *   GET /api/_a2app/credentials          a manager's own (an owner: everyone's)
+ *   POST /api/_a2app/credentials         issue one; the token is in this reply only
+ *   DELETE /api/_a2app/credentials/{id}  revoke (a manager, or the credential itself)
+ */
+
+/** GET /api/_a2app/credentials */
+function listCredentials(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const manager = managerOf(e, false);
+  if (manager === null) return;
+  const db = $app.db();
+  const nowMs = Date.now();
+  const credentials = listGrants(db)
+    .filter((g) => rules.grantLive(g, g.task === null ? null : loadTask(db, g.task), nowMs))
+    .filter((g) => manager.role === "owner" || g.principal === manager.principal)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((g) => {
+      const info = principalInfo(g.principal);
+      return rules.credentialWire(g, info ? info.name : null);
+    });
+  return e.json(200, { a2app: true, credentials: credentials });
+}
+
+/** POST /api/_a2app/credentials */
+function issueCredential(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const manager = managerOf(e, true);
+  if (manager === null) return;
+  const body = bodyOf(e);
+  const principal = body.principal === undefined || body.principal === null ? manager.principal : body.principal;
+  if (typeof principal !== "string") return fail(e, 400, "usage", 'principal is an account id (or "owner").');
+  if (principal !== manager.principal && manager.role !== "owner") {
+    return fail(e, 403, "not_a_manager", "Only an owner can issue a credential for someone else.");
+  }
+  const info = principalInfo(principal);
+  if (!info || !info.active) return fail(e, 400, "usage", `"${principal}" is not an active account of this app.`);
+  const agentName = rules.parseAgentName(body.agentName);
+  if (agentName !== null && typeof agentName === "object") return fail(e, 400, "usage", agentName.problem);
+  const parsed = rules.parseGrantRequest(body, accessEnv().declared);
+  if (parsed.problem) return fail(e, 400, "usage", parsed.problem);
+  const minted = mintCredential($app.db(), { principal: principal, agentName: agentName, scopes: parsed.scopes, expiresInSeconds: parsed.expiresInSeconds });
+  return e.json(201, { a2app: true, token: minted.token, credential: rules.credentialWire(minted.grant, info.name) });
+}
+
+/** DELETE /api/_a2app/credentials/{id} */
+function revokeCredential(e, id) {
+  const db = $app.db();
+  const grant = grantById(db, id);
+  if (grant === null) return fail(e, 404, "not_found", `No credential "${id}".`);
+  if (grant.admin) return fail(e, 403, "not_a_manager", "The admin credential is the app's .agent-token: rotate that file instead.");
+  // A credential may always revoke itself — the one thing an agent may do
+  // with credentials — so an agent can hand back access it no longer needs.
+  const presented = credentialOf(e, accessEnv());
+  const self = presented !== null && !presented.refusal && presented.grant.credentialId === id;
+  if (!self) {
+    const manager = managerOf(e, true);
+    if (manager === null) return;
+    if (manager.role !== "owner" && grant.principal !== manager.principal) return fail(e, 404, "not_found", `No credential "${id}".`);
+  }
+  if (grant.revokedAt === null) {
+    grant.revokedAt = new Date().toISOString();
+    putGrant(db, grant);
+  }
+  return e.json(200, { a2app: true, ok: true, revoked: id });
+}
+
+/* ------------------------------------------------------ device sign-in */
+
+/*
+ * Device-code sign-in for agents (spec/v0_2/auth.md §7, RFC 8628 shape):
+ *
+ *   POST /api/_a2app/auth/device               an agent asks; gets a code to show
+ *   GET  /api/_a2app/auth/device/{userCode}     the person reviews (a manager)
+ *   POST /api/_a2app/auth/device/{userCode}     the person approves or denies
+ *   POST /api/_a2app/auth/token                 the agent polls; gets its credential
+ *
+ * The person approves on the app's own account page, signed in as themselves;
+ * the credential issued acts for them, with the scopes they approved. Codes
+ * live 10 minutes, are single use, and the device code is stored only as its
+ * hash.
+ */
+
+/** Live requests by key, dropping the expired as it goes. */
+function liveDevices(db) {
+  const nowMs = Date.now();
+  const out = [];
+  const all = allRows(db, "_a2app_devices");
+  for (let i = 0; i < all.length; i++) {
+    if (Date.parse(all[i].body.expiresAt) <= nowMs) deleteRow(db, "_a2app_devices", all[i].key);
+    else out.push(all[i]);
+  }
+  return out;
+}
+
+/** The pending request a person's typed code names, or null. */
+function deviceByUserCode(db, input) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const code = rules.normalizeUserCode(input);
+  if (code === "") return null;
+  const live = liveDevices(db);
+  for (let i = 0; i < live.length; i++) if (live[i].body.userCode === code && live[i].body.status === "pending") return live[i];
+  return null;
+}
+
+/** POST /api/_a2app/auth/device */
+function startDevice(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const body = bodyOf(e);
+  const parsed = rules.parseGrantRequest(body, accessEnv().declared);
+  if (parsed.problem) return fail(e, 400, "usage", parsed.problem);
+  const agentName = body.agentName;
+  if (agentName !== undefined && (typeof agentName !== "string" || agentName.trim() === "" || agentName.length > 100)) {
+    return fail(e, 400, "usage", "agentName is 1–100 characters.");
+  }
+  const db = $app.db();
+  const taken = liveDevices(db).map((d) => d.body.userCode);
+  let userCode = rules.formatUserCode($security.randomStringWithAlphabet(8, rules.USER_CODE_ALPHABET));
+  while (taken.indexOf(userCode) !== -1) userCode = rules.formatUserCode($security.randomStringWithAlphabet(8, rules.USER_CODE_ALPHABET));
+  const deviceCode = newSecret();
+  const nowMs = Date.now();
+  putRowBody(db, "_a2app_devices", $security.sha256(deviceCode), {
+    userCode: userCode,
+    agentName: typeof agentName === "string" ? agentName.trim() : null,
+    scopes: parsed.scopes,
+    expiresInSeconds: parsed.expiresInSeconds,
+    createdAt: new Date(nowMs).toISOString(),
+    expiresAt: new Date(nowMs + rules.AUTH.DEVICE_CODE_TTL_SECONDS * 1000).toISOString(),
+    interval: rules.AUTH.DEVICE_POLL_INTERVAL_SECONDS,
+    lastPolledAt: null,
+    status: "pending",
+    approvedBy: null,
+    approvedScopes: null,
+  });
+  const approve = `${publicLink(e)}${rules.AUTH.ACCOUNT_URL}#approve`;
+  return e.json(200, {
+    a2app: true,
+    deviceCode: deviceCode,
+    userCode: userCode,
+    verificationUri: approve,
+    verificationUriComplete: `${approve}/${userCode}`,
+    expiresIn: rules.AUTH.DEVICE_CODE_TTL_SECONDS,
+    interval: rules.AUTH.DEVICE_POLL_INTERVAL_SECONDS,
+  });
+}
+
+/** GET /api/_a2app/auth/device/{userCode} — the person reviews the request. */
+function reviewDevice(e, userCode) {
+  const manager = managerOf(e, false);
+  if (manager === null) return;
+  const found = deviceByUserCode($app.db(), userCode);
+  if (found === null) return fail(e, 404, "device_code_invalid", "No sign-in request with that code is waiting: it was used, or it expired.");
+  const row = found.body;
+  return e.json(200, { a2app: true, userCode: row.userCode, agentName: row.agentName, scopes: row.scopes, expiresIn: row.expiresInSeconds, expiresAt: row.expiresAt });
+}
+
+/** POST /api/_a2app/auth/device/{userCode} {approve, scopes?} — the person decides. */
+function decideDevice(e, userCode) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const manager = managerOf(e, true);
+  if (manager === null) return;
+  const db = $app.db();
+  const found = deviceByUserCode(db, userCode);
+  if (found === null) return fail(e, 404, "device_code_invalid", "No sign-in request with that code is waiting: it was used, or it expired.");
+  const row = found.body;
+  const body = bodyOf(e);
+  if (typeof body.approve !== "boolean") return fail(e, 400, "usage", "Decide with { approve: true | false }.");
+  if (!body.approve) {
+    row.status = "denied";
+    putRowBody(db, "_a2app_devices", found.key, row);
+    return e.json(200, { a2app: true, ok: true, status: "denied" });
+  }
+  // The person may only narrow what was asked for.
+  let scopes = row.scopes;
+  if (body.scopes !== undefined) {
+    const parsed = rules.parseGrantRequest({ scopes: body.scopes }, accessEnv().declared);
+    if (parsed.problem) return fail(e, 400, "usage", parsed.problem);
+    const wider = rules.widerThanAsked(row.scopes, parsed.scopes);
+    if (wider.length > 0) return fail(e, 400, "usage", `Approval can only narrow what the agent asked for, not add ${wider.join(", ")}.`);
+    scopes = parsed.scopes;
+  }
+  row.status = "approved";
+  row.approvedBy = manager.principal;
+  row.approvedScopes = scopes;
+  putRowBody(db, "_a2app_devices", found.key, row);
+  return e.json(200, { a2app: true, ok: true, status: "approved" });
+}
+
+/** POST /api/_a2app/auth/token {deviceCode} — the agent polls. */
+function pollDevice(e) {
+  const rules = require(`${__hooks}/_a2app_rules.js`);
+  const deviceCode = bodyOf(e).deviceCode;
+  if (typeof deviceCode !== "string") return fail(e, 400, "usage", "Poll with { deviceCode }.");
+  const key = $security.sha256(deviceCode);
+  // Read, decide and write back in one transaction: of two polls at once, the
+  // second sees the first's result, so an approved request issues once.
+  let poll = null;
+  let row = null;
+  let issued = null;
+  let inactive = false;
+  $app.runInTransaction((tx) => {
+    row = rowBody(tx.db(), "_a2app_devices", key);
+    poll = rules.pollDevice(row, Date.now());
+    if (poll.row === null) {
+      if (row !== null) deleteRow(tx.db(), "_a2app_devices", key);
+    } else {
+      putRowBody(tx.db(), "_a2app_devices", key, poll.row);
+    }
+    if (poll.outcome !== "issue") return;
+    const info = principalInfo(row.approvedBy);
+    if (!info || !info.active) {
+      inactive = true;
+      return;
+    }
+    issued = mintCredential(tx.db(), { principal: row.approvedBy, agentName: row.agentName, scopes: row.approvedScopes, expiresInSeconds: row.expiresInSeconds });
+    issued.principalName = info.name;
+  });
+  switch (poll.outcome) {
+    case "expired":
+      return fail(e, 400, "expired_token", "This sign-in request expired or was already used. Start again.");
+    case "denied":
+      return fail(e, 400, "access_denied", "The person declined this agent's request.");
+    case "issue":
+      if (inactive) return fail(e, 400, "access_denied", "The person who approved this is no longer active.");
+      return e.json(200, { a2app: true, token: issued.token, credential: rules.credentialWire(issued.grant, issued.principalName) });
+    case "slow_down":
+      return fail(e, 400, "slow_down", `Polling too fast: wait ${poll.row.interval} s between polls.`, { interval: poll.row.interval });
+    default:
+      return fail(e, 400, "authorization_pending", "Waiting for the person to approve.", { interval: poll.row.interval });
+  }
+}
+
+/* ------------------------------------------------------- account page */
+
+/** GET /_a2app/account — the framework's account page (sign in, invites,
+ *  people, the agents acting for you), the same file in every blueprint. */
+function accountPage(e) {
+  let page;
+  try {
+    page = toString($os.readFile(`${__hooks}/../../a2app-account.html`));
+  } catch (_missing) {
+    return fail(e, 404, "not_found", "This app ships no account page (a2app-account.html).");
+  }
+  return e.html(200, page);
+}
+
 module.exports = {
   identity: identity, describe: describe, guard: guard, deleteGuard: deleteGuard,
   nativeGate: nativeGate,
   ensureStore: ensureStore, runOperation: runOperation, trigger: trigger,
   listTasks: listTasks, getTask: getTask, taskAction: taskAction,
   listEvents: listEvents, context: context, operationMethod: operationMethod,
+  whoami: whoami,
+  session: session, createInvite: createInvite, invite: invite, users: users,
+  listCredentials: listCredentials, issueCredential: issueCredential, revokeCredential: revokeCredential,
+  startDevice: startDevice, reviewDevice: reviewDevice, decideDevice: decideDevice, pollDevice: pollDevice,
+  accountPage: accountPage,
 };

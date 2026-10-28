@@ -4,7 +4,8 @@ A PocketBase backend + a React frontend, with the A2App adapter running as
 in-process PocketBase JS hooks (`pb/pb_hooks/_a2app*.js`). PocketBase serves
 records natively; the adapter adds identity + describe, a guard that validates
 the raw request body before PocketBase coerces it, declared operations
-(`POST /api/ops/{name}`), and the app→agent task queue and event log.
+(`POST /api/ops/{name}`), the app→agent task queue and event log, and who may
+do what: agent credentials, and accounts on a multi-user app.
 
 Where the `creator`/`modify` skill says "per your stack", the answer is here. If
 this file and the source disagree, the source wins.
@@ -34,8 +35,8 @@ that work until it is done. Replace all three with your own.
 | Path | Owner | What it is |
 |---|---|---|
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). |
-| `pb/pb_hooks/operations.js` | **YOURS** | the operation RUNNERS (one per declared operation, same name), the `events` this app may emit, and the `readOnly` fields only runners write. Loaded with `require()`, never as a hook file. |
-| `pb/pb_migrations/1759622400_created_tasks.js` | **YOURS** | the starter's `tasks` collection and welcome row — the first link in your migration chain. Never edit it once applied; change `tasks` with a new migration. |
+| `pb/pb_hooks/operations.js` | **YOURS** | the operation RUNNERS (one per declared operation, same name), the `events` this app may emit, the `readOnly` fields only runners write, whose records are whose (`ownedBy`), what each capability's agent may do (`capabilities`), and optionally what each person may do (`permissionsOf`). Loaded with `require()`, never as a hook file. |
+| `pb/pb_migrations/1759622400_created_tasks.js` | **YOURS** | the starter's `tasks` collection (with its `owner` field and access rules chosen by the app's mode) and welcome row — the first link in your migration chain. Never edit it once applied; change `tasks` with a new migration. |
 | `AGENT_APP.md` | **YOURS** | this app's index: plan, modules, entities, operations, conventions, checklist. |
 | `reference/requirements.md` | **YOURS** | the binding spec — Part A (SRS) + Part B (tech spec + Quality Conformance). |
 | `reference/tasks.md` | **YOURS** | the build ledger — one task per feature/quality item, ticked as you complete it. |
@@ -45,10 +46,12 @@ that work until it is done. Replace all three with your own.
 | `ui/public/tokens.css` · `ui/public/ui.css` | **YOURS** | the kit design-token sheet + component styles, copied through the build verbatim. Re-point token values; keep the names stable. |
 | `ui/vite.config.js` · `ui/package.json` | build | the View build: React plugin, output to `../pb/pb_public`, dev-server proxy to the running app. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
-| `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote). Never edit. |
+| `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, hands migrations the app's mode (`A2APP_AUTH_MODE`), ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote). Never edit. |
 | `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter hook REGISTRATIONS — thin one-liner handlers that `require()` the impl module (PocketBase runs each handler isolated from file scope). Never edit. |
-| `pb/pb_hooks/_a2app_impl.js` | SYSTEM (hash-locked) | the adapter IMPLEMENTATION: identity, describe, the record guards, operations, the task queue and event log, loaded via `require()` from the handlers. Never edit. |
-| `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep) + `--selftest`. Never edit. |
+| `pb/pb_hooks/_a2app_impl.js` | SYSTEM (hash-locked) | the adapter IMPLEMENTATION: identity, describe, the record guards, operations, the task queue and event log, credentials, accounts, sessions and device sign-in, loaded via `require()` from the handlers. Never edit. |
+| `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep, scopes and the ceiling, credentials, cookies, user codes, sign-in limits, device polling) + `--selftest`. Never edit. |
+| `pb/pb_migrations/1759622300_a2app_accounts.js` | SYSTEM (hash-locked) | prepares PocketBase's `users` collection to hold a multi-user app's accounts (`login`, `role`, `active`), turns off PocketBase's own sign-in and locks its rules. Applied once, before your migrations. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 
 **You create or obtain (nothing ships for these):**
 
@@ -69,11 +72,16 @@ model it as your own collection field, migration, or operation hook instead.
 - The **adapter is the only agent surface.** PocketBase serves records; the hooks
   add the protocol surface and validate raw writes via
   `onRecordCreateRequest`/`onRecordUpdateRequest`.
-- **Queue state is the adapter's, not yours.** Tasks, events and approval keys
-  live in tables of their own in `data.db` (`_a2app_tasks`, `_a2app_events`,
-  `_a2app_approvals`), created at boot. They are not collections, so they never
-  appear in describe or the records API, and you never migrate them. They
-  survive a restart; a dev boot starts with an empty queue.
+- **Queue and access state is the adapter's, not yours.** Tasks, events,
+  approval keys, agent credentials, sessions, invites and device sign-in
+  requests live in tables of their own in `data.db` (`_a2app_tasks`,
+  `_a2app_events`, `_a2app_approvals`, `_a2app_grants`, `_a2app_sessions`, …),
+  created at boot, every secret stored only as its SHA-256. They are not
+  collections, so they never appear in describe or the records API, and you
+  never migrate them. They survive a restart; a dev boot starts empty. The one
+  exception is accounts: on a multi-user app they are records of PocketBase's
+  `users` collection, so your collection rules can name the signed-in person
+  (see **Accounts and whose records**).
 - **`describe`/`schemaVersion` are derived from the LIVE collection schema** — so
   they can never drift from what the database actually holds. You never
   hand-write describe.
@@ -103,6 +111,10 @@ downloaded rather than guessing. The framework rules on top of it:
 - **Read-only fields.** PocketBase has no read-only flag for a field. Declare
   the ones only your runners may write in `operations.js` as
   `readOnly: { <collection>: ["<field>", …] }` (see **App→agent triggers**).
+- **Whose records.** A collection whose records belong to the person who made
+  them gets a text field for it and an entry in `operations.js`'s
+  `ownedBy: { <collection>: "<field>" }`, plus the matching access rules in its
+  migration (see **Accounts and whose records**).
 - **Field → protocol type mapping** the adapter publishes: PocketBase `text` →
   `string`, `number` → `number`, `bool` → `boolean`, `date` → `datetime`,
   `json` → `json`, `file` → `binary`, `select` (single) → `enum` / (multi) →
@@ -139,8 +151,9 @@ module.exports = {
 The adapter serves it as `POST /api/ops/{name}`. Before your runner is called it
 guards the arguments against the declared `params` (an undeclared or missing
 required argument is a 400 with every violation), checks the caller (the View on
-a single-user app, or the agent's `.agent-token`; a `readOnly` operation also
-answers an uncredentialled caller on a single-user app), and for a `destructive`
+a single-user app or a signed-in person on a multi-user one, or an agent's
+credential holding `op:<name>`; a `readOnly` operation also answers an
+uncredentialled caller on a single-user app), and for a `destructive`
 operation answers **428 + an `approvalKey`** until the call is repeated with
 that key in `X-A2App-Approval`. The key is content-addressed — this operation
 with these exact arguments — and good once. A call carrying an
@@ -149,11 +162,15 @@ instead of running twice.
 
 A runner receives `(args, ctx, a2app)`:
 
+- `ctx` — who is calling: `{ credentialId, agentName, principal, role }`.
+  `principal` is `owner` or an account id; `role` is `owner` or `member`.
 - `a2app.app` — the PocketBase app to read and write through. **It is a
   transaction**: the whole runner, and every task it queues, commits together
   or not at all, so a runner that throws leaves nothing half-written. Use it
   rather than `$app`, and keep slow outbound calls out of runners — the
-  transaction holds the database's write lock until you return.
+  transaction holds the database's write lock until you return. It is not held
+  to your collection rules, so a runner holds itself to them: the starter's
+  `mine(ctx, record)` helper is the pattern.
 - `a2app.trigger(type, payload, capability)` — see **App→agent triggers**.
 - `a2app.task(id)` — a queued task as the agent sees it (`{ id, status, … }`),
   or `null`. Read inside the same transaction, so it is current.
@@ -195,20 +212,25 @@ For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
 - `GET/POST/PATCH/DELETE /api/collections/<entity>/records` — the same records
   the agent operates. The guard validates every create/update.
 - `POST /api/ops/<name>` — run a declared operation. Same-origin, so no
-  credential on a single-user app.
+  credential: on a single-user app the View is trusted, on a multi-user app the
+  person's session carries it.
 - `GET /api/_a2app/tasks/<id>` — follow work queued for an agent.
-- `GET /api/_a2app` — identity (app name, versions).
+- `GET /api/_a2app` — identity (app name, versions, `authMode`, `accountUrl`).
 
-Every route answers only on a loopback `Host`, and a browser `Origin` other
-than the app's own is refused (403). On PocketBase's own routes (records,
-realtime, files, batch) the app's own View passes and so does a signed-in
-superuser (the dashboard); on a single-user app a program with no `Origin` may
-read, and a write needs the agent token (`.agent-token`, sent as
-`X-A2App-Token`); on a multi-user app PocketBase's collection rules decide, so
-replace the starter's public (`""`) rules before switching `authMode`. The
-adapter's routes (operations, tasks, describe's record levels) take the agent
-token or the app's own View, as described above. `pb-serve.mjs` also limits
-CORS to the app's own origin.
+`ui/src/api.js` sends a person who is not signed in to the account page (on
+`401 sign_in_required`) and back, and the footer links to it from
+`identity.accountUrl`; the View has no auth code of its own.
+
+Every route answers only on its own `Host` (loopback, or the public URL's), and
+a browser `Origin` other than the app's own is refused (403). PocketBase's own
+routes (records, realtime, files, batch) and the adapter's go through the same
+check of who is calling: an agent's credential (`X-A2App-Token`), held to its
+scopes; on a multi-user app, the signed-in person, whose changes must carry the
+app's own `Origin`; on a single-user app, the app's own View, and a program
+with no credential may read. A signed-in superuser (the dashboard) passes as
+itself. On PocketBase's routes the caller then becomes `@request.auth`, so your
+collection rules decide what it sees — see **Accounts and whose records**.
+`pb-serve.mjs` also limits CORS to the app's own origin.
 
 Render back what the server **stored**, never what you sent; page large lists;
 design the loading/empty/error states, not just the happy path.
@@ -233,13 +255,9 @@ runner, beside `a2app.app`:
 events: [{ type: "task.needs_triage" }],
 
 runners: {
-  "request-triage": (args, _ctx, a2app) => {
-    let task;
-    try {
-      task = a2app.app.findRecordById("tasks", String(args.task));
-    } catch (_missing) {
-      return { ok: false, reason: "no such task" };
-    }
+  "request-triage": (args, ctx, a2app) => {
+    const task = mine(ctx, findTask(a2app, args.task)); // the caller's own, or an owner's pick
+    if (!task) return { ok: false, reason: "no such task" };
     const previous = task.getString("agentTask");
     const current = previous ? a2app.task(previous) : null;
     if (current && !["completed", "failed", "canceled"].includes(current.status)) {
@@ -264,10 +282,18 @@ something — nothing is queued and no agent is ever handed it.
 - **Send ids.** The agent re-reads the record; a copy in the payload is stale by
   the time it is read, and prose there is an instruction the app does not get to
   give.
-- **The same occurrence is one task.** Type + capability + payload is the dedup
-  key, even after the task has finished, so asking again with the same payload
-  hands back the old task. Put the previous task id in the payload (as above) to
-  ask again for real.
+- **The agent acts as whoever asked.** The task records the runner's caller
+  (`request.principal`), and the bridge runs the agent with a credential for
+  that person: it sees and changes only what they could, and dies when the task
+  ends. Say what the work needs in `operations.js`'s `capabilities` —
+  `{ triage: { scopes: ["data:tasks:read", "data:tasks:write"] } }` — and the
+  credential holds no more; a capability left out gets `*`, still within that
+  person's reach. Work queued outside an operation (below) has no caller and
+  runs as the owner.
+- **The same occurrence is one task.** Type + capability + payload + who asked
+  is the dedup key, even after the task has finished, so asking again with the
+  same payload hands back the old task. Put the previous task id in the payload
+  (as above) to ask again for real.
 - **One open run per record.** Check the record's last task with `a2app.task`
   and hand it back while it is unfinished (as above). Otherwise a double click,
   a retry, or the agent itself asking from inside its run queues a second run
@@ -289,10 +315,9 @@ the returned `taskId` on the record (the starter's `agentTask`), so the View, or
 an agent reading the record, can follow the work with
 `GET /api/_a2app/tasks/{id}` until it is done: `submitted`, `working` (with the
 agent's `progress.step`), then `completed` (`result.summary`) or `failed`
-(`reason`). On a single-user app the View needs no credential for that read; on
-a multi-user app it answers 401 unless the View's user is signed in (or the
-caller has the agent token), so have the agent write its progress onto the
-record if the View cannot read the task. A 404 means the task is gone.
+(`reason`). The View needs no credential for this read: on a single-user app it
+is trusted, and on a multi-user app the person's session makes it. A 404 means
+the task is gone.
 
 **Declare that field read-only.** An agent that saves a record it read a
 minute earlier would otherwise write back the old task id. PocketBase has no
@@ -309,6 +334,58 @@ through the request guard, and the owner can still edit it in the PocketBase
 dashboard. If `operations.js` cannot be loaded, client writes are refused with
 503 `app_code_unavailable` until it is fixed, rather than letting a read-only
 field be overwritten unnoticed.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself, and the View needs no auth code of
+its own:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`. A
+  request from the View with no session answers `401 sign_in_required`, and
+  `ui/src/api.js` sends the person there; it sends them back afterwards.
+  PocketBase's own sign-in is turned off, so this is the only way in.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Accounts are `users` records.** They live in PocketBase's `users`
+  collection (`name`, `login`, `role`, `active`) so that a collection rule can
+  name the signed-in person. On every request to PocketBase's own routes the
+  adapter makes the caller `@request.auth`: the person's `users` record for
+  their session or for an agent acting for them, and the app's superuser for
+  the owner's own credential (the `.agent-token`). The collection itself is
+  locked: no rule lists, creates or changes an account through the records API.
+- **Whose records.** `ownedBy: { <collection>: "<field>" }` in `operations.js`
+  names a text field the adapter fills with the creator's principal (an account
+  id, or `owner`) and no client may write; describe publishes it. The
+  collection's own rules do the rest. The starter's `tasks` migration chooses
+  them by the app's mode (`$os.getenv("A2APP_AUTH_MODE")`, set by
+  `pb-serve.mjs`):
+
+  ```js
+  const theirs = '@request.auth.id != "" && (owner = @request.auth.id || @request.auth.role = "owner")';
+  // list/view/update/delete: theirs · create: '@request.auth.id != ""'
+  ```
+
+  A member then lists, reads, changes and deletes only its own records (anyone
+  else's answer 404, and a list is filtered before it is paged); an owner sees
+  all. **Every collection you add needs rules like these on a multi-user app**:
+  the adapter turns away anyone not signed in, but a public (`""`) rule shows
+  every record to every signed-in person and every agent acting for one. The
+  rules are written when the migration runs, so an app switched to multi-user
+  later needs a new migration that sets them.
+- **Runners** get the caller as `ctx = { principal, role, … }` and must hold
+  themselves to the same rule for records they touch — they write through a
+  transaction the rules do not see. The starter's `mine` helper in
+  `operations.js` is the pattern.
+- **What each person may do.** An optional `permissionsOf(principal)` in
+  `operations.js` returns the scopes a person may use; every agent acting for
+  them is limited to the same, on every request. Without it everyone active may
+  use everything (their records stay their own).
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's, the starter's rules are public, and nothing is filtered.
 
 ## Reaching the app from another machine
 
@@ -368,7 +445,9 @@ Toolkit gate steps (from `a2app.toolkit.json`): **"hooks syntax + rules
 self-test"** (`node --check` the three adapter files, then
 `node pb/pb_hooks/_a2app_rules.js --selftest`, which covers the guard, the
 predicates, the fingerprint, operation arguments, the approval and dedup keys,
-the task lifecycle and the sweep), and **"operations resolve"** (every
+the task lifecycle and the sweep, and the access rules: scopes and the
+ceiling, credentials, cookies, user codes, sign-in limits, device polling),
+and **"operations resolve"** (every
 operation in `operations.json` has a runner in `pb/pb_hooks/operations.js`). `lifecycle.dataDir` is
 `pb/pb_data`; `lifecycle.promote` is `node pb-serve.mjs --migrate`.
 
@@ -401,7 +480,11 @@ pop its admin-installer page.
   runs it. The gate fails a declaration with no runner, not a runner that does
   the wrong thing.
 - **A runner is a transaction.** Write through `a2app.app`, not `$app`, and keep
-  slow outbound HTTP out of it.
+  slow outbound HTTP out of it. It is not held to your collection rules: check
+  `ctx` yourself (`mine`).
+- **Collection rules are the ownership.** On a multi-user app the adapter only
+  says who is calling; what they see is your collection's rules. A new
+  collection with public (`""`) rules is readable by every signed-in person.
 - **Empty-DB first paint.** The View must render loading/empty/error states
   against a database with no records; the verifier fails any first-paint error.
 - **The View is served built.** Editing `ui/src/` changes nothing a browser sees

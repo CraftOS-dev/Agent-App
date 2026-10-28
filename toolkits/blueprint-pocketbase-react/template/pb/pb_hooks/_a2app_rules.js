@@ -385,9 +385,13 @@ function approvalText(operation, args) {
 
 /** What a task's dedup key is the hash of. Keyed on the OCCURRENCE — the event
  *  type, the capability asked for, and the payload — never on the event record,
- *  whose id is fresh per emit and would deduplicate nothing (A2APP-SPEC 6.2). */
-function occurrenceText(type, capability, payload) {
-  return canonicalize({ type: type, capability: capability, payload: payload === undefined ? null : payload });
+ *  whose id is fresh per emit and would deduplicate nothing (A2APP-SPEC 6.2).
+ *  Who asked is part of the occurrence (spec/v0_2/auth.md §6.1): the same
+ *  request from two people is two tasks, each run as the person who asked. */
+function occurrenceText(type, capability, payload, principal) {
+  var occurrence = { type: type, capability: capability, payload: payload === undefined ? null : payload };
+  if (principal) occurrence.principal = principal;
+  return canonicalize(occurrence);
 }
 
 /* ---------------- the app→agent queue (A2APP-SPEC 6) ----------------
@@ -409,9 +413,13 @@ var QUEUE = {
 
 var TERMINAL = ["completed", "failed", "canceled"];
 
+/** `input.principal` is who queued the task (spec/v0_2/auth.md §6.1): the
+ *  caller of the operation that fired it, or null for work the app queued on
+ *  its own, which runs as the owner. */
 function newTask(input) {
   var request = { capability: input.capability };
   if (input.payload !== undefined) request.payload = input.payload;
+  request.principal = input.principal || null;
   return {
     id: input.id,
     app: input.app,
@@ -431,14 +439,18 @@ function newTask(input) {
 }
 
 /** The task as the protocol publishes it — never the dedup key or the delivery
- *  count, which are the adapter's bookkeeping. */
+ *  count, which are the adapter's bookkeeping. A task stored before 0.2 has no
+ *  principal and is published with a null one. */
 function taskWire(t) {
+  var request = {};
+  for (var k in t.request) if (Object.prototype.hasOwnProperty.call(t.request, k)) request[k] = t.request[k];
+  request.principal = t.request.principal || null;
   return {
     id: t.id,
     app: t.app,
     event: t.event,
     status: t.status,
-    request: t.request,
+    request: request,
     claim: t.claim,
     progress: t.progress,
     result: t.result,
@@ -571,7 +583,295 @@ function eventDeclared(declared, type) {
   return false;
 }
 
-module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, newTask: newTask, taskWire: taskWire, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly };
+/* ---------------- principals, credentials, accounts (spec/v0_2/auth.md) ----------------
+ * Parity oracle: adapters/adapter-core/src/{auth,accounts,credentials,device,server}.ts.
+ * The decisions are made here so the gate's self-test can hold them; secrets,
+ * hashing and storage need the runtime and live in `_a2app_impl.js`. */
+
+var AUTH = {
+  /** The app's administrator: the admin credential, and the only principal of
+   *  an `authMode: none` app. */
+  OWNER: "owner",
+  ACCOUNT_URL: "/_a2app/account",
+  SESSION_TTL_MS: 14 * 24 * 60 * 60 * 1000,
+  INVITE_TTL_MS: 7 * 24 * 60 * 60 * 1000,
+  SIGN_IN_FAILURES: 10,
+  SIGN_IN_WINDOW_MS: 15 * 60 * 1000,
+  LOGIN_MAX: 254,
+  NAME_MAX: 100,
+  PASSWORD_MIN: 10,
+  PASSWORD_MAX: 256,
+  DEFAULT_EXPIRES_SECONDS: 30 * 24 * 60 * 60,
+  MIN_EXPIRES_SECONDS: 60,
+  MAX_EXPIRES_SECONDS: 365 * 24 * 60 * 60,
+  /** A task credential's lifetime (spec §6.2); its task ending kills it sooner. */
+  TASK_CREDENTIAL_SECONDS: 60 * 60,
+  /** How long a revoked or expired credential is remembered (spec §2.1). */
+  GRANT_RETENTION_MS: 30 * 24 * 60 * 60 * 1000,
+  /** `lastUsedAt` is written at most this often. */
+  LAST_USED_RESOLUTION_MS: 60000,
+  DEVICE_CODE_TTL_SECONDS: 600,
+  DEVICE_POLL_INTERVAL_SECONDS: 5,
+  DEVICE_SLOW_DOWN_STEP_SECONDS: 5,
+};
+
+/** A 256-bit secret is 43 base64url characters: 42 that carry 6 bits each and
+ *  a last one that carries the remaining 4, so it is one of these 16. Drawing
+ *  each character uniformly from its alphabet gives exactly the strings that
+ *  base64url-encode 32 random bytes (the runtime has no raw random bytes). */
+var SECRET_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+var SECRET_LAST_ALPHABET = "AEIMQUYcgkosw048";
+
+/** Consonants only (RFC 8628 §6.1): no vowels, so no words; no look-alikes. */
+var USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
+
+/** Eight letters from USER_CODE_ALPHABET, shown as `XXXX-XXXX`. */
+function formatUserCode(letters) {
+  return letters.slice(0, 4) + "-" + letters.slice(4);
+}
+
+/** A user code as typed: case and the dash do not matter. "" when it is not one. */
+function normalizeUserCode(input) {
+  var letters = "";
+  var upper = String(input).toUpperCase();
+  for (var i = 0; i < upper.length; i++) if (USER_CODE_ALPHABET.indexOf(upper.charAt(i)) !== -1) letters += upper.charAt(i);
+  return letters.length === 8 ? formatUserCode(letters) : "";
+}
+
+/** A login as stored and compared: trimmed, lower-cased. */
+function normalizeLogin(login) {
+  return String(login).trim().toLowerCase();
+}
+
+/** `Cookie` header → name/value pairs (the first occurrence of a name wins). */
+function parseCookies(header) {
+  var out = {};
+  var parts = String(header || "").split(";");
+  for (var i = 0; i < parts.length; i++) {
+    var eq = parts[i].indexOf("=");
+    if (eq <= 0) continue;
+    var name = parts[i].slice(0, eq).trim();
+    if (Object.prototype.hasOwnProperty.call(out, name)) continue;
+    try {
+      out[name] = decodeURIComponent(parts[i].slice(eq + 1).trim());
+    } catch (_e) {
+      /* not a value this app wrote */
+    }
+  }
+  return out;
+}
+
+/** A `Set-Cookie` value for the session cookie. `maxAgeSeconds: 0` clears it. */
+function sessionCookie(name, value, opts) {
+  var attrs = [name + "=" + encodeURIComponent(value), "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=" + opts.maxAgeSeconds];
+  if (opts.secure) attrs.push("Secure");
+  return attrs.join("; ");
+}
+
+/** Every scope an app declares — what `*` means: read and write on each
+ *  entity, and each declared operation. */
+function declaredScopes(entityNames, operationNames) {
+  var out = [];
+  for (var i = 0; i < entityNames.length; i++) out.push("data:" + entityNames[i] + ":read", "data:" + entityNames[i] + ":write");
+  for (var j = 0; j < operationNames.length; j++) out.push("op:" + operationNames[j]);
+  return out;
+}
+
+/** A scope list with `*` expanded to everything declared. */
+function expandScopes(scopes, declared) {
+  return scopes.indexOf("*") !== -1 ? declared.slice() : scopes.slice();
+}
+
+/** The scopes in both lists, sorted (spec §3: grant ∩ what its person may do). */
+function intersectScopes(a, b) {
+  var out = [];
+  for (var i = 0; i < a.length; i++) if (b.indexOf(a[i]) !== -1 && out.indexOf(a[i]) === -1) out.push(a[i]);
+  return out.sort();
+}
+
+/** The optional agent name a caller gave a credential, checked. */
+function parseAgentName(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim() === "" || value.length > 100) return { problem: "agentName is 1–100 characters." };
+  return value.trim();
+}
+
+/**
+ * The scopes and lifetime a caller asked for, checked; or the reason they
+ * cannot be granted. `scopes` defaults to `*`; every entry must be `*` or a
+ * scope the app declares.
+ */
+function parseGrantRequest(body, declared) {
+  var scopes = body.scopes === undefined || body.scopes === null ? ["*"] : body.scopes;
+  var i;
+  var allStrings = Array.isArray(scopes) && scopes.length > 0;
+  for (i = 0; allStrings && i < scopes.length; i++) if (typeof scopes[i] !== "string") allStrings = false;
+  if (!allStrings) return { problem: 'scopes is a non-empty list of scope names (or ["*"]).' };
+  var unknown = [];
+  for (i = 0; i < scopes.length; i++) if (scopes[i] !== "*" && declared.indexOf(scopes[i]) === -1) unknown.push(scopes[i]);
+  if (unknown.length > 0) return { problem: "Not scopes this app declares: " + unknown.join(", ") + "." };
+  var expiresIn = body.expiresIn === undefined || body.expiresIn === null ? AUTH.DEFAULT_EXPIRES_SECONDS : body.expiresIn;
+  if (typeof expiresIn !== "number" || Math.floor(expiresIn) !== expiresIn || expiresIn < AUTH.MIN_EXPIRES_SECONDS || expiresIn > AUTH.MAX_EXPIRES_SECONDS) {
+    return { problem: "expiresIn is a whole number of seconds from " + AUTH.MIN_EXPIRES_SECONDS + " to " + AUTH.MAX_EXPIRES_SECONDS + " (365 days)." };
+  }
+  var unique = [];
+  for (i = 0; i < scopes.length; i++) if (unique.indexOf(scopes[i]) === -1) unique.push(scopes[i]);
+  return { scopes: unique, expiresInSeconds: expiresIn };
+}
+
+/** What a device approval adds to what the agent asked for (spec §7: approval
+ *  may only narrow). Empty when `approved` is within `asked`. */
+function widerThanAsked(asked, approved) {
+  if (asked.indexOf("*") !== -1) return [];
+  var wider = [];
+  for (var i = 0; i < approved.length; i++) if (approved[i] === "*" || asked.indexOf(approved[i]) === -1) wider.push(approved[i]);
+  return wider;
+}
+
+/** A credential as listed: never its token or the token's hash. */
+function credentialWire(g, principalName) {
+  return {
+    credentialId: g.credentialId,
+    principal: g.principal,
+    principalName: principalName,
+    agentName: g.agentName,
+    scopes: g.scopes,
+    createdAt: g.createdAt,
+    expiresAt: g.expiresAt,
+    lastUsedAt: g.lastUsedAt,
+    task: g.task,
+  };
+}
+
+function taskOver(task) {
+  return !task || TERMINAL.indexOf(task.status) !== -1;
+}
+
+/** Why a presented credential cannot be used, in the order spec §9 gives
+ *  (revoked — or its task is over — then expired), or null when it can. The
+ *  principal check comes after, and needs the principal's current state.
+ *  `task` is the grant's task (null when it has none, or it is gone). */
+function grantRefusal(grant, task, nowMs) {
+  if (grant.revokedAt !== null || (grant.task !== null && taskOver(task))) return "credential_revoked";
+  if (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= nowMs) return "token_expired";
+  return null;
+}
+
+/** Still able to make a request, for listing: not the admin credential, not
+ *  revoked, not expired, its task not over. */
+function grantLive(grant, task, nowMs) {
+  return !grant.admin && grantRefusal(grant, task, nowMs) === null;
+}
+
+/** Whether a revoked or expired credential has been remembered long enough. */
+function grantPrunable(grant, nowMs) {
+  var ended = grant.revokedAt || (grant.expiresAt && Date.parse(grant.expiresAt) <= nowMs ? grant.expiresAt : null);
+  return !!ended && nowMs - Date.parse(ended) > AUTH.GRANT_RETENTION_MS;
+}
+
+/** Whether this use should be written as `lastUsedAt`. */
+function lastUsedDue(grant, nowMs) {
+  return grant.lastUsedAt === null || nowMs - Date.parse(grant.lastUsedAt) >= AUTH.LAST_USED_RESOLUTION_MS;
+}
+
+/** The reason `body` is not a valid new account, or null. */
+function accountProblem(body) {
+  var name = body.name;
+  var login = body.login;
+  var password = body.password;
+  if (typeof name !== "string" || name.trim() === "" || name.trim().length > AUTH.NAME_MAX) {
+    return "name must be 1–" + AUTH.NAME_MAX + " characters.";
+  }
+  if (typeof login !== "string" || normalizeLogin(login) === "" || normalizeLogin(login).length > AUTH.LOGIN_MAX) {
+    return "login must be 1–" + AUTH.LOGIN_MAX + " characters.";
+  }
+  if (typeof password !== "string" || password.length < AUTH.PASSWORD_MIN || password.length > AUTH.PASSWORD_MAX) {
+    return "password must be " + AUTH.PASSWORD_MIN + "–" + AUTH.PASSWORD_MAX + " characters.";
+  }
+  return null;
+}
+
+/** Whether changing `account` to `next` removes the last active owner. */
+function losesLastOwner(account, next, activeOwners) {
+  var losesOwner = account.role === "owner" && account.active && (next.role !== "owner" || !next.active);
+  return losesOwner && activeOwners === 1;
+}
+
+/* Sign-in failures per login in a fixed window. The window is a value the
+ * adapter keeps in PocketBase's app store ({count, start}), shared by every
+ * hook runtime; these decide what it means. */
+
+/** Seconds until a login may try again, or 0 when it may now (and whether the
+ *  window has lapsed, so the caller can drop it). */
+function signInRetryAfter(window, nowMs) {
+  if (!window) return { wait: 0, lapsed: false };
+  var elapsed = nowMs - window.start;
+  if (elapsed >= AUTH.SIGN_IN_WINDOW_MS) return { wait: 0, lapsed: true };
+  return { wait: window.count >= AUTH.SIGN_IN_FAILURES ? Math.ceil((AUTH.SIGN_IN_WINDOW_MS - elapsed) / 1000) : 0, lapsed: false };
+}
+
+/** The window after one more failure. */
+function signInFailed(window, nowMs) {
+  if (!window || nowMs - window.start >= AUTH.SIGN_IN_WINDOW_MS) return { count: 1, start: nowMs };
+  return { count: window.count + 1, start: window.start };
+}
+
+/**
+ * One poll of `auth/token` against a device row (spec §7), at `nowMs`:
+ * `{ outcome, row }` where outcome is `expired` | `denied` | `issue` |
+ * `slow_down` | `pending`, and `row` is what to store back (null: delete it).
+ * The approved row is consumed before its credential is issued: single use.
+ */
+function pollDevice(row, nowMs) {
+  if (!row || Date.parse(row.expiresAt) <= nowMs) return { outcome: "expired", row: null };
+  if (row.status === "denied") return { outcome: "denied", row: null };
+  if (row.status === "approved" && row.approvedBy !== null && row.approvedScopes !== null) return { outcome: "issue", row: null };
+  var next = JSON.parse(JSON.stringify(row));
+  next.lastPolledAt = nowMs;
+  if (row.lastPolledAt !== null && nowMs - row.lastPolledAt < row.interval * 1000) {
+    next.interval = row.interval + AUTH.DEVICE_SLOW_DOWN_STEP_SECONDS;
+    return { outcome: "slow_down", row: next };
+  }
+  return { outcome: "pending", row: next };
+}
+
+/** What a capability's agent may do (spec §6.2): its declared scopes, else `*`. */
+function capabilityScopes(capabilities, capability) {
+  var c = capabilities && Object.prototype.hasOwnProperty.call(capabilities, capability) ? capabilities[capability] : null;
+  return c && Array.isArray(c.scopes) ? c.scopes : ["*"];
+}
+
+/** Capabilities that need scopes the app does not declare: a credential
+ *  holding them could never use them, so the app part is refused. */
+function capabilityProblems(capabilities, declared) {
+  var problems = [];
+  var names = Object.keys(capabilities || {});
+  for (var i = 0; i < names.length; i++) {
+    var scopes = (capabilities[names[i]] && capabilities[names[i]].scopes) || [];
+    var unknown = [];
+    for (var j = 0; j < scopes.length; j++) if (scopes[j] !== "*" && declared.indexOf(scopes[j]) === -1) unknown.push(scopes[j]);
+    if (unknown.length > 0) problems.push('capability "' + names[i] + '" needs scopes this app does not declare: ' + unknown.join(", "));
+  }
+  return problems;
+}
+
+/** `ownedBy` declarations that do not name a string field of their entity.
+ *  `entities` is { name: { fields } } as the adapter maps them. */
+function ownedByProblems(entities, ownedBy) {
+  var problems = [];
+  var names = Object.keys(ownedBy || {});
+  for (var i = 0; i < names.length; i++) {
+    var field = ownedBy[names[i]];
+    var def = Object.prototype.hasOwnProperty.call(entities, names[i]) ? entities[names[i]] : null;
+    var found = null;
+    for (var j = 0; def && j < def.fields.length; j++) if (def.fields[j].name === field) found = def.fields[j];
+    if (!found) problems.push('entity "' + names[i] + '" is ownedBy "' + field + '", which is not one of its fields');
+    else if (found.type !== "string") problems.push('entity "' + names[i] + '" is ownedBy "' + field + '", which must be a string field');
+  }
+  return problems;
+}
+
+module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, newTask: newTask, taskWire: taskWire, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
 
 /* -------- gate self-test: `node _a2app_rules.js --selftest` -------- */
 if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--selftest") !== -1) {
@@ -724,7 +1024,114 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
   var exhausted = sweepTask(spent, stale, QUEUE.TASK_TIMEOUT_MS, QUEUE.TASK_MAX_DELIVERIES);
   if (!exhausted || exhausted.status !== "failed" || exhausted.reason !== "redelivery_exhausted") failures.push("the last delivery should fail as redelivery_exhausted");
 
+  // Who queued a task (spec/v0_2/auth.md §6.1): recorded, published, part of
+  // the dedup key exactly as adapter-core hashes it, and null for app work.
+  var asked1 = newTask({ id: "tsk_2", app: "app", event: null, capability: "triage", payload: { task: "t1" }, principal: "usr_bob", now: now });
+  if (taskWire(asked1).request.principal !== "usr_bob") failures.push("a task must publish who queued it");
+  if (taskWire(t0).request.principal !== null) failures.push("app-queued work publishes a null principal");
+  var legacy = JSON.parse(JSON.stringify(t0));
+  delete legacy.request.principal;
+  if (taskWire(legacy).request.principal !== null || "principal" in legacy.request) failures.push("a pre-0.2 task publishes a null principal without being changed");
+  if (sha(occurrenceText("task.needs_triage", "triage", { task: "abc123" }, "usr_bob")) !== "0c521dfa423f5eb8aa2df996b5a0a702f8a33c83ac4c5fe877fc81663d9e7456") {
+    failures.push("dedup key with a principal differs from adapter-core");
+  }
+  if (occurrenceText("e", "c", { task: "t1" }, "usr_a") === occurrenceText("e", "c", { task: "t1" }, "usr_b")) failures.push("the same request from two people must be two tasks");
+  if (occurrenceText("e", "c", { task: "t1" }, null) !== occurrenceText("e", "c", { task: "t1" })) failures.push("app-queued work keys as before 0.2");
+
+  // Secrets: 43 base64url characters, exactly the encodings of 32 bytes.
+  var crypto = require("crypto");
+  var lastOk = true;
+  for (var r = 0; r < 64; r++) {
+    var encoded = crypto.randomBytes(32).toString("base64url");
+    if (encoded.length !== 43 || SECRET_LAST_ALPHABET.indexOf(encoded.charAt(42)) === -1) lastOk = false;
+  }
+  if (!lastOk || SECRET_ALPHABET.length !== 64 || SECRET_LAST_ALPHABET.length !== 16) failures.push("secret alphabets do not describe 32-byte base64url");
+
+  // User codes: generated from the alphabet, matched as typed (adapter-core vectors).
+  var letters = "";
+  for (var u = 0; u < 8; u++) letters += USER_CODE_ALPHABET.charAt(crypto.randomInt(USER_CODE_ALPHABET.length));
+  if (!/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(formatUserCode(letters))) failures.push("user code format: " + formatUserCode(letters));
+  var codes = [normalizeUserCode("bcdf-ghjk"), normalizeUserCode("bcdf ghjk x"), normalizeUserCode("aeio-bcdf"), normalizeUserCode("BCD")];
+  if (JSON.stringify(codes) !== '["BCDF-GHJK","","",""]') failures.push("user code normalization: " + JSON.stringify(codes));
+  if (normalizeLogin("  Bob@Example.COM ") !== "bob@example.com") failures.push("logins are trimmed and lower-cased");
+
+  // Cookies, byte for byte as adapter-core reads and writes them.
+  if (JSON.stringify(parseCookies("a=1; b=%20x; a=2; =bad; c; d=%E0%A4%A")) !== '{"a":"1","b":" x","":"bad"}') failures.push("cookie parsing");
+  if (sessionCookie("a2app_session_x", "v/1+", { maxAgeSeconds: 1209600, secure: true }) !== "a2app_session_x=v%2F1%2B; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure") {
+    failures.push("session cookie attributes");
+  }
+  if (sessionCookie("a2app_session_x", "", { maxAgeSeconds: 0, secure: false }) !== "a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0") failures.push("clearing cookie");
+
+  // Scopes and the ceiling (spec §3): effective = grant ∩ what its person may do.
+  var declared = declaredScopes(["tasks"], ["request-triage"]);
+  if (declared.join(",") !== "data:tasks:read,data:tasks:write,op:request-triage") failures.push("declared scopes: " + declared.join(","));
+  var everything = expandScopes(["*"], declared);
+  if (intersectScopes(expandScopes(["data:tasks:read"], declared), everything).join(",") !== "data:tasks:read") failures.push("a narrow grant stays narrow under a full person");
+  if (intersectScopes(everything, ["op:request-triage", "data:tasks:read"]).join(",") !== "data:tasks:read,op:request-triage") failures.push("a full grant is cut to what its person may do");
+  if (intersectScopes(everything, []).length !== 0) failures.push("a person with no permissions gives a credential nothing");
+  var grants = [parseGrantRequest({}, declared), parseGrantRequest({ scopes: ["data:tasks:read", "data:tasks:read"], expiresIn: 60 }, declared), parseGrantRequest({ scopes: ["nope"] }, declared), parseGrantRequest({ scopes: [] }, declared), parseGrantRequest({ expiresIn: 59 }, declared), parseGrantRequest({ expiresIn: 1.5 }, declared)];
+  if (JSON.stringify(grants) !== '[{"scopes":["*"],"expiresInSeconds":2592000},{"scopes":["data:tasks:read"],"expiresInSeconds":60},{"problem":"Not scopes this app declares: nope."},{"problem":"scopes is a non-empty list of scope names (or [\\"*\\"])."},{"problem":"expiresIn is a whole number of seconds from 60 to 31536000 (365 days)."},{"problem":"expiresIn is a whole number of seconds from 60 to 31536000 (365 days)."}]') {
+    failures.push("grant requests differ from adapter-core: " + JSON.stringify(grants));
+  }
+  if (widerThanAsked(["data:tasks:read"], ["data:tasks:read"]).length !== 0 || widerThanAsked(["data:tasks:read"], ["*"]).join() !== "*" || widerThanAsked(["*"], ["op:x"]).length !== 0) {
+    failures.push("a device approval may only narrow");
+  }
+  if (parseAgentName("  bot ") !== "bot" || parseAgentName(null) !== null || !parseAgentName("").problem) failures.push("agent names");
+
+  // A presented credential's state, in spec §9 order.
+  var nowMs = Date.parse(now);
+  var grant = { credentialId: "cred_1", principal: "usr_bob", scopes: ["*"], revokedAt: null, expiresAt: "2026-10-05T11:00:00.000Z", lastUsedAt: null, task: null, admin: false };
+  if (grantRefusal(grant, null, nowMs) !== null) failures.push("a live credential is usable");
+  if (grantRefusal(Object.assign({}, grant, { revokedAt: now, expiresAt: "2026-10-05T09:00:00.000Z" }), null, nowMs) !== "credential_revoked") failures.push("revoked is said before expired");
+  if (grantRefusal(Object.assign({}, grant, { expiresAt: now }), null, nowMs) !== "token_expired") failures.push("a credential at its expiry is expired");
+  var taskGrant = Object.assign({}, grant, { task: "tsk_1" });
+  if (grantRefusal(taskGrant, { status: "working" }, nowMs) !== null) failures.push("a task credential works while its task runs");
+  if (grantRefusal(taskGrant, { status: "completed" }, nowMs) !== "credential_revoked" || grantRefusal(taskGrant, null, nowMs) !== "credential_revoked") {
+    failures.push("a task credential dies with its task");
+  }
+  if (grantLive(Object.assign({}, grant, { admin: true, expiresAt: null }), null, nowMs)) failures.push("the admin credential is never listed");
+  if (!grantPrunable(Object.assign({}, grant, { revokedAt: "2026-09-01T00:00:00.000Z" }), nowMs) || grantPrunable(Object.assign({}, grant, { revokedAt: "2026-09-10T00:00:00.000Z" }), nowMs)) {
+    failures.push("ended credentials are remembered 30 days");
+  }
+  if (!lastUsedDue(grant, nowMs) || lastUsedDue(Object.assign({}, grant, { lastUsedAt: "2026-10-05T09:59:30.000Z" }), nowMs)) failures.push("lastUsedAt is written at most once a minute");
+
+  // Accounts.
+  var good = { name: "Bob", login: "bob", password: "a long enough password" };
+  if (accountProblem(good) !== null) failures.push("a good account was refused");
+  if (accountProblem(Object.assign({}, good, { password: "short" })) !== "password must be 10–256 characters.") failures.push("short password");
+  if (accountProblem(Object.assign({}, good, { login: "   " })) !== "login must be 1–254 characters.") failures.push("blank login");
+  if (!losesLastOwner({ role: "owner", active: true }, { role: "member", active: true }, 1)) failures.push("the last owner cannot be demoted");
+  if (losesLastOwner({ role: "owner", active: true }, { role: "owner", active: false }, 2)) failures.push("an owner can be deactivated while another remains");
+
+  // Sign-in failures: ten per login per window, then a wait.
+  var w = null;
+  for (var f = 0; f < AUTH.SIGN_IN_FAILURES - 1; f++) w = signInFailed(w, nowMs);
+  if (signInRetryAfter(w, nowMs).wait !== 0) failures.push("nine failures do not lock a login");
+  w = signInFailed(w, nowMs + 1000);
+  if (signInRetryAfter(w, nowMs + 1000).wait !== 899) failures.push("the tenth failure locks it for the rest of the window: " + signInRetryAfter(w, nowMs + 1000).wait);
+  if (!signInRetryAfter(w, nowMs + AUTH.SIGN_IN_WINDOW_MS).lapsed) failures.push("the window lapses");
+
+  // Device polling (spec §7): pending, slow_down, single use.
+  var device = { expiresAt: "2026-10-05T10:10:00.000Z", status: "pending", interval: 5, lastPolledAt: null, approvedBy: null, approvedScopes: null };
+  var p1 = pollDevice(device, nowMs);
+  var p2 = pollDevice(p1.row, nowMs + 1000);
+  var p3 = pollDevice(p2.row, nowMs + 12000);
+  if (p1.outcome !== "pending" || p2.outcome !== "slow_down" || p2.row.interval !== 10 || p3.outcome !== "pending") failures.push("device polling: " + [p1.outcome, p2.outcome, p3.outcome].join(","));
+  var approvedRow = Object.assign({}, p1.row, { status: "approved", approvedBy: "usr_bob", approvedScopes: ["data:tasks:read"] });
+  if (pollDevice(approvedRow, nowMs + 1).outcome !== "issue" || pollDevice(approvedRow, nowMs + 1).row !== null) failures.push("an approved request issues once");
+  if (pollDevice(device, Date.parse(device.expiresAt)).outcome !== "expired" || pollDevice(null, nowMs).outcome !== "expired") failures.push("expired and used codes say so");
+  if (pollDevice(Object.assign({}, device, { status: "denied" }), nowMs).outcome !== "denied") failures.push("a declined request says so");
+
+  // Capabilities and ownership must name what the app declares.
+  if (capabilityScopes({ triage: { scopes: ["data:tasks:read"] } }, "triage").join() !== "data:tasks:read" || capabilityScopes({}, "triage").join() !== "*") failures.push("capability scopes");
+  if (capabilityProblems({ triage: { scopes: ["data:tasks:read", "data:task:write"] } }, declared).length !== 1) failures.push("an undeclared capability scope must be refused");
+  var owned = { tasks: { fields: [{ name: "title", type: "string" }, { name: "done", type: "boolean" }] } };
+  if (ownedByProblems(owned, { tasks: "title" }).length !== 0) failures.push("a string ownedBy field is fine");
+  if (ownedByProblems(owned, { tasks: "done" }).length !== 1 || ownedByProblems(owned, { tasks: "owner" }).length !== 1 || ownedByProblems(owned, { notes: "owner" }).length !== 1) {
+    failures.push("ownedBy must name a string field of its entity");
+  }
+
   if (failures.length) console.log("a2app_rules selftest FAILED:\n  - " + failures.join("\n  - "));
-  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep)");
+  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep, task principal, secrets, user codes, cookies, scopes and the ceiling, credentials, accounts, sign-in limits, device polling, capabilities, ownership)");
   process.exit(failures.length ? 1 : 0);
 }

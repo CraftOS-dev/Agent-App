@@ -34,6 +34,7 @@ export default function App() {
   const [confirm, confirmElement] = useConfirm();
 
   const [appName, setAppName] = useState("Tasks");
+  const [accountUrl, setAccountUrl] = useState(null);
   const [items, setItems] = useState([]);
   const [totalItems, setTotalItems] = useState(0);
   const [filter, setFilter] = useState("all");
@@ -93,6 +94,7 @@ export default function App() {
       .then((id) => {
         const name = id?.app?.name ?? "Tasks";
         setAppName(name);
+        setAccountUrl(id?.accountUrl ?? null);
         document.title = name;
       })
       .catch(() => {
@@ -326,7 +328,15 @@ export default function App() {
 
       <footer className="app-footer">
         <span aria-live="polite">{count}</span>
-        <span className="hint">Press / to add a task</span>
+        <span className="hint">
+          Press / to add a task
+          {accountUrl && (
+            <>
+              {" · "}
+              <a href={accountUrl}>Account</a>
+            </>
+          )}
+        </span>
       </footer>
 
       {confirmElement}

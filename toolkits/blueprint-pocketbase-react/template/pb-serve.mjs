@@ -12,6 +12,9 @@
  *                   fresh per-boot directory). Defaults to pb/pb_data.
  *   A2APP_ENV       "live" or "dev". Defaults to "live".
  *
+ * It sets one input of its own for PocketBase: A2APP_AUTH_MODE, the manifest's
+ * `authMode`, which migrations read to choose a collection's access rules.
+ *
  * Environment semantics — "live loads code at boot":
  *   live  hooks are pinned (--hooksWatch=false) and the static View is served
  *         from a SNAPSHOT of pb/pb_public taken at this boot (.a2app/public).
@@ -58,6 +61,13 @@ const SUPPORTED_SERIES = "0.26.";
 
 const manifest = JSON.parse(readFileSync(join(here, "manifest.json"), "utf8"));
 const port = process.env.PORT ?? manifest.port;
+
+// The app's mode, for its migrations: a collection's access rules depend on it
+// (public on a single-user app, per signed-in person on a multi-user one — see
+// the starter's tasks migration). Migrations run inside PocketBase, in both
+// `migrate up` and `serve`, so the mode reaches them through the environment
+// every PocketBase process this launcher starts inherits.
+process.env.A2APP_AUTH_MODE = manifest.authMode === "multi-user" ? "multi-user" : "none";
 const env = process.env.A2APP_ENV ?? "live";
 const dataDir = process.env.A2APP_DATA_DIR ?? join(pbDir, "pb_data");
 const hooksDir = join(pbDir, "pb_hooks");

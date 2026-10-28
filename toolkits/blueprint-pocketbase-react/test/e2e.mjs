@@ -5,9 +5,13 @@
  * --check` and the rules self-test cannot tell whether they work. This scaffolds
  * a fresh app with the real CLI, boots it with the launcher the pipeline uses,
  * and drives it over HTTP and through the `a2app` CLI: access from foreign
- * origins and programs, operations and approval, idempotency, the task queue
- * (claim contention, progress, completion), one open run per record, a runner
- * that throws, writes paused while operations.js cannot load, and a restart.
+ * origins and programs, who is calling (protocol 0.2: the admin credential,
+ * delegated credentials held to their scopes, device sign-in approved by the
+ * View, whose records), operations and approval, idempotency, the task queue
+ * (claim contention, progress, completion, who asked, the task's own
+ * credential), one open run per record, a runner that throws, writes paused
+ * while operations.js cannot load, a restart, and a rotated .agent-token.
+ * The multi-user side is conformance/multi-user/run.mjs.
  *
  *   POCKETBASE_BIN=/path/to/pocketbase node test/e2e.mjs
  *
@@ -19,6 +23,7 @@
  * Standard library only, run directly — no test runner.
  */
 import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer } from "node:net";
@@ -132,6 +137,58 @@ try {
     check("the agent token can write", (await http("POST", records, { headers: agent, json: { title: "from the agent", status: "todo" } })).status, 200);
   }
 
+  console.log("who is calling");
+  {
+    const id = (await http("GET", `${base}/api/_a2app`)).json;
+    check("identity speaks 0.2 and names its mode and account page", [id?.protocol, id?.authMode, id?.accountUrl], ["0.2", "none", "/_a2app/account"]);
+    const page = await http("GET", `${base}/_a2app/account`);
+    check("the account page is served", [page.status, page.headers.get("content-type")?.split(";")[0]], [200, "text/html"]);
+    const asAgent = (await http("GET", `${base}/api/_a2app/whoami`, { headers: agent })).json;
+    check(
+      "the agent token is the admin credential, acting as the owner",
+      [asAgent?.credentialId, asAgent?.principal, asAgent?.principalName, asAgent?.role, asAgent?.expiresAt, asAgent?.scopes],
+      ["cred_local", "owner", "Owner", "owner", null, ["data:tasks:read", "data:tasks:write", "op:clear-done", "op:complete-task", "op:count-tasks", "op:explode", "op:request-triage"]],
+    );
+    const asView = (await http("GET", `${base}/api/_a2app/whoami`, { headers: { "Sec-Fetch-Site": "same-origin" } })).json;
+    check("the View is the owner", [asView?.credentialId, asView?.principal, asView?.role], ["ui", "owner", "owner"]);
+    check("an anonymous program may read and run read-only operations", (await http("GET", `${base}/api/_a2app/whoami`)).json?.scopes, ["data:tasks:read", "op:count-tasks"]);
+    check("a wrong token is told it is not this app's", (await http("GET", records, { headers: { "X-A2App-Token": "nope" } })).json?.code, "credential_invalid");
+    check("a single-user app has no accounts", (await http("GET", `${base}/api/_a2app/session`)).json?.code, "not_multi_user");
+    check("…nor invites", (await http("POST", `${base}/api/_a2app/invites`, { headers: agent, json: { role: "member" } })).json?.code, "not_multi_user");
+
+    const someId = (await http("GET", records)).json.items[0].id;
+    const issued = await http("POST", `${base}/api/_a2app/credentials`, { headers: own, json: { agentName: "e2e reader", scopes: ["data:tasks:read"], expiresIn: 3600 } });
+    check("the View issues a credential", [issued.status, issued.json?.credential?.principal, /^a2a_[A-Za-z0-9_-]{43}$/.test(issued.json?.token ?? "")], [201, "owner", true]);
+    const reader = { "X-A2App-Token": issued.json?.token };
+    check("it reads", (await http("GET", records, { headers: reader })).status, 200);
+    check("…writes nothing it was not given", (await http("POST", records, { headers: reader, json: { title: "x", status: "todo" } })).json?.code, "insufficient_scope");
+    check("…runs no operation it was not given", (await http("POST", `${base}/api/ops/complete-task`, { headers: reader, json: { task: someId } })).json?.code, "insufficient_scope");
+    check("…and opens no realtime stream", (await http("GET", `${base}/api/realtime`, { headers: reader, timeoutMs: 1500 })).status, 403);
+    check("an agent's credential manages nothing", (await http("GET", `${base}/api/_a2app/credentials`, { headers: reader })).json?.code, "not_a_manager");
+    const listed = (await http("GET", `${base}/api/_a2app/credentials`, { headers: { "Sec-Fetch-Site": "same-origin" } })).json?.credentials ?? [];
+    ok("the View lists it, never its token", listed.some((c) => c.credentialId === issued.json?.credential?.credentialId) && !JSON.stringify(listed).includes(issued.json?.token));
+    ok("…and never the admin credential", !listed.some((c) => c.credentialId === "cred_local"));
+    check("the View revokes it", (await http("DELETE", `${base}/api/_a2app/credentials/${issued.json?.credential?.credentialId}`, { headers: own })).status, 200);
+    check("…and it stops working", (await http("GET", records, { headers: reader })).json?.code, "credential_revoked");
+
+    const started = (await http("POST", `${base}/api/_a2app/auth/device`, { json: { agentName: "e2e device", scopes: ["data:tasks:read"] } })).json;
+    ok("an agent asks to sign in", /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(started?.userCode ?? ""));
+    ok("…with a link to approve it", started?.verificationUriComplete === `${base}/_a2app/account#approve/${started?.userCode}`);
+    check("…and is told to wait", (await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } })).json?.code, "authorization_pending");
+    check("the View approves it", (await http("POST", `${base}/api/_a2app/auth/device/${started?.userCode}`, { headers: own, json: { approve: true } })).json?.status, "approved");
+    const got = await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } });
+    check("the agent receives a credential for the owner", [got.status, got.json?.credential?.principal, got.json?.credential?.scopes], [200, "owner", ["data:tasks:read"]]);
+    check("…once", (await http("POST", `${base}/api/_a2app/auth/token`, { json: { deviceCode: started?.deviceCode } })).json?.code, "expired_token");
+
+    const created = await http("POST", records, { headers: agent, json: { title: "owned", status: "todo" } });
+    check("a record is its creator's: here, the owner's", created.json?.owner, "owner");
+    const reowned = await http("PATCH", `${records}/${created.json?.id}`, { headers: own, json: { owner: "someone" } });
+    ok("…and whose it is is not a client's to write", reowned.status === 400 && /read_only_field/.test(reowned.json?.message ?? ""));
+    const described = (await http("GET", `${base}/api/_a2app/describe/planning/tasks`)).json;
+    check("describe says so", [described?.ownedBy, described?.fields?.owner?.readOnly], ["owner", true]);
+    await http("DELETE", `${records}/${created.json?.id}`, { headers: agent });
+  }
+
   const welcome = (await http("GET", `${records}?filter=${encodeURIComponent('title ~ "Welcome"')}`)).json.items[0];
   const second = (await http("GET", `${records}?filter=${encodeURIComponent('title = "from the agent"')}`)).json.items[0];
 
@@ -188,6 +245,18 @@ try {
     const fromView = await http("POST", `${base}/api/ops/request-triage`, { headers: own, json: { task: welcome.id } });
     check("…from the View too", fromView.json?.result?.queued, queued);
     check("…so there is one task per record", (await tasks()).filter((t) => t.request?.payload?.task === welcome.id).length, 1);
+    check("the task records who asked", (await tasks()).find((t) => t.id === queued)?.request?.principal, "owner");
+
+    const taskCred = await http("POST", `${base}/api/_a2app/tasks/${queued}/credential`, { headers: agent, json: { agentName: "bridge:e2e" } });
+    check(
+      "the admin credential issues the task's own credential",
+      [taskCred.status, taskCred.json?.credential?.principal, taskCred.json?.credential?.task, taskCred.json?.credential?.scopes],
+      [201, "owner", queued, ["data:tasks:read", "data:tasks:write"]],
+    );
+    ok("…for an hour at most", Date.parse(taskCred.json?.credential?.expiresAt) <= Date.now() + 3_600_000 + 5_000);
+    const taskAgent = { "X-A2App-Token": taskCred.json?.token };
+    check("…which reads the records", (await http("GET", records, { headers: taskAgent })).status, 200);
+    check("…and holds only what its capability declares", (await http("POST", `${base}/api/ops/complete-task`, { headers: taskAgent, json: { task: welcome.id } })).json?.code, "insufficient_scope");
 
     const events = await http("GET", `${base}/api/_a2app/events`);
     ok("the trigger is in the event log", events.json?.events?.some((ev) => ev.type === "task.needs_triage" && ev.payload?.task === welcome.id));
@@ -198,6 +267,8 @@ try {
     check("progress through the CLI", firstJson(progress.stdout)?.progress?.step, "Reading the record");
     const done = await a2app("tasks", "complete", queued, "--result", JSON.stringify({ summary: "Split it into three steps." }));
     check("completion through the CLI", firstJson(done.stdout)?.status, "completed");
+    check("the task's credential dies with it", (await http("GET", records, { headers: taskAgent })).json?.code, "credential_revoked");
+    check("…and none is issued for a finished task", (await http("POST", `${base}/api/_a2app/tasks/${queued}/credential`, { headers: agent })).json?.code, "task_not_claimable");
     const fresh = await http("POST", `${base}/api/ops/request-triage`, { headers: agent, json: { task: welcome.id } });
     ok("once it is done, asking again queues a new run", fresh.json?.result?.queued && fresh.json.result.queued !== queued);
     const successor = (await tasks()).find((t) => t.id === fresh.json?.result?.queued);
@@ -225,6 +296,15 @@ try {
     const open = all.find((t) => t.request?.payload?.task === welcome.id && t.status === "submitted");
     const repeat = await http("POST", `${base}/api/ops/request-triage`, { headers: agent, json: { task: welcome.id } });
     check("an open run is still recognised after a restart", repeat.json?.result?.queued, open?.id);
+
+    // The admin credential is the .agent-token file: a rotated file replaces it
+    // at the next boot. (The next section restarts on the original again.)
+    const rotated = "a2app_" + randomBytes(24).toString("hex");
+    writeFileSync(join(dir, ".agent-token"), rotated + "\n");
+    await restart();
+    check("a rotated .agent-token retires the old one", (await http("GET", `${base}/api/_a2app/whoami`, { headers: agent })).json?.code, "credential_invalid");
+    check("…and is the admin credential from the next boot", (await http("GET", `${base}/api/_a2app/whoami`, { headers: { "X-A2App-Token": rotated } })).json?.credentialId, "cred_local");
+    writeFileSync(join(dir, ".agent-token"), token + "\n");
   }
 
   console.log("reached at a public URL");

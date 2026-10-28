@@ -41,11 +41,11 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, credentials, framework state, `__pycache__`. Extend as needed. |
 | `requirements.txt` | build | Python dependencies. Add your HTTP client (e.g. `httpx`) here when you call external APIs. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
-| `main.py` | SYSTEM (hash-locked) | FastAPI wiring: reads the HTTP request under a size cap and hands it to `adapter.dispatch()`; serves `/api/**`, `/.well-known/a2app.json` and the account page. Never edit. |
+| `main.py` | SYSTEM (hash-locked) | FastAPI wiring: every request meets the adapter first (body read under a size cap, Host checked on every path) and `adapter.dispatch()` answers `/api/_a2app/**`, `/api/collections/**`, `/api/ops/**` and `/.well-known/a2app.json`; serves the account page. Never edit. |
 | `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `scripts/promote_apply.py` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup; refuses to orphan an entity that still holds data. Leave it alone. |
-| `data/` | runtime | the live SQLite database (`db.sqlite`, git-ignored, created on first boot). Never edit by hand; never commit. |
+| `data/` | runtime | the live SQLite database (`db.sqlite`, git-ignored, created on first boot): records, and the adapter's own state in tables of its own (credentials, accounts, tasks, events, approvals, idempotency keys, the audit log), all of which survive a restart. Never edit by hand; never commit. |
 
 SYSTEM files are hashed in `.a2app/system-hashes.json`; the gate fails the build
 if one changes.
@@ -106,13 +106,20 @@ in **two places that must agree**, then implement it:
 
 ```python
 OPERATIONS = [
-    {"name": "count-tasks", "description": "Count the tasks.",
-     "readOnly": True, "idempotent": True, "module": "planning", "params": {}},
+    {"name": "clear-done", "description": "Delete every done task.",
+     "destructive": True, "module": "planning", "params": {}},
     {"name": "complete-task", "description": "Mark one task done.",
      "module": "planning", "entity": "tasks",
      "appliesWhen": {"field": "status", "ne": "done"},
      "params": {"task": {"type": "ref", "entity": "tasks", "required": True}}},
 ]
+
+def _clear_done(args, ctx, store):
+    removed = 0
+    for rec in store.list_records("tasks", {})["items"]:
+        if rec.get("status") == "done" and store.delete_record("tasks", rec["id"]):
+            removed += 1
+    return {"removed": removed}
 
 def _complete_task(args, ctx, store):
     task = store.get_record("tasks", args.get("task"))
@@ -122,7 +129,7 @@ def _complete_task(args, ctx, store):
     store.put_record("tasks", task)
     return {"ok": True, "task": task["id"], "status": task["status"]}
 
-OPERATION_RUNNERS = {"count-tasks": _count_tasks, "complete-task": _complete_task}
+OPERATION_RUNNERS = {"clear-done": _clear_done, "complete-task": _complete_task}
 ```
 
 - **Runner signature:** `(args, ctx, store) -> json-able dict`. `ctx` is who is
@@ -133,14 +140,24 @@ OPERATION_RUNNERS = {"count-tasks": _count_tasks, "complete-task": _complete_tas
   call returns. A record read from the store is a COPY: mutate it, then
   `put_record()` it back, or the change never happened.
 - **`params` is REQUIRED and typed** (same vocabulary as fields); use `{}` for
-  none. The record screen renders it as the signature — args described only in
-  prose can neither be shown nor checked.
+  none. The record screen renders it as the signature, and the adapter guards
+  the arguments by it before your runner sees them: a missing required
+  parameter, an undeclared one, or a value outside a declared enum is refused
+  `400`, exactly as a record write would be. A required `ref` to the record's
+  own entity is named on the record screen as its `targetParam`.
+- **Refusing.** A runner that cannot do what was asked raises
+  `OperationError(code, message, status=400, extra=None)` (from
+  `a2app_adapter`): the caller gets that status and `{code, message, …extra}`.
+  Any other exception is a `500 operation_failed`.
 - **`entity`** attaches the op to a record screen; **`appliesWhen`** decides
   availability on a record and the adapter derives the blocked reason from it.
   Comparisons only — `eq`, `ne`, `in`, `notIn`, `isBlank`, composed with
   `all`/`any`/`not`. Never a natural-language rule.
-- **Flags:** `destructive: True` (requires human approval), `readOnly: True`
-  (no side effects), `idempotent: True` (safe to repeat).
+- **Flags:** `destructive: True` (requires human approval: the first call
+  answers `428` with an `approvalKey` for that exact call, good once and for
+  10 minutes), `readOnly: True` (no side effects), `idempotent: True` (safe to
+  repeat). A caller's `Idempotency-Key` makes any call run once (`409
+  duplicate_request` on a replay, for 24 hours).
 - The gate step **"operations resolve"** fails the build if any op in
   `OPERATIONS` has no entry in `OPERATION_RUNNERS`.
 
@@ -194,7 +211,9 @@ something — nothing is queued and no agent is handed it. The starter's
 - **Declare the type in `EVENTS` first.** A type that is not declared is
   refused at the moment of firing — inside the operation, in front of a user.
 - **Firing the same occurrence twice makes one task.** The same type,
-  capability and payload return the task already queued rather than a second.
+  capability, payload and caller return the task already queued rather than a
+  second. Tasks, events and the event cursor survive a restart, and a task id
+  is never reused.
 - **Send ids, not prose or copies.** The agent re-reads the record itself, so a
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
@@ -303,8 +322,9 @@ means a fresh seed); the LIVE database lives in `data/db.sqlite` — what
 
 Toolkit gate steps (from `a2app.toolkit.json`): **"python syntax + adapter
 self-test"** (`python -m py_compile … && python a2app_adapter.py --selftest` —
-the selftest covers the rules parity AND the SQLite store: durability across a
-reopen, seed-once, idempotency keys, the filter grammar) and **"operations
+the selftest covers the rules parity against vectors from the reference, the
+served surface end to end, AND the SQLite store: every table durable across a
+reopen, seed-once, key expiry, the filter grammar) and **"operations
 resolve"**. `lifecycle.dataDir` is `data/`; `lifecycle.promote` is
 `python scripts/promote_apply.py`.
 

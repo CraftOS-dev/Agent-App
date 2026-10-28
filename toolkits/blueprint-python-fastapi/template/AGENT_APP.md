@@ -19,6 +19,7 @@ exactly one, and describe's root screen lists them. They are declared in
  notes (string), created (datetime, read-only).
 
 ## Operations
+- **clear-done** — deletes every task whose status is done. `destructive`.
 - **count-tasks** — count tasks. `readOnly`, `idempotent`.
 
 ## Conventions

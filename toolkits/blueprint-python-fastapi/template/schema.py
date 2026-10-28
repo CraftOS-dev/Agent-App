@@ -55,6 +55,13 @@ ENTITIES = {
 # "blocked" reason from it. Comparisons only — never a natural-language rule.
 OPERATIONS = [
     {
+        "name": "clear-done",
+        "description": "Delete every task whose status is done.",
+        "destructive": True,
+        "module": "planning",
+        "params": {},
+    },
+    {
         "name": "count-tasks",
         "description": "Count the tasks.",
         "destructive": False,
@@ -116,7 +123,16 @@ def _mine(ctx, rec):
 # COPY: mutate it, then put_record() it back, or the change never happened.
 # store.trigger(type, payload, capability=None) emits a declared event (see
 # `request-triage` below); a task it queues is done by an agent acting as the
-# caller.
+# caller. To refuse with a code of your own rather than a 500, raise
+# a2app_adapter.OperationError(code, message, status=400, extra=None).
+def _clear_done(args, ctx, store):
+    removed = 0
+    for rec in store.list_records("tasks", {})["items"]:
+        if rec.get("status") == "done" and _mine(ctx, rec) and store.delete_record("tasks", rec["id"]):
+            removed += 1
+    return {"removed": removed}
+
+
 def _count_tasks(args, ctx, store):
     return {"count": sum(1 for rec in store.list_records("tasks", {})["items"] if _mine(ctx, rec))}
 
@@ -150,6 +166,7 @@ def _request_triage(args, ctx, store):
 
 
 OPERATION_RUNNERS = {
+    "clear-done": _clear_done,
     "count-tasks": _count_tasks,
     "complete-task": _complete_task,
     "request-triage": _request_triage,

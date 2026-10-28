@@ -414,6 +414,10 @@ export function shimTarget(
   const at = (rel: string): string => join(dir, ...rel.split("\\").filter((s) => s !== ""));
   const script = /"%_prog%"\s+"%dp0%\\([^"]+)"\s+%\*/.exec(text);
   if (script) {
+    // npm sets %_prog% from the script's shebang, so the same shape also fronts
+    // python, bash and sh scripts. Only a shim that starts node is run with node.
+    const progs = [...text.matchAll(/\bSET\s+"_prog=([^"]*)"/gi)].map((m) => m[1]!);
+    if (progs.length === 0 || !progs.every((p) => /(?:^|\\)node(?:\.exe)?$/i.test(p))) return null;
     const bundled = join(dir, "node.exe");
     return { file: exists(bundled) ? bundled : nodePath, prefixArgs: [at(script[1]!)] };
   }

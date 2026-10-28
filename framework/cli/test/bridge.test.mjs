@@ -967,6 +967,11 @@ await withApp([], async ({ port }) => {
     shimTarget('@ECHO off\r\n"%dp0%\\node_modules\\x\\bin\\x.exe"   %*\r\n', dir, "NODE", () => false),
     { file: join(dir, "node_modules", "x", "bin", "x.exe"), prefixArgs: [] },
   );
+  check(
+    "an npm shim for a non-node script is not run with node",
+    shimTarget(NODE_SHIM.replace('"_prog=%dp0%\\node.exe"', '"_prog=%dp0%\\python.exe"').replace('"_prog=node"', '"_prog=python"'), dir, "NODE", () => false),
+    null,
+  );
   check("any other batch file is not a shim", shimTarget("@echo off\r\ncall other.bat %*\r\n", dir, "NODE", () => false), null);
   // Pi's pi.cmd, verbatim: a one-line node wrapper an installer wrote by hand.
   check(

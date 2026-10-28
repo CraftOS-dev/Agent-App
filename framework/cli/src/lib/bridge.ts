@@ -92,6 +92,8 @@ export interface BridgeRecord {
    *  watching a dev instance is never mistaken for one serving the live app.
    *  Absent from records written by older versions. */
   baseUrl?: string;
+  /** the only capabilities it delivers (`--capability`); absent means all */
+  capabilities?: string[];
   /** pid of a gateway this bridge started, so `stop` can take it down too */
   gatewayPid?: number;
 }
@@ -120,9 +122,12 @@ export function readBridgeRecord(dir: string): BridgeRecord | null {
       pid: raw.pid,
       harness: typeof raw.harness === "string" ? raw.harness : "unknown",
       mode: typeof raw.mode === "string" ? raw.mode : "unknown",
-      intervalMs: raw.intervalMs ?? DEFAULT_INTERVAL_MS,
+      intervalMs: typeof raw.intervalMs === "number" && raw.intervalMs > 0 ? raw.intervalMs : DEFAULT_INTERVAL_MS,
       startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
       ...(typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
+      ...(Array.isArray(raw.capabilities) && raw.capabilities.every((c) => typeof c === "string")
+        ? { capabilities: raw.capabilities }
+        : {}),
       ...(typeof raw.gatewayPid === "number" ? { gatewayPid: raw.gatewayPid } : {}),
     };
   } catch {

@@ -30,25 +30,47 @@ function refFor(app: AppView, apps: AppView[]): string {
   return app.path;
 }
 
-/** The row's agent-work markers, or "" when the app shows no sign of any. */
+/**
+ * The row's agent-work markers, or "" when the app shows no sign of any: no
+ * bridge record and nothing waiting. `list` reads only the waiting tasks (a
+ * dashboard may run it every few seconds), so an app whose queue holds only
+ * finished work is not marked here; `serve` and `bridge` read the whole queue.
+ */
 function markers(app: AppView, work: AgentWork | undefined): string {
   if (work === undefined) return app.bridge !== null ? "  bridge:running" : "";
-  if (work.bridge === "none" && work.queuesAgentWork !== true) return "";
-  const bridge = work.bridge === "running" && work.bridgeTarget === "other" ? "wrong-target" : work.bridge;
+  if (work.bridge === "none" && !((work.tasksWaiting ?? 0) > 0)) return "";
+  const bridge =
+    work.bridge !== "running" ? work.bridge
+      : work.bridgeTarget === "other" ? "wrong-target"
+        : work.notPickedUp ? "not-picking-up"
+          : "running";
   return `  bridge:${bridge}  waiting:${work.tasksWaiting ?? "?"}`;
 }
 
-/** A per-app warning, only when tasks are waiting and no bridge here will take them. */
+/** A per-app warning, only when tasks are waiting and no bridge here is taking them. */
 function stuck(app: AppView, work: AgentWork | undefined, ref: string): string | null {
   const n = work?.tasksWaiting ?? null;
   if (work === undefined || n === null || n === 0) return null;
-  if (work.bridge === "running" && work.bridgeTarget !== "other") return null;
   const start = appCommand(ref, "bridge start");
-  if (work.bridgeTarget === "other") {
-    return `"${app.name}": ${tasksPhrase(n)} waiting; its bridge takes work from ${work.running?.baseUrl}. Restart it: ${appCommand(ref, "bridge stop")}, then ${start}`;
+  const restart = `${appCommand(ref, "bridge stop")}, then ${start}`;
+  const who = `"${app.name}": ${tasksPhrase(n)} waiting`;
+  if (work.bridge === "running") {
+    if (work.bridgeTarget === "other") {
+      const fix = work.devUrl !== null
+        ? `Promote or abandon the dev change (${appCommand(ref, "promote")} or ${appCommand(ref, "stop --dev")}), then restart it: ${restart}`
+        : `Restart it: ${restart}`;
+      return `${who}; its bridge takes work from ${work.running?.baseUrl}. ${fix}`;
+    }
+    if (work.notPickedUp) {
+      return `${who}; its bridge (pid ${work.running?.pid}) has not picked ${n === 1 ? "it" : "them"} up in ${Math.round((work.oldestWaitingMs ?? 0) / 1000)}s. Restart it: ${restart}`;
+    }
+    if (work.tasksNotTaken > 0) {
+      return `${who}; ${work.tasksNotTaken} ${work.tasksNotTaken === 1 ? "needs" : "need"} a capability its bridge does not take. Restart it for all of them: ${restart}`;
+    }
+    return null;
   }
-  if (work.bridge === "stale") return `"${app.name}": ${tasksPhrase(n)} waiting; its bridge is no longer running. Restart it: ${start}`;
-  return `"${app.name}": ${tasksPhrase(n)} waiting and no bridge is running. Start one: ${start}`;
+  if (work.bridge === "stale") return `${who}; its bridge is no longer running. Restart it: ${start}`;
+  return `${who} and no bridge is running. Start one: ${start}`;
 }
 
 export async function run(args: string[]): Promise<number> {
@@ -61,11 +83,15 @@ export async function run(args: string[]): Promise<number> {
   const apps = await list();
   // Status is settled first; only an app answering as itself is asked about its
   // queue, and that answer stands in for the identity check the read needs.
+  // Only the waiting tasks are read: an app's whole history is never pruned,
+  // and a dashboard may run `list --json` every few seconds.
   const work = new Map<AppView, AgentWork>();
   await Promise.all(
     apps
       .filter((a) => a.status === "running" && a.url !== null)
-      .map(async (a) => work.set(a, await inspectAgentWork(a.path, a.id, a.url!, { identityVerified: true }))),
+      .map(async (a) =>
+        work.set(a, await inspectAgentWork(a.path, a.id, a.url!, { identityVerified: true, history: false })),
+      ),
   );
 
   if (hasFlag(args, "json")) {
@@ -117,7 +143,7 @@ export async function run(args: string[]): Promise<number> {
   }
   if (anyMarkers) {
     log.info(
-      "bridge:running|stale|none|wrong-target waiting:<n>|? — the local bridge that starts agent runs for that app's " +
+      "bridge:running|not-picking-up|stale|none|wrong-target waiting:<n>|? — the local bridge that starts agent runs for that app's " +
         "queued tasks, and how many wait. `agent-app <app> bridge` for detail · `agent-app <app> bridge stop` ends or clears one.",
     );
   }

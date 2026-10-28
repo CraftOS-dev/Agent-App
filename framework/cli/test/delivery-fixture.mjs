@@ -29,7 +29,7 @@ const save = (state) => {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  appendFileSync(requestsFile, JSON.stringify({ path: url.pathname, method: req.method, credential: !!req.headers["x-a2app-token"] }) + "\n");
+  appendFileSync(requestsFile, JSON.stringify({ path: url.pathname, search: url.search, method: req.method, credential: !!req.headers["x-a2app-token"] }) + "\n");
   const send = (code, body) => {
     res.writeHead(code, { "content-type": "application/json" });
     res.end(JSON.stringify(body));

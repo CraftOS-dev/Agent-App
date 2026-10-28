@@ -34,7 +34,7 @@ import { appPort, identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
-import { agentWorkLine, inspectAgentWork, printLine } from "../lib/delivery.js";
+import { agentWorkLine, appCommand, inspectAgentWork, printLine } from "../lib/delivery.js";
 
 function readServe(file: string): { pid: number } | null {
   try {
@@ -215,7 +215,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // stale, and the person looking at it has no way to know. The View's update
     // watcher tells them; say so here so the loop is visible from the terminal
     // too, and so `--open` is not mistaken for "everyone now has the new build".
-    if (!wantOpen) log.info(`show it to someone: agent-app ${app} open`);
+    if (!wantOpen) log.info(`show it to someone: ${appCommand(app, "open")}`);
     // A dev instance alongside a fresh live serve means an evolve is open, and
     // the caller is at a fork with exactly two exits. Name them — a warning
     // that states the fact without the decision is how this state gets missed.
@@ -223,8 +223,8 @@ export async function run(args: string[], app: string): Promise<number> {
     if (dev !== null) {
       log.warn(
         `a dev instance is still up (port ${dev.port}) and operate commands target IT, not this live app.\n` +
-          `  Done with the change?   agent-app ${app} promote   (stop live first; destroys the dev instance)\n` +
-          `  Abandoning the change?  agent-app ${app} stop --dev`,
+          `  Done with the change?   ${appCommand(app, "promote")}   (stop live first; destroys the dev instance)\n` +
+          `  Abandoning the change?  ${appCommand(app, "stop --dev")}`,
       );
     }
     log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");

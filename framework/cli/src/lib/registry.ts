@@ -26,6 +26,7 @@ import { join, resolve } from "node:path";
 import { homePath, REGISTRY_FILE, writeFileAtomic } from "./home.js";
 import { readDevRecord } from "./instance.js";
 import { appPort } from "./net.js";
+import { isPidAlive } from "./proc.js";
 import { withHomeLock } from "./lock.js";
 import { log } from "./log.js";
 
@@ -287,15 +288,14 @@ function bridgeRecord(appDir: string): AppView["bridge"] {
   const file = join(appDir, ".a2app", "bridge.json");
   if (!existsSync(file)) return null;
   try {
-    const rec = JSON.parse(readFileSync(file, "utf8")) as { pid?: number; harness?: string; mode?: string };
-    if (typeof rec.pid !== "number") return null;
-    try {
-      process.kill(rec.pid, 0);
-    } catch (err) {
-      // EPERM means it exists but is not ours to signal; anything else means gone.
-      if ((err as NodeJS.ErrnoException).code !== "EPERM") return null;
-    }
-    return { pid: rec.pid, harness: rec.harness ?? "unknown", mode: rec.mode ?? "unknown" };
+    const rec = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; harness?: unknown; mode?: unknown };
+    // The same liveness rule the bridge commands use: never pid <= 1 or a non-integer.
+    if (typeof rec.pid !== "number" || !isPidAlive(rec.pid)) return null;
+    return {
+      pid: rec.pid,
+      harness: typeof rec.harness === "string" ? rec.harness : "unknown",
+      mode: typeof rec.mode === "string" ? rec.mode : "unknown",
+    };
   } catch {
     return null;
   }

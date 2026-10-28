@@ -328,7 +328,10 @@ someone leave the screen and come back.
    queues agent work (an operation calls `trigger(…)` with a capability). After
    promote + serve, run `agent-app <dir> bridge`.
    - A bridge already running with `agentWork.bridgeTarget` `"live"`: say so in
-     the handoff. Anything else that command reports, it reports with the fix.
+     the handoff.
+   - Any other state (a stale or wrong-target bridge, work not picked up):
+     tell the user what `bridge` says. A printed fix that starts or restarts a
+     bridge needs the same explicit yes as below — never run it on your own.
    - No bridge: **ask the user, and wait for an explicit yes in this
      conversation** — earlier approval of the build is not approval of this.
      Tell them: which harness it will launch (the profile id `bridge` names);

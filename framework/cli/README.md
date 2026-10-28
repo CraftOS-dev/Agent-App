@@ -91,10 +91,16 @@ The same facts are in their JSON as `agentWork` (`bridge`: `running` · `stale` 
 - `bridge start` will not start a background bridge while a dev instance is up
   (it would take work from dev). Use `--once` or `--foreground` to try a change
   on dev.
+- A running bridge that leaves work it takes waiting well past its poll
+  interval, with nothing in hand, is reported as not picking work up (its pid
+  may belong to another process after a reboot). Work for capabilities a
+  `--capability` bridge skips is reported too.
 - An app counts as queueing agent work once its queue holds a task, in any
-  status; one that has never queued anything is not flagged. The queue is read
-  with the app's own credential, after the port has answered as that app. A
-  harness polling the queue from elsewhere is not visible here.
+  status; one that has never queued anything is not flagged. `list` reads only
+  the waiting tasks, so it marks an app only while work waits or a bridge is
+  recorded. The queue is read with the app's own credential, after the port has
+  answered as that app. A harness polling the queue from elsewhere is not
+  visible here.
 
 Flags: `--harness <id>`, `--interval <ms>` (default 5000), `--task-timeout <ms>` (default 15 min), `--capability <name>` (repeatable — deliver only these).
 

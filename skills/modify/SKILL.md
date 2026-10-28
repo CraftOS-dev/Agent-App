@@ -145,7 +145,9 @@ them which harness it launches, that it runs until `agent-app <dir> bridge stop`
 (beyond this session and `stop`), and that each queued task starts an agent run
 that may cost money. Without a yes, give them the command and say tasks will
 wait. Skip this for unrelated changes. A bridge you ran with `--once` or
-`--foreground` against dev is a test, not the handoff.
+`--foreground` against dev is a test, not the handoff: stop a `--foreground`
+one (Ctrl+C, or kill it) as soon as the test ends, and never leave it running
+in the background.
 
 **Showing the app to the user.** A running app is not a delivered app until the
 person can see it. The framework cannot know what your harness can do, so YOU

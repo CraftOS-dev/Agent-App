@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freeEphemeralPort } from "../dist/lib/net.js";
-import { inspectAgentWork, inspectLocalBridge } from "../dist/lib/delivery.js";
+import { inspectAgentWork, inspectLocalBridge, shellRef } from "../dist/lib/delivery.js";
 import { isPidAlive, killTreeForce } from "../dist/lib/proc.js";
 import { writeSystemHashes } from "../dist/lib/canon.js";
 import { register } from "../dist/lib/registry.js";
@@ -110,9 +110,32 @@ async function until(fn, timeoutMs = 15_000) {
 }
 const rowOf = (stdout, name) => stdout.split("\n").find((l) => l.includes(` ${name} `)) ?? "";
 const bridgePath = join(dir, ".a2app", "bridge.json");
+const requests = () => readFileSync(join(dir, "requests.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+/** A task that has been waiting `ageMs` by the app's clock. */
+const aged = (id, ageMs, extra = {}) => {
+  const at = new Date(Date.now() - ageMs).toISOString();
+  return { ...task(id), createdAt: at, updatedAt: at, ...extra };
+};
+/** A pid that existed and is gone. */
+async function deadPid() {
+  const child = spawn(process.execPath, ["-e", ""], { windowsHide: true });
+  await new Promise((r) => child.on("close", r));
+  return child.pid;
+}
+
+// Refs printed for pasting: bare when safe, double-quoted otherwise, never a
+// trailing separator before the closing quote, never a ref no quoting keeps.
+assert.equal(shellRef("my-app"), "my-app");
+assert.equal(shellRef("apps/my-app/"), "apps/my-app");
+assert.equal(shellRef(".\\my-app\\"), '".\\my-app"');
+assert.equal(shellRef("C:\\Users\\a b\\"), '"C:\\Users\\a b"');
+assert.equal(shellRef("C:\\"), "C:/");
+assert.equal(shellRef('a"b'), "<app>");
+assert.equal(shellRef("a $HOME"), "<app>");
 
 let bridgePid = null;
 let servePid = null;
+let sleeper = null;
 try {
   // ---- launch with nothing queued: quiet -------------------------------------
   const first = await run([dir, "serve"]);
@@ -123,6 +146,7 @@ try {
   assert.equal(fresh.queuesAgentWork, false);
   assert.doesNotMatch(first.stderr, /bridge/);
   assert.equal(existsSync(bridgePath), false, "serve never starts a bridge");
+  assert.ok(first.stderr.includes(`show it to someone: agent-app "${dir}" open`), "serve quotes its own hints too");
 
   // ---- work waits, nothing will take it: one warning with the command --------
   await writeState({ tasks: [task("waiting_1")] });
@@ -144,16 +168,24 @@ try {
     modules: [{ name: "work" }], port: await freeEphemeralPort(),
     pipeline: { install: "", build: "", start: "node nothing.mjs", health: "/api/_a2app" },
   }));
-  writeFileSync(join(quietDir, ".a2app", "bridge.json"), JSON.stringify({ pid: 999999, harness: "x", mode: "headless" }));
+  const quietBridge = join(quietDir, ".a2app", "bridge.json");
+  writeFileSync(quietBridge, JSON.stringify({ pid: await deadPid(), harness: "x", mode: "headless" }));
   process.env.A2APP_HOME = home;
   await register({ id: "quiet_app", name: "Quiet App", path: quietDir });
 
+  const before = requests().length;
   const listed = await run(["list"]);
   assert.match(rowOf(listed.stdout, "Delivery Test"), /bridge:none {2}waiting:1/);
   assert.doesNotMatch(rowOf(listed.stdout, "Quiet App"), /bridge:|waiting:/, "a stopped app shows no agent-work markers");
   assert.doesNotMatch(listed.stderr, /Quiet App|quiet_app/, "a stopped app gets no warning");
   assert.match(listed.stderr, /⚠ "Delivery Test": 1 agent task waiting and no bridge is running\. Start one: agent-app "Delivery Test" bridge start/);
-  assert.equal(listed.stderr.split("\n").filter((l) => l.includes("bridge:running|stale|none")).length, 1, "one legend line");
+  assert.equal(listed.stderr.split("\n").filter((l) => l.includes("bridge:running|")).length, 1, "one legend line");
+  // `list` (which a dashboard may poll) reads only the waiting tasks, never the history.
+  const listReads = requests().slice(before).filter((r) => r.path === "/api/_a2app/tasks");
+  assert.deepEqual(listReads.map((r) => r.search), ["?status=submitted"]);
+  // A record naming pid 1 is not a running bridge, here or in the registry view.
+  writeFileSync(quietBridge, JSON.stringify({ pid: 1, harness: "x", mode: "headless" }));
+  assert.doesNotMatch(rowOf((await run(["list"])).stdout, "Quiet App"), /bridge:/);
   const rows = json(await run(["list", "--json"])).apps;
   const row = rows.find((a) => a.id === "delivery_test");
   assert.equal(row.status, "running");
@@ -186,10 +218,8 @@ try {
     assert.equal(inspectLocalBridge(dir).bridge, "stale");
     assert.equal(inspectLocalBridge(dir).running, null);
   }
-  const dead = spawn(process.execPath, ["-e", ""], { windowsHide: true });
-  const deadPid = dead.pid;
-  await new Promise((r) => dead.on("close", r));
-  writeFileSync(bridgePath, JSON.stringify({ pid: deadPid, harness: "delivery", mode: "headless", baseUrl }));
+  const gonePid = await deadPid();
+  writeFileSync(bridgePath, JSON.stringify({ pid: gonePid, harness: "delivery", mode: "headless", baseUrl }));
 
   // ...on an app with work waiting: a warning that names the restart.
   const staleList = await run(["list"]);
@@ -203,7 +233,7 @@ try {
   assert.equal(json(staleQuiet).agentWork.queuesAgentWork, false);
   assert.doesNotMatch(staleQuiet.stderr, /⚠/);
   const info = staleQuiet.stderr.split("\n").filter((l) => /bridge/.test(l));
-  assert.deepEqual(info, [`ℹ stale bridge record (pid ${deadPid}); agent-app "${dir}" bridge stop clears it`]);
+  assert.deepEqual(info, [`ℹ stale bridge record (pid ${gonePid}); agent-app "${dir}" bridge stop clears it`]);
   const staleQuietList = await run(["list"]);
   assert.match(rowOf(staleQuietList.stdout, "Delivery Test"), /bridge:stale {2}waiting:0/);
   assert.doesNotMatch(staleQuietList.stderr, /⚠/);
@@ -230,9 +260,9 @@ try {
 
   // A stranger on the port never receives the app's credential.
   await writeState({ tasks: [task("stranger")], appId: "different_app" });
-  const before = readFileSync(join(dir, "requests.jsonl"), "utf8").trim().split("\n").length;
+  const beforeStranger = requests().length;
   assert.equal((await inspectAgentWork(dir, "delivery_test", baseUrl)).tasksWaiting, null);
-  const seen = readFileSync(join(dir, "requests.jsonl"), "utf8").trim().split("\n").slice(before).map((l) => JSON.parse(l));
+  const seen = requests().slice(beforeStranger);
   assert.equal(seen.length, 1);
   assert.equal(seen[0].path, "/api/_a2app");
   assert.equal(seen[0].credential, false);
@@ -248,14 +278,22 @@ try {
   await new Promise((r) => devServer.listen(0, "127.0.0.1", r));
   const devUrl = `http://127.0.0.1:${devServer.address().port}`;
   const devRecord = join(dir, ".a2app", "dev.json");
+  const devDoc = (pid) => JSON.stringify({ pid, port: devServer.address().port, url: devUrl, bootDir: join(dir, ".a2app/dev/t"), startedAt: new Date().toISOString(), healthy: true });
   try {
-    writeFileSync(devRecord, JSON.stringify({ pid: process.pid, port: devServer.address().port, url: devUrl, bootDir: join(dir, ".a2app/dev/t"), startedAt: new Date().toISOString(), healthy: true }));
+    // A crashed dev's leftover record: said to be stale, with the command that clears it.
+    writeFileSync(devRecord, devDoc(await deadPid()));
+    const staleDev = await run([dir, "bridge", "start"], 1);
+    assert.equal(json(staleDev).reason, "dev_record_stale");
+    assert.ok(staleDev.stderr.includes(`Clear it: agent-app "${dir}" stop --dev`), staleDev.stderr);
+
+    writeFileSync(devRecord, devDoc(process.pid));
     // Status reads the live app, never dev.
     for (const args of [[dir, "serve"], [dir, "bridge"]]) assert.equal(json(await run(args)).agentWork.tasksWaiting, 1);
     assert.equal(devTaskReads, 0);
     // A background bridge started now would watch dev: refused, with the way out.
     const refused = await run([dir, "bridge", "start"], 1);
     assert.equal(json(refused).reason, "dev_instance_up");
+    assert.ok(refused.stderr.includes(`agent-app "${dir}" promote`) && refused.stderr.includes(`agent-app "${dir}" stop --dev`));
     assert.match(refused.stderr, /bridge start --once/);
     assert.equal(existsSync(bridgePath), false);
     // Trying the change on dev stays allowed.
@@ -265,16 +303,25 @@ try {
     assert.equal(await statusOf("live_only"), "submitted", "and left live alone");
 
     // A live bridge recorded against dev: alive, and not serving this app.
-    writeFileSync(bridgePath, JSON.stringify({ pid: process.pid, harness: "delivery", mode: "headless", intervalMs: 250, startedAt: "", baseUrl: devUrl }));
+    const onDev = JSON.stringify({ pid: process.pid, harness: "delivery", mode: "headless", intervalMs: 250, startedAt: "", baseUrl: devUrl });
+    writeFileSync(bridgePath, onDev);
     const wrong = await run([dir, "serve"]);
     assert.equal(json(wrong).agentWork.bridgeTarget, "other");
     assert.match(wrong.stderr, /⚠ the bridge \(pid \d+\) takes work from http:\/\/127\.0\.0\.1:\d+, not from this app/);
+    // While dev is up, a restart would land on dev again: dev comes first.
+    assert.match(wrong.stderr, /Promote or abandon the dev change .*, then restart it/);
     assert.match(rowOf((await run(["list"])).stdout, "Delivery Test"), /bridge:wrong-target {2}waiting:1/);
+    const mismatchOnDev = await run([dir, "bridge", "start"], 1);
+    assert.match(mismatchOnDev.stderr, /Promote or abandon the dev change/);
+    // A dry run claims and records nothing, so it runs anyway — and leaves the record alone.
+    const dry = json(await run([dir, "bridge", "start", "--dry-run"]));
+    assert.equal(dry.dryRun, true);
+    assert.equal(readFileSync(bridgePath, "utf8"), onDev);
     rmSync(devRecord);
     const mismatch = await run([dir, "bridge", "start"], 1);
     assert.equal(json(mismatch).alreadyRunning, true);
     assert.equal(json(mismatch).ok, false);
-    assert.match(mismatch.stderr, /already running .* but it takes work from/);
+    assert.match(mismatch.stderr, /already running .* but it takes work from .* Restart it:/);
     assert.doesNotMatch(mismatch.stderr, /✓/);
 
     // A record from an older agent-app (no target): one hint, not a warning.
@@ -284,6 +331,38 @@ try {
     assert.match(legacy.stderr, /restart it to record its target/);
     assert.doesNotMatch(legacy.stderr, /⚠/);
     assert.equal(json(await run([dir, "bridge", "start"])).alreadyRunning, true);
+
+    // A live pid that is not taking work (say, reused after a reboot): work it
+    // would take sits far past its interval with nothing in hand.
+    const onLive = (extra = {}) =>
+      writeFileSync(bridgePath, JSON.stringify({ pid: process.pid, harness: "delivery", mode: "headless", intervalMs: 250, startedAt: "", baseUrl, ...extra }));
+    onLive();
+    await writeState({ tasks: [aged("old_1", 60_000)] });
+    const idle = await run([dir, "serve"]);
+    assert.equal(json(idle).agentWork.notPickedUp, true);
+    assert.match(idle.stderr, /⚠ the bridge \(pid \d+\) has not picked up work waiting \d+s; pid \d+ may no longer be the bridge\. Restart it: .*bridge stop, then .*bridge start/);
+    const idleList = await run(["list"]);
+    assert.match(rowOf(idleList.stdout, "Delivery Test"), /bridge:not-picking-up {2}waiting:1/);
+    assert.match(idleList.stderr, /"Delivery Test": 1 agent task waiting; its bridge \(pid \d+\) has not picked it up in \d+s/);
+    // ...and `bridge start` no longer calls that pid "already running".
+    const notRunning = await run([dir, "bridge", "start"], 1);
+    assert.equal(json(notRunning).notPickedUp, true);
+    assert.doesNotMatch(notRunning.stderr, /✓/);
+    // ...but not a bridge busy with another task, nor work that only just arrived.
+    await writeState({ tasks: [aged("old_1", 60_000), aged("in_hand", 60_000, { status: "working" })] });
+    assert.equal(json(await run([dir, "serve"])).agentWork.notPickedUp, false);
+    assert.doesNotMatch(rowOf((await run(["list"])).stdout, "Delivery Test"), /not-picking-up/);
+    await writeState({ tasks: [aged("new_1", 1_000)] });
+    assert.equal(json(await run([dir, "serve"])).agentWork.notPickedUp, false);
+
+    // A bridge told to take only some capabilities: the rest are named as waiting.
+    onLive({ capabilities: ["summarize"] });
+    await writeState({ tasks: [aged("triage_1", 1_000, { request: { capability: "triage", payload: {} } })] });
+    const narrow = await run([dir, "serve"]);
+    assert.equal(json(narrow).agentWork.tasksNotTaken, 1);
+    assert.match(narrow.stderr, /⚠ 1 agent task waiting for a capability the bridge \(pid \d+\) does not take \(it takes only summarize\)/);
+    assert.match((await run(["list"])).stderr, /"Delivery Test": 1 agent task waiting; 1 needs a capability its bridge does not take/);
+    await writeState({ tasks: [task("live_only")] });
   } finally {
     // Never `bridge stop` these records: their pid is this test process.
     rmSync(bridgePath, { force: true });
@@ -292,9 +371,10 @@ try {
   }
 
   // ---- the hand-off: a detached bridge outlives the command that started it ----
-  const started = json(await run([dir, "bridge", "start", "--interval", "250"]));
+  const started = json(await run([dir, "bridge", "start", "--interval", "250", "--capability", "summarize"]));
   bridgePid = started.pid;
   assert.equal(started.baseUrl, baseUrl);
+  assert.deepEqual(started.capabilities, ["summarize"], "the filter is recorded");
   assert.ok(isPidAlive(bridgePid));
   const reused = json(await run([dir, "bridge", "start"]));
   assert.equal(reused.alreadyRunning, true);
@@ -322,7 +402,8 @@ try {
   const bridgeStopped = await run([dir, "bridge", "stop"]);
   assert.equal(json(bridgeStopped).stopped, bridgePid);
   bridgePid = null;
-  assert.match(rowOf((await run(["list"])).stdout, "Delivery Test"), /bridge:none {2}waiting:0/);
+  // No bridge and nothing waiting: `list` says nothing (it reads only waiting work).
+  assert.doesNotMatch(rowOf((await run(["list"])).stdout, "Delivery Test"), /bridge:|waiting:/);
 
   // A bridge that dies without `bridge stop`, on an app that queues work.
   bridgePid = json(await run([dir, "bridge", "start", "--interval", "250"])).pid;
@@ -334,8 +415,23 @@ try {
   assert.match(crashed.stderr, /⚠ the bridge \(pid \d+\) is no longer running, so new agent tasks will wait\. Restart it: agent-app ".*" bridge start/);
   await run([dir, "bridge", "stop"]);
 
-  console.log("✓ delivery: quiet launch, waiting-work warnings, stopped apps quiet, stale records, dev pin, detached hand-off");
+  // `stop` on an app whose manifest names no port still asks the port `serve`
+  // would have bound before killing anything — a reused pid is left alone.
+  const noPort = join(base, "no-port");
+  mkdirSync(join(noPort, ".a2app"), { recursive: true });
+  writeFileSync(join(noPort, "manifest.json"), JSON.stringify({
+    id: "no_port_app", name: "No Port", agentAppVersion: "0.1.0", adapterVersion: "0.1.0", authMode: "none",
+    modules: [{ name: "work" }], pipeline: { install: "", build: "", start: "node nothing.mjs", health: "/api/_a2app" },
+  }));
+  sleeper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { windowsHide: true, stdio: "ignore" });
+  writeFileSync(join(noPort, ".a2app", "serve.json"), JSON.stringify({ pid: sleeper.pid, port: 8090 }));
+  const noPortStop = await run([noPort, "stop"]);
+  assert.match(noPortStop.stderr, /not answering on port 8090 .* without killing/);
+  assert.ok(isPidAlive(sleeper.pid), "an innocent process holding the recorded pid survives");
+
+  console.log("✓ delivery: quiet launch, waiting-work warnings, stopped apps quiet, stale records, dev pin, pickup, capabilities, detached hand-off");
 } finally {
+  if (sleeper?.pid && isPidAlive(sleeper.pid)) killTreeForce(sleeper.pid);
   if (bridgePid && isPidAlive(bridgePid)) killTreeForce(bridgePid);
   if (servePid && isPidAlive(servePid)) killTreeForce(servePid);
   // Only ever the temp tree this test made; a failed guard skips cleanup rather

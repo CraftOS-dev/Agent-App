@@ -19,8 +19,9 @@ data/
 node_modules/
 
 # The built View (the Vite build output of ui/) — rebuilt by the pipeline,
-# never committed, never hand-edited. ui/ is the source.
-public/
+# never committed, never hand-edited. ui/ is the source. Anchored to this
+# directory: ui/public/ (tokens.css, ui.css) is source, not build output.
+/public/
 
 # Rails runtime artifacts (the minted secret lives in tmp/).
 log/

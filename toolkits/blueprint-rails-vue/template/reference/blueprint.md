@@ -29,7 +29,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `lib/a2app_schema.rb` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `SEED` (string-keyed throughout). Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
+| `lib/a2app_schema.rb` | **YOURS** | the data model + operations: `ENTITIES`, `OPERATIONS`, `OPERATION_RUNNERS`, `EVENTS`, `CAPABILITIES`, `SEED` (string-keyed throughout), and optionally `PERMISSIONS_OF`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Byte-mirror of `A2appSchema::OPERATIONS`. |
 | `ui/index.html` | **YOURS** | the Vite entry: links `tokens.css`/`ui.css`, mounts `#app`, loads `src/main.js`. |
 | `ui/src/main.js` | **YOURS** | Vue root: `createApp(App).mount("#app")`; imports `updater.js` to start the update watcher. |
@@ -49,11 +49,12 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `Gemfile` | build | the backend's gems (rails, puma, sqlite3). Add your HTTP client here when you call external APIs. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
 | `config/application.rb` | SYSTEM (hash-locked) | the minimal Rails application: action_controller only (NO ActiveRecord), eager-loaded `lib/`, `public/` file server with no-cache headers, headless secret_key_base. Never edit. |
-| `config/routes.rb` | SYSTEM (hash-locked) | the three routes: the discovery document, the update watcher, and the `/api/**` catch-all into the adapter. Never edit. |
+| `config/routes.rb` | SYSTEM (hash-locked) | the routes: the discovery document, the update watcher, the account page, and the `/api/**` catch-all into the adapter. Never edit. |
 | `config/puma.rb` | SYSTEM (hash-locked) | the launch contract: PORT (manifest fallback 8096), loopback bind (`A2APP_HOST` to override), single mode. Never edit. |
-| `app/controllers/a2app_controller.rb` | SYSTEM (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap before parsing, identity's `appVersion` fingerprint, the watcher route. Never edit. |
-| `lib/a2app_adapter.rb` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
+| `app/controllers/a2app_controller.rb` | SYSTEM (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap before parsing, identity's `appVersion` fingerprint, the watcher and account-page routes. Never edit. |
+| `lib/a2app_adapter.rb` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `config/boot.rb` · `config/environment.rb` · `config.ru` | build | standard Rails boot chain (bundler setup → application → rackup). Leave them alone. |
 | `scripts/check_ops.rb` | gate | the "operations resolve" gate step. Leave it alone. |
 | `scripts/promote_check.rb` | lifecycle | run by `agent-app promote` after the mandatory backup: refuses to orphan an entity that still holds data. Leave it alone. |
@@ -150,7 +151,8 @@ OPERATION_RUNNERS = {
 }
 ```
 
-- **Runner signature:** `(args, ctx, store) -> json-able hash`. `store` is the
+- **Runner signature:** `(args, ctx, store) -> json-able hash`. `ctx` is who
+  is calling (`{"credentialId", "agentName", "principal", "role"}`). `store` is the
   live SQLite-backed store — read with `store.get_record(entity, id)` /
   `store.list_records(entity, query)`, write with `store.put_record(entity,
   record)` / `store.delete_record(entity, id)`. Writes are durable when the
@@ -172,8 +174,9 @@ OPERATION_RUNNERS = {
 ## The View — `ui/`
 
 A Vue 3 SPA (SFCs with `<script setup>`) over the same records API the agent
-uses. Same-origin writes are trusted by the adapter, so the browser needs no
-token.
+uses. The browser never needs a token: on a single-user app same-origin
+requests are trusted as the owner, and on a multi-user app the person's
+session cookie makes them (see **Accounts and whose records**).
 
 **Records API** the View calls (PocketBase-compatible REST, served by the adapter):
 
@@ -183,7 +186,7 @@ token.
 | `POST /api/collections/<entity>/records` (JSON body) | create; returns the stored record |
 | `PATCH /api/collections/<entity>/records/<id>` | update |
 | `DELETE /api/collections/<entity>/records/<id>` | delete |
-| `GET /api/_a2app` | identity (app name, versions) |
+| `GET /api/_a2app` | identity (app name, versions, `authMode`, `accountUrl`) |
 
 Always render back what the server **stored**, not what you sent. Never render an
 unbounded collection — page with `perPage`.
@@ -255,6 +258,13 @@ starter's `request-triage` operation is the worked example.
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
   data.
+- **The agent acts as whoever asked.** The `store` a runner is handed records
+  the runner's caller on the task it queues, and the bridge runs the agent with
+  a credential for that person: it sees and changes only what they could, and
+  dies when the task ends. Say what the work needs in `CAPABILITIES` —
+  `{ "triage" => { "scopes" => ["data:tasks:read", "data:tasks:write"] } }` —
+  and the credential holds no more; a capability left out gets `*`, still
+  within that person's reach.
 - There is **no declarative trigger manifest**, and none is coming — what the
   agent does is the agent's decision, which is what keeps a compromised app from
   steering it. Do not invent a manifest format.
@@ -267,11 +277,42 @@ or a harness polling `a2app <dir> tasks next --wait`.
 
 **Show the queued work in the View.** Keep the returned `taskId` on the record
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+only while it is unfinished. The View needs no credential for this read: on a
+single-user app it is trusted, and on a multi-user app the person's session
+makes it. A 404 means the task has been pruned, so drop the indicator; don't
+retry it. Render queued → working (`progress.step`) → done or failed (`reason`,
+plus a way to ask again). The creator skill lists the states. A button that goes
+quiet after it queues work looks broken.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself — in its own SQLite tables, never
+as records — and the View needs no auth code of its own:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`. A
+  request from the View with no session answers `401 sign_in_required`, and
+  `ui/src/api.js` sends the person there; it sends them back afterwards. The
+  footer's *Account* link comes from identity's `accountUrl`.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Whose records.** `"ownedBy" => "<field>"` on an entity names a
+  `"readOnly"` string field the adapter fills with the creator's principal. A
+  member then lists, reads, changes and deletes only its own records (anyone
+  else's answer 404); an owner sees all. The starter's `tasks` is owned by
+  `owner`.
+- **What each person may do.** An optional `PERMISSIONS_OF` lambda in
+  `lib/a2app_schema.rb` returns a person's scopes; every agent acting for them
+  is limited to the same, on every request. Without it everyone active may use
+  everything (their records stay their own).
+- **Runners** get the caller as `ctx = {"principal", "role", …}` and must hold
+  themselves to the same rule for records they touch — the starter's `mine`
+  helper in `lib/a2app_schema.rb` is the pattern.
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's and nothing is filtered.
 
 ## Reaching the app from another machine
 
@@ -317,9 +358,11 @@ agent-app <dir> promote    # requires the gate pass; backup, scripts/promote_che
 
 Toolkit gate steps (from `a2app.toolkit.json`): **"ruby syntax + adapter
 self-test"** (`ruby -c` on the adapter, the schema and the controller, then
-`ruby lib/a2app_adapter.rb --selftest` — the selftest covers the rules parity
-AND the SQLite store: durability across a reopen, seed-once, idempotency keys,
-the filter grammar) and **"operations resolve"** (`ruby scripts/check_ops.rb`).
+`ruby lib/a2app_adapter.rb --selftest` — the selftest covers the rules parity,
+the SQLite store (durability across a reopen, seed-once, idempotency keys, the
+filter grammar) AND the auth layer: password hashes interchangeable with
+adapter-core's, codes and cookies, the credential ceiling and its refusals,
+record ownership) and **"operations resolve"** (`ruby scripts/check_ops.rb`).
 `lifecycle.dataDir` is `data/`; `lifecycle.promote` is
 `bundle exec ruby scripts/promote_check.rb`.
 

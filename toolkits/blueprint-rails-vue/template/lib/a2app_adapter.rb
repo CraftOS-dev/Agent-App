@@ -2,10 +2,14 @@
 #
 # A faithful Ruby port of the A2App served surface: identity, describe, whoami,
 # context, guarded records CRUD, declared operations (with approval for
-# destructive ops), and the app->agent task/event plane. It enforces the fixed
-# validation chain: origin -> credential -> scope -> guard -> backend -> read-back.
-# Records persist in SQLite (the `sqlite3` gem — see SqliteStore), so the live
-# database is a real on-disk file inside the toolkit's declared lifecycle dataDir.
+# destructive ops), the app->agent task/event plane, and protocol 0.2's
+# principals (spec/v0_2/auth.md): accounts, sessions and invites on a
+# multi-user app, delegated agent credentials held only as hashes, device-code
+# sign-in, task credentials, record ownership, and the user ceiling. It
+# enforces the fixed validation chain: origin -> credential -> scope -> guard
+# -> backend -> read-back. Records, credentials and accounts persist in SQLite
+# (the `sqlite3` gem — see SqliteStore), so the live database is a real
+# on-disk file inside the toolkit's declared lifecycle dataDir.
 #
 # The pure validation rules below MUST match `@a2app/rules` (and the python
 # blueprint's a2app_adapter.py, which is this file's porting oracle) so a Rails
@@ -26,6 +30,10 @@ require "time"
 require "uri"
 require "fileutils"
 require "ipaddr"
+# stdlib too: openssl for PBKDF2 and the constant-time compare, delegate for
+# the store a runner is handed.
+require "openssl"
+require "delegate"
 
 module A2appAdapter
   # Where an app listens, and the address the rest of the world uses for it.
@@ -84,11 +92,179 @@ module A2appAdapter
       [host, public_url]
     end
   end
+
+  # The security primitives behind accounts, sessions, invites, device codes
+  # and credentials (spec/v0_2/auth.md), kept apart from the served surface so
+  # each rule — what a secret looks like, how it is stored, how a password is
+  # checked — is written once. Parity oracle: adapter-core's auth.ts.
+  #
+  # Every secret the app hands out (tokens, session ids, invite codes, device
+  # codes) is 256 random bits, returned once, and stored only as its SHA-256.
+  # Passwords are PBKDF2-SHA256 at 600 000 iterations (OWASP), compared in
+  # constant time, in the same `pbkdf2_sha256$…` format adapter-core writes.
+  module Auth
+    module_function
+
+    PBKDF2_ITERATIONS = 600_000
+    PBKDF2_KEY_BYTES = 32
+    PBKDF2_SALT_BYTES = 16
+    PASSWORD_MIN = 10
+    PASSWORD_MAX = 256
+    # Consonants only (RFC 8628 §6.1): no vowels, so no words; no look-alikes.
+    USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"
+
+    # 256 random bits, base64url (43 chars).
+    def new_secret
+      SecureRandom.urlsafe_base64(32)
+    end
+
+    # An agent credential token: `a2a_` + 256 random bits.
+    def new_token
+      "a2a_" + new_secret
+    end
+
+    # How a secret is stored and looked up: hex SHA-256 of the whole string.
+    def hash_secret(secret)
+      Digest::SHA256.hexdigest(secret)
+    end
+
+    # An id that is not a secret: `prefix_` + 64 random bits, hex.
+    def new_id(prefix)
+      "#{prefix}_#{SecureRandom.hex(8)}"
+    end
+
+    # `pbkdf2_sha256$<iterations>$<salt b64>$<hash b64>`
+    def hash_password(password, iterations = PBKDF2_ITERATIONS)
+      salt = SecureRandom.random_bytes(PBKDF2_SALT_BYTES)
+      key = OpenSSL::PKCS5.pbkdf2_hmac(password, salt, iterations, PBKDF2_KEY_BYTES, "sha256")
+      "pbkdf2_sha256$#{iterations}$#{[salt].pack("m0")}$#{[key].pack("m0")}"
+    end
+
+    # Constant-time check of `password` against a stored hash. A malformed
+    # hash never matches.
+    def verify_password(password, stored)
+      parts = stored.to_s.split("$", -1)
+      return false unless parts.length == 4 && parts[0] == "pbkdf2_sha256" && parts[1].match?(/\A[1-9]\d*\z/)
+      salt = parts[2].unpack1("m")
+      expected = parts[3].unpack1("m")
+      return false if expected.empty?
+      actual = OpenSSL::PKCS5.pbkdf2_hmac(password, salt, parts[1].to_i, expected.bytesize, "sha256")
+      OpenSSL.fixed_length_secure_compare(actual, expected)
+    end
+
+    # `XXXX-XXXX` from USER_CODE_ALPHABET.
+    def new_user_code
+      code = Array.new(8) { USER_CODE_ALPHABET[SecureRandom.random_number(USER_CODE_ALPHABET.length)] }.join
+      "#{code[0, 4]}-#{code[4, 4]}"
+    end
+
+    # A user code as typed: case and the dash do not matter.
+    def normalize_user_code(input)
+      letters = input.to_s.upcase.each_char.select { |c| USER_CODE_ALPHABET.include?(c) }.join
+      letters.length == 8 ? "#{letters[0, 4]}-#{letters[4, 4]}" : ""
+    end
+
+    # `Cookie` header -> name/value pairs (the first occurrence of a name wins).
+    def parse_cookies(header)
+      out = {}
+      header.to_s.split(";").each do |part|
+        eq = part.index("=")
+        next if eq.nil? || eq <= 0
+        name = part[0, eq].strip
+        next if out.key?(name)
+        value = decode_uri_component(part[eq + 1..].strip)
+        # nil: not a value this app wrote
+        out[name] = value unless value.nil?
+      end
+      out
+    end
+
+    # A `Set-Cookie` value for the session cookie. `max_age_seconds: 0` clears it.
+    def session_cookie(name, value, max_age_seconds:, secure:)
+      attrs = ["#{name}=#{encode_uri_component(value)}", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=#{max_age_seconds}"]
+      attrs << "Secure" if secure
+      attrs.join("; ")
+    end
+
+    # A login as stored and compared: trimmed, lower-cased.
+    def normalize_login(login)
+      js_trim(login).downcase
+    end
+
+    # JavaScript's String#trim, so a value is trimmed exactly as adapter-core
+    # trims it (Unicode spaces and the BOM included).
+    def js_trim(s)
+      s.gsub(/\A[[:space:]\uFEFF]+|[[:space:]\uFEFF]+\z/, "")
+    end
+
+    # JavaScript's String#length (UTF-16 code units), so a length limit holds
+    # at the same character on every stack.
+    def js_length(s)
+      s.each_codepoint.sum { |c| c > 0xFFFF ? 2 : 1 }
+    end
+
+    # decodeURIComponent: nil where JavaScript would throw (a stray `%`, or
+    # bytes that are not UTF-8).
+    def decode_uri_component(s)
+      raw = s.b
+      return nil if raw.match?(/%(?!\h\h)/n)
+      decoded = raw.gsub(/%(\h\h)/n) { Regexp.last_match(1).hex.chr }.force_encoding(Encoding::UTF_8)
+      decoded.valid_encoding? ? decoded : nil
+    end
+
+    # encodeURIComponent.
+    def encode_uri_component(s)
+      s.to_s.b.gsub(/[^A-Za-z0-9\-_.!~*'()]/n) { |c| format("%%%02X", c.ord) }
+    end
+
+    # Counts failures per key in a fixed window (sign-in failures per login).
+    # In memory: a restart forgets them, which costs an attacker nothing they
+    # could not get by waiting out the window.
+    class FailureLimiter
+      def initialize(max, window_ms, now_ms)
+        @max = max
+        @window_ms = window_ms
+        @now_ms = now_ms
+        @windows = {}
+        @lock = Mutex.new
+      end
+
+      # Seconds until `key` may try again, or 0 when it may now.
+      def retry_after(key)
+        @lock.synchronize do
+          w = @windows[key]
+          next 0 if w.nil?
+          elapsed = @now_ms.call - w[:start]
+          if elapsed >= @window_ms
+            @windows.delete(key)
+            next 0
+          end
+          w[:count] >= @max ? ((@window_ms - elapsed) / 1000.0).ceil : 0
+        end
+      end
+
+      def fail(key)
+        @lock.synchronize do
+          t = @now_ms.call
+          w = @windows[key]
+          if w.nil? || t - w[:start] >= @window_ms
+            @windows[key] = { count: 1, start: t }
+          else
+            w[:count] += 1
+          end
+        end
+      end
+
+      def reset(key)
+        @lock.synchronize { @windows.delete(key) }
+      end
+    end
+  end
 end
 
 module A2appAdapter
   RULES_VERSION = "0.1.0"
-  PROTOCOL_VERSION = "0.1"
+  PROTOCOL_VERSION = "0.2"
   ADAPTER_VERSION = "0.1.0"
 
   ERROR_CODES = {
@@ -535,6 +711,22 @@ module A2appAdapter
       Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%LZ")
     end
 
+    # Milliseconds since the epoch: the unit every expiry below is kept in,
+    # as adapter-core keeps it.
+    def now_ms
+      Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
+    end
+
+    # `ms` as the ISO 8601 string JavaScript's toISOString writes.
+    def iso_at(ms)
+      Time.at(ms / 1000, ms % 1000, :millisecond).utc.strftime("%Y-%m-%dT%H:%M:%S.%LZ")
+    end
+
+    # An ISO 8601 timestamp as milliseconds since the epoch.
+    def ms_of(iso)
+      (Time.iso8601(iso).to_r * 1000).to_i
+    end
+
     def coerce(field, value)
       return value if value.nil? || value == ""
       if field["type"] == "number" && value.is_a?(String)
@@ -586,11 +778,17 @@ module A2appAdapter
   # ------------------------------------------------------------------ store
 
   # In-memory record store plus adapter-owned state (tasks, events,
-  # idempotency keys, approvals, audit). The blueprint's live store is
-  # SqliteStore below (same interface, records + idempotency keys durable);
-  # this base class is the disposable variant for tests and tooling.
+  # idempotency keys, approvals, audit, credentials, and the auth tables). The
+  # blueprint's live store is SqliteStore below (same interface; records,
+  # idempotency keys, credentials and accounts durable); this base class is
+  # the disposable variant for tests and tooling.
   class Store
     include Rules
+
+    # The keyed tables the auth layer owns (spec/v0_2/auth.md): accounts,
+    # sessions, invites and device codes. Rows are keyed by id or by the hash
+    # of the secret that finds them; no secret is ever a key or a value.
+    AUTH_TABLES = %w[users sessions invites devices].freeze
 
     attr_reader :seed, :rows, :tasks, :events
     attr_accessor :wants_seed
@@ -611,7 +809,10 @@ module A2appAdapter
       @idem = {}
       @approvals = {}
       @audit = []
+      # credentialId -> grant, and tokenHash -> credentialId
       @grants = {}
+      @grant_tokens = {}
+      @tables = AUTH_TABLES.to_h { |t| [t, {}] }
       @event_types = []
       # occurrence key -> task id, so one occurrence makes one task
       @dedup = {}
@@ -627,8 +828,12 @@ module A2appAdapter
       (@rows[entity] || {}).values
     end
 
+    # `query["where"]` is field => value constraints from the adapter (a member
+    # sees only the records it owns), applied before filtering, sorting and
+    # paging like any other constraint, so pages and totals count only them.
     def list_records(entity, query)
       items = all_records(entity)
+      (query["where"] || {}).each { |field, value| items = items.select { |r| r[field] == value } }
       flt = query["filter"]
       items = items.select(&match_filter(flt)) if flt && flt != ""
       sort = query["sort"]
@@ -664,12 +869,50 @@ module A2appAdapter
     end
 
     # grants ----------------------------------------------------------------
-    def put_grant(grant)
-      @grants[grant["token"]] = grant
+    # A credential (spec/v0_2/auth.md §2.1): held only as the SHA-256 of its
+    # token, found by that hash. A grant read out is a value: change it with
+    # merge, then put_grant it back.
+    def grant_by_token_hash(token_hash)
+      id = @grant_tokens[token_hash]
+      id.nil? ? nil : @grants[id]
     end
 
-    def grant_by_token(token)
-      @grants[token]
+    def grant_by_id(credential_id)
+      @grants[credential_id]
+    end
+
+    def put_grant(grant)
+      previous = @grants[grant["credentialId"]]
+      @grant_tokens.delete(previous["tokenHash"]) if previous && previous["tokenHash"] != grant["tokenHash"]
+      @grants[grant["credentialId"]] = grant
+      @grant_tokens[grant["tokenHash"]] = grant["credentialId"]
+    end
+
+    def delete_grant(credential_id)
+      g = @grants.delete(credential_id)
+      @grant_tokens.delete(g["tokenHash"]) if g
+    end
+
+    def list_grants
+      @grants.values
+    end
+
+    # auth rows -------------------------------------------------------------
+    def row(table, key)
+      @tables.fetch(table)[key]
+    end
+
+    def put_row(table, key, row)
+      @tables.fetch(table)[key] = row
+    end
+
+    def delete_row(table, key)
+      @tables.fetch(table).delete(key)
+    end
+
+    # Every row of one table, as [key, row] pairs.
+    def rows_of(table)
+      @tables.fetch(table).to_a
     end
 
     # idempotency / approvals ----------------------------------------------
@@ -706,14 +949,16 @@ module A2appAdapter
       { "events" => fresh, "nextCursor" => fresh.empty? ? (cursor || "0") : fresh[-1]["seq"].to_s }
     end
 
-    def enqueue_task(event_id, capability, payload, dedup_key = nil)
+    # `principal` is who queued it (spec/v0_2/auth.md §6.1); nil for work the
+    # app queued on its own.
+    def enqueue_task(event_id, capability, payload, dedup_key = nil, principal: nil)
       existing = dedup_key && @tasks[@dedup[dedup_key]]
       return existing if existing
 
       @task_seq += 1
       task = {
         "id" => "task_#{@task_seq}", "app" => nil, "event" => event_id, "status" => "submitted",
-        "request" => { "capability" => capability, "payload" => payload }, "claim" => nil,
+        "request" => { "capability" => capability, "payload" => payload, "principal" => principal }, "claim" => nil,
         "progress" => {}, "result" => nil, "reason" => nil, "ask" => nil,
         "createdAt" => now_iso, "updatedAt" => now_iso, "deliveries" => 1,
       }
@@ -727,7 +972,12 @@ module A2appAdapter
     # the `store` it is handed. Returns {"eventId", "taskId"}; "taskId" is nil
     # when no capability was named, because an event alone asks no agent for
     # work. An undeclared event type raises, and nothing is emitted.
-    def trigger(etype, payload, capability = nil)
+    #
+    # `principal` is who asked for the work: the caller of the operation that
+    # fires this. The agent that takes the task acts as them (spec/v0_2/auth.md
+    # §6). A runner never passes it — the store it is handed does (see
+    # CallerStore); work the app queues on its own has none and runs as owner.
+    def trigger(etype, payload, capability = nil, principal: nil)
       if !@event_types.empty? && !@event_types.include?(etype)
         raise ArgumentError, "event type \"#{etype}\" is not declared"
       end
@@ -740,10 +990,12 @@ module A2appAdapter
         # emit, so keying on it would deduplicate nothing. The occurrence is
         # what the app asked for (type, capability, payload), serialized with
         # sorted keys so key order cannot tell two identical triggers apart.
-        key = "sha256:" + Digest::SHA256.hexdigest(
-          stable_json({ "type" => etype, "capability" => capability, "payload" => payload })
-        )
-        task_id = enqueue_task(ev["id"], capability, payload, key)["id"]
+        # Who asked is part of it: the same request from two people is two
+        # tasks, each run as the person who asked.
+        occurrence = { "type" => etype, "capability" => capability, "payload" => payload }
+        occurrence["principal"] = principal if principal && principal != ""
+        key = "sha256:" + Digest::SHA256.hexdigest(stable_json(occurrence))
+        task_id = enqueue_task(ev["id"], capability, payload, key, principal: principal)["id"]
       end
       { "eventId" => ev["id"], "taskId" => task_id }
     end
@@ -795,9 +1047,15 @@ module A2appAdapter
   #
   # Idempotency keys persist because a restart is exactly when a retried POST
   # arrives — an in-memory table would return a duplicate record instead of
-  # the 409 the protocol promises. The task/event plane, approvals, grants
-  # and audit stay in memory: they are runtime queues and session state, not
-  # records.
+  # the 409 the protocol promises. Credentials and the auth tables (accounts,
+  # sessions, invites, device codes) persist too: a restart must not sign
+  # everyone out or forget who may act. They live in tables of their own,
+  # never among the records. The task/event plane, approvals and audit stay
+  # in memory: they are runtime queues, not records.
+  #
+  # No token is ever written: a credential is stored as the hash of its token
+  # (and before 0.2 this stack kept credentials in memory only, so no older
+  # database holds a plaintext one).
   #
   # Writes are durable when the call returns — there is no separate persist()
   # step. A hash read from this store is a COPY: mutate it, then put_record()
@@ -832,6 +1090,14 @@ module A2appAdapter
           "CREATE TABLE IF NOT EXISTS idem (" \
           "entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, " \
           "PRIMARY KEY (entity, key))"
+        )
+        @db.execute(
+          "CREATE TABLE IF NOT EXISTS grants (" \
+          "credential_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, data TEXT NOT NULL)"
+        )
+        @db.execute(
+          "CREATE TABLE IF NOT EXISTS auth_rows (" \
+          "tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (tbl, key))"
         )
       end
       @wants_seed = fresh
@@ -891,25 +1157,143 @@ module A2appAdapter
         )
       end
     end
+
+    # grants ----------------------------------------------------------------
+    def grant_by_token_hash(token_hash)
+      row = @mutex.synchronize { @db.get_first_row("SELECT data FROM grants WHERE token_hash = ?", [token_hash]) }
+      row.nil? ? nil : JSON.parse(row[0])
+    end
+
+    def grant_by_id(credential_id)
+      row = @mutex.synchronize { @db.get_first_row("SELECT data FROM grants WHERE credential_id = ?", [credential_id]) }
+      row.nil? ? nil : JSON.parse(row[0])
+    end
+
+    def put_grant(grant)
+      @mutex.synchronize do
+        @db.execute(
+          "INSERT INTO grants (credential_id, token_hash, data) VALUES (?, ?, ?) " \
+          "ON CONFLICT (credential_id) DO UPDATE SET token_hash = excluded.token_hash, data = excluded.data",
+          [grant["credentialId"], grant["tokenHash"], JSON.generate(grant)]
+        )
+      end
+    end
+
+    def delete_grant(credential_id)
+      @mutex.synchronize { @db.execute("DELETE FROM grants WHERE credential_id = ?", [credential_id]) }
+    end
+
+    def list_grants
+      @mutex.synchronize { @db.execute("SELECT data FROM grants") }.map { |r| JSON.parse(r[0]) }
+    end
+
+    # auth rows -------------------------------------------------------------
+    def row(table, key)
+      found = @mutex.synchronize do
+        @db.get_first_row("SELECT data FROM auth_rows WHERE tbl = ? AND key = ?", [table, key])
+      end
+      found.nil? ? nil : JSON.parse(found[0])
+    end
+
+    def put_row(table, key, row)
+      @mutex.synchronize do
+        @db.execute(
+          "INSERT INTO auth_rows (tbl, key, data) VALUES (?, ?, ?) " \
+          "ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
+          [table, key, JSON.generate(row)]
+        )
+      end
+    end
+
+    def delete_row(table, key)
+      @mutex.synchronize { @db.execute("DELETE FROM auth_rows WHERE tbl = ? AND key = ?", [table, key]) }
+    end
+
+    def rows_of(table)
+      found = @mutex.synchronize { @db.execute("SELECT key, data FROM auth_rows WHERE tbl = ?", [table]) }
+      found.map { |key, data| [key, JSON.parse(data)] }
+    end
+  end
+
+  # The store as an operation runner is handed it: the live store, except that
+  # a task it queues records who asked — the runner's caller — so the agent
+  # that takes it acts as them (spec/v0_2/auth.md §6). The adapter supplies
+  # the caller, so no runner can forget to, or name someone else.
+  class CallerStore < SimpleDelegator
+    def initialize(store, principal)
+      super(store)
+      @principal = principal
+    end
+
+    def trigger(etype, payload, capability = nil)
+      __getobj__.trigger(etype, payload, capability, principal: @principal)
+    end
   end
 
   # ---------------------------------------------------------------- adapter
   class Adapter
     include Rules
 
+    # The framework's account page (sign in, invites, people, the agents acting
+    # for you), served by the wiring from a2app-account.html.
+    ACCOUNT_URL = "/_a2app/account"
+    SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000
+    INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+    SIGN_IN_FAILURES = 10
+    SIGN_IN_WINDOW_MS = 15 * 60 * 1000
+    LOGIN_MAX = 254
+    NAME_MAX = 100
+    # Credential lifetimes, in seconds (spec/v0_2/auth.md §2.1, §6.2). A task
+    # credential's task ending kills it sooner.
+    DEFAULT_EXPIRES_SECONDS = 30 * 24 * 60 * 60
+    MIN_EXPIRES_SECONDS = 60
+    MAX_EXPIRES_SECONDS = 365 * 24 * 60 * 60
+    TASK_CREDENTIAL_SECONDS = 60 * 60
+    # How long a revoked or expired credential is remembered (spec §2.1).
+    GRANT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+    # `lastUsedAt` is written at most this often, so use does not mean a disk
+    # write per request.
+    LAST_USED_RESOLUTION_MS = 60_000
+    TERMINAL_TASK = %w[completed failed canceled].freeze
+    # Device-code sign-in (spec §7): codes live 10 minutes; agents poll every
+    # 5 s, and 5 s more each time they poll too soon.
+    CODE_TTL_SECONDS = 600
+    POLL_INTERVAL_SECONDS = 5
+    SLOW_DOWN_STEP_SECONDS = 5
+    # The app's administrator: the admin credential, and the only principal of
+    # an `authMode: none` app.
+    OWNER = { "id" => "owner", "name" => "Owner", "role" => "owner", "active" => true }.freeze
+    # Said to an agent whose credential stopped working (revoked, expired, or
+    # its person deactivated): a new one is the person's to give.
+    RENEW_HINT = "Ask the person this agent acts for to approve it again (a2app <app> login), " \
+                 "or the app's owner for a new credential."
+
     attr_reader :store
 
+    # `token` is the app's own .agent-token: its admin credential (spec/v0_2/
+    # auth.md §2.3). `permissions_of` is what a principal may do, as scopes
+    # (§3; default `*` for every active principal); `capabilities` what each
+    # capability's task credential holds (§6.2; default `*`).
     def initialize(app_id:, app_name:, entities:, operations:, store:, token:,
                    modules: nil, allowed_origins: nil, public_url: nil, operation_runners: nil, events: nil,
-                   auth_mode: "none", credential_hint: nil, env: nil, app_version: nil)
+                   auth_mode: "none", permissions_of: nil, capabilities: nil,
+                   credential_hint: nil, env: nil, app_version: nil)
       @app_id = app_id
       @app_name = app_name
-      # {name => {"fields" => [...], "module" => str, "summary"?, "auth"?, "writeAllow"?}}
+      # {name => {"fields" => [...], "module" => str, "summary"?, "auth"?, "writeAllow"?, "ownedBy"?}}
       @entity_defs = entities
       @operations = operations
       @modules = modules || []
       @op_by_name = operations.to_h { |o| [o["name"], o] }
+      @capabilities = capabilities || {}
       problems = model_problems
+      declared = all_scopes
+      @capabilities.each do |capability, decl|
+        unknown = (decl["scopes"] || []).reject { |s| s == "*" || declared.include?(s) }
+        unless unknown.empty?
+          problems << "capability \"#{capability}\" needs scopes this app does not declare: #{unknown.join(", ")}"
+        end
+      end
       unless problems.empty?
         # Fail fast: a model whose entities or operations name a module that
         # was never declared cannot be walked, so serving it would answer 200
@@ -925,11 +1309,14 @@ module A2appAdapter
       # author rather than by whatever a runner passes at the moment of firing.
       store.event_types = (events || []).map { |e| e["type"] }
       @auth_mode = auth_mode
+      @permissions_of = permissions_of
       # The public URL (A2APP_PUBLIC_URL, resolved by Network.policy) is one
       # more of the app's own origins, and the hosts this app answers to are
       # derived from those origins: reached at its public URL, it answers
       # there and nowhere new.
       own_origins = (allowed_origins || []) + [public_url].compact
+      @own_origins = own_origins
+      @public_url = public_url
       @allowed_origins = own_origins.to_h { |o| [o, true] }
       @allowed_hosts = {}
       own_origins.each do |origin|
@@ -948,11 +1335,18 @@ module A2appAdapter
       # marker that moves for a View-only change, which schemaVersion is
       # blind to. Re-derived per call, same "derive, do not declare" rule.
       @app_version = app_version
-      @limiter = RateLimiter.new(DEFAULT_RATE_LIMITS.dup, -> { (Time.now.to_f * 1000).to_i })
-      store.put_grant(
-        "token" => token, "credentialId" => "cred_local", "agentName" => "local",
-        "principal" => "owner", "scopes" => ["*"]
-      )
+      @limiter = RateLimiter.new(DEFAULT_RATE_LIMITS.dup, -> { now_ms })
+      # Per app: browsers do not separate cookies by port, so two apps on one
+      # machine would otherwise sign each other out.
+      @session_cookie_name = "a2app_session_#{app_id}"
+      @secure_cookies = !public_url.nil? && public_url.start_with?("https:")
+      @sign_in_failures = Auth::FailureLimiter.new(SIGN_IN_FAILURES, SIGN_IN_WINDOW_MS, -> { now_ms })
+      # Checks and writes that must be one step under Puma's threads: an
+      # invite accepted twice, a device code redeemed twice, the last owner
+      # demoted twice.
+      @auth_lock = Mutex.new
+      seed_admin_credential(token)
+      prune_grants
       # Seed records (materialize server-managed read-only fields) — but only
       # into a store that is genuinely fresh. A durable store that already
       # holds a database refuses the seed: re-seeding on every boot would
@@ -961,6 +1355,29 @@ module A2appAdapter
         store.seed.each do |name, records|
           records.each { |raw| store.put_record(name, materialize(name, raw)) }
         end
+      end
+    end
+
+    # Seed the admin credential from the app's own .agent-token, hashed on the
+    # way in. Re-seeding at every boot follows a rotated token file: the old
+    # token's hash is replaced under the same id.
+    def seed_admin_credential(token)
+      existing = @store.grant_by_id("cred_local")
+      @store.put_grant(
+        "credentialId" => "cred_local", "tokenHash" => Auth.hash_secret(token), "principal" => OWNER["id"],
+        "agentName" => "local", "scopes" => ["*"],
+        "createdAt" => existing ? existing["createdAt"] : now_iso, "expiresAt" => nil,
+        "lastUsedAt" => existing ? existing["lastUsedAt"] : nil, "revokedAt" => nil, "task" => nil, "admin" => true
+      )
+    end
+
+    # Revoked and expired credentials are kept a while so their tokens are
+    # told why they stopped; after that they are gone.
+    def prune_grants
+      t = now_ms
+      @store.list_grants.each do |g|
+        ended = g["revokedAt"] || (g["expiresAt"] && ms_of(g["expiresAt"]) <= t ? g["expiresAt"] : nil)
+        @store.delete_grant(g["credentialId"]) if ended && t - ms_of(ended) > GRANT_RETENTION_MS
       end
     end
 
@@ -985,6 +1402,15 @@ module A2appAdapter
           problems << "entity \"#{name}\" declares no module"
         elsif !declared.include?(mod)
           problems << "entity \"#{name}\" names undeclared module \"#{mod}\""
+        end
+        next if d["ownedBy"].nil?
+        # The adapter writes the owner and the guard keeps clients from doing
+        # so, which only holds for a declared, read-only string field.
+        owner = d["fields"].find { |f| f["name"] == d["ownedBy"] }
+        if owner.nil?
+          problems << "entity \"#{name}\" is ownedBy \"#{d["ownedBy"]}\", which is not one of its fields"
+        elsif owner["type"] != "string" || owner["readOnly"] != true
+          problems << "entity \"#{name}\" is ownedBy \"#{d["ownedBy"]}\", which must be a readOnly string field"
         end
       end
 
@@ -1066,6 +1492,7 @@ module A2appAdapter
         "a2app" => true, "protocol" => PROTOCOL_VERSION, "adapterVersion" => ADAPTER_VERSION,
         "app" => { "id" => @app_id, "name" => @app_name }, "schemaVersion" => schema_version,
         "serverNow" => now_iso, "serverTzOffsetMinutes" => 0,
+        "authMode" => @auth_mode, "accountUrl" => ACCOUNT_URL,
       }
       # See the constructor: the wiring's fingerprint of the served View, so an
       # open tab's update watcher can tell a code change from a data change.
@@ -1210,6 +1637,7 @@ module A2appAdapter
         "next" => ["describe/#{mod}/#{name}/{id}", "data #{name} list"],
       }
       level["auth"] = true if d["auth"]
+      level["ownedBy"] = d["ownedBy"] if d["ownedBy"]
       level
     end
 
@@ -1291,8 +1719,22 @@ module A2appAdapter
     end
 
     # -- IAM ----------------------------------------------------------------
-    def expand_scopes(grant)
-      return grant["scopes"].to_a unless grant["scopes"].include?("*")
+    # Parity oracle: `credentialOf`, `resolve`, `authorize` and `managerOf` in
+    # adapters/adapter-core/src/server.ts. A caller is resolved in the order
+    # spec/v0_2/auth.md §9 gives, and whatever reaches it is limited, on every
+    # request, to what its principal may do at that moment (the ceiling, §3).
+
+    # Who the caller is, and what it may do. `held` is the scopes it holds, or
+    # :anonymous for an uncredentialled read on a single-user app, which the
+    # scope check does not apply to.
+    Caller = Struct.new(:ctx, :held, :grant)
+
+    def multi_user?
+      @auth_mode == "multi-user"
+    end
+
+    # Every scope the app declares: what `*` means.
+    def all_scopes
       scopes = []
       @entity_defs.each_key do |name|
         scopes << "data:#{name}:read"
@@ -1302,38 +1744,193 @@ module A2appAdapter
       scopes
     end
 
-    def credential_of(headers)
-      token = headers["x-a2app-token"] || headers["x-lui-token"]
-      token ? @store.grant_by_token(token) : nil
+    def expand_scopes(scopes)
+      scopes.include?("*") ? all_scopes : scopes.uniq
     end
 
-    def authorize(headers, scope, is_write)
+    # Who a principal is ({"id", "name", "role", "active"}), or nil when it is
+    # unknown.
+    def principal_info(id)
+      return OWNER if id == OWNER["id"]
+      return nil unless multi_user?
+      a = @store.row("users", id)
+      a && { "id" => a["id"], "name" => a["name"], "role" => a["role"], "active" => a["active"] }
+    end
+
+    # What a principal may do now (spec §3), or nil when it may do nothing.
+    def permissions(info)
+      return nil unless info && info["active"]
+      expand_scopes(@permissions_of ? @permissions_of.call(info) : ["*"])
+    end
+
+    # The credential this request presents, checked in the order spec §9
+    # gives: unknown, revoked (or its task is over), expired, then whether the
+    # person it acts for may still act. Returns [[grant, info, held], nil] with
+    # its effective reach — its own scopes intersected with the principal's —
+    # or [nil, refusal]; [nil, nil] when no credential was presented.
+    def credential_of(headers)
+      token = headers["x-a2app-token"] || headers["x-lui-token"]
+      return [nil, nil] if token.nil? || token.empty?
+      grant = @store.grant_by_token_hash(Auth.hash_secret(token))
+      t = now_ms
+      unless grant
+        return [nil, err(401, "credential_invalid", "This credential is not one this app issued.", "how" => RENEW_HINT)]
+      end
+      task = grant["task"].nil? ? nil : @store.get_task(grant["task"])
+      if !grant["revokedAt"].nil? || (!grant["task"].nil? && (task.nil? || TERMINAL_TASK.include?(task["status"])))
+        return [nil, err(401, "credential_revoked", "This credential was revoked.", "how" => RENEW_HINT)]
+      end
+      if !grant["expiresAt"].nil? && ms_of(grant["expiresAt"]) <= t
+        return [nil, err(401, "token_expired", "This credential expired at #{grant["expiresAt"]}.", "how" => RENEW_HINT)]
+      end
+      info = principal_info(grant["principal"])
+      allowed = permissions(info)
+      if info.nil? || allowed.nil?
+        return [nil, err(401, "principal_inactive", "The person this credential acts for is no longer active.")]
+      end
+      if grant["lastUsedAt"].nil? || t - ms_of(grant["lastUsedAt"]) >= LAST_USED_RESOLUTION_MS
+        @store.put_grant(grant.merge("lastUsedAt" => iso_at(t)))
+      end
+      [[grant, info, expand_scopes(grant["scopes"]) & allowed], nil]
+    end
+
+    # The credential this request presents, if it is a usable one.
+    def presented_grant(headers)
+      presented, = credential_of(headers)
+      presented && presented[0]
+    end
+
+    # The signed-in account behind this request's session cookie, as
+    # {"key", "account"}, or nil. A deactivated account's session stops here.
+    def session_of(headers)
+      return nil unless multi_user?
+      secret = Auth.parse_cookies(headers["cookie"])[@session_cookie_name]
+      return nil if secret.nil? || secret.empty?
+      key = Auth.hash_secret(secret)
+      session = @store.row("sessions", key)
+      return nil unless session
+      if ms_of(session["expiresAt"]) <= now_ms
+        @store.delete_row("sessions", key)
+        return nil
+      end
+      account = @store.row("users", session["principal"])
+      account && account["active"] ? { "key" => key, "account" => account } : nil
+    end
+
+    def foreign_origin?(headers)
       origin = headers["origin"]
-      if !origin.nil? && !@allowed_origins.key?(origin)
+      # No Origin: a program, not a browser.
+      !origin.nil? && !@allowed_origins.key?(origin)
+    end
+
+    # True when the request carries one of the app's OWN origins.
+    def is_same_origin(headers)
+      origin = headers["origin"]
+      !origin.nil? && @allowed_origins.key?(origin)
+    end
+
+    # Whether a request came from one of the app's own pages. Only ever used
+    # to pick which 401 to send (sign in, or present a credential) and to let
+    # the single-user View read — never to trust a change. A browser marks
+    # same-origin fetches, GETs included, with Sec-Fetch-Site; a program sends
+    # neither header.
+    def from_own_page?(headers)
+      is_same_origin(headers) || headers["sec-fetch-site"] == "same-origin"
+    end
+
+    def unauthenticated(headers, message)
+      if multi_user? && from_own_page?(headers)
+        return err(401, "sign_in_required", "Sign in to use this app.", "signInUrl" => "#{ACCOUNT_URL}#sign-in")
+      end
+      err(401, ERROR_CODES["AGENT_TOKEN_REQUIRED"], message, "how" => @credential_hint)
+    end
+
+    # Who the caller is, in a fixed order: a foreign origin is refused; then
+    # the agent credential; then, on a multi-user app, the session (a change
+    # must come from the app's own page — CSRF, spec §4); on `authMode: none`,
+    # the app's own View is the owner. Returns [Caller, nil] or [nil, refusal].
+    def resolve(headers, is_write)
+      if foreign_origin?(headers)
         return [nil, err(403, "forbidden_origin", "Refused: request Origin is not this app's own.")]
       end
-      if !origin.nil? && @allowed_origins.key?(origin)
-        return [{ "credentialId" => "ui", "agentName" => nil, "principal" => "owner" }, nil]
+      presented, refusal = credential_of(headers)
+      return [nil, refusal] if refusal
+      if presented
+        grant, info, held = presented
+        ctx = { "credentialId" => grant["credentialId"], "agentName" => grant["agentName"],
+                "principal" => info["id"], "role" => info["role"] }
+        return [Caller.new(ctx, held, grant), nil]
       end
-      grant = credential_of(headers)
-      required = is_write || @auth_mode == "multi-user"
-      if grant.nil?
-        if required
-          return [nil, err(401, ERROR_CODES["AGENT_TOKEN_REQUIRED"], "This write requires an agent credential.",
-                           "how" => @credential_hint)]
+      if multi_user?
+        session = session_of(headers)
+        if session
+          if is_write && !is_same_origin(headers)
+            return [nil, err(403, "forbidden_origin", "A signed-in change must come from this app's own page.")]
+          end
+          account = session["account"]
+          ctx = { "credentialId" => "session", "agentName" => nil, "principal" => account["id"], "role" => account["role"] }
+          return [Caller.new(ctx, permissions(principal_info(account["id"])) || [], nil), nil]
         end
-        return [{ "credentialId" => "anonymous", "agentName" => nil, "principal" => "owner" }, nil]
+        return [nil, unauthenticated(headers, "This app needs a credential.")]
       end
-      if scope && !expand_scopes(grant).include?(scope)
+      # The app's own UI (same origin) is trusted: no credential needed. A
+      # browser sends Origin only on a change; on a read it marks the request
+      # with Sec-Fetch-Site, which a web page cannot forge. A local program
+      # can, but on this mode it already reads everything without a
+      # credential, so only a change is held to the stronger Origin rule.
+      if is_same_origin(headers) || (!is_write && from_own_page?(headers))
+        ctx = { "credentialId" => "ui", "agentName" => nil, "principal" => OWNER["id"], "role" => "owner" }
+        return [Caller.new(ctx, permissions(OWNER) || [], nil), nil]
+      end
+      # A program write always needs a credential; an anonymous read on a
+      # single-user app proceeds as the owner.
+      return [nil, unauthenticated(headers, "This write requires an agent credential.")] if is_write
+      [Caller.new({ "credentialId" => "anonymous", "agentName" => nil, "principal" => OWNER["id"], "role" => "owner" },
+                  :anonymous, nil), nil]
+    end
+
+    # The fixed chain: origin -> credential -> scope. Returns [ctx, nil] on
+    # success, or [nil, refusal].
+    def authorize(headers, scope, is_write)
+      caller, reply = resolve(headers, is_write)
+      return [nil, reply] if reply
+      if scope && caller.held != :anonymous && !caller.held.include?(scope)
         return [nil, err(403, ERROR_CODES["INSUFFICIENT_SCOPE"], "This credential does not hold #{scope}.",
                          "required" => scope)]
       end
-      [{ "credentialId" => grant["credentialId"], "agentName" => grant["agentName"],
-         "principal" => grant["principal"] }, nil]
+      [caller.ctx, nil]
+    end
+
+    # The caller as a manager of accounts and credentials (spec §2.4): a
+    # signed-in person, the app's own View on `authMode: none`, or the admin
+    # credential — as [{"principal", "role"}, nil], or [nil, refusal]. An
+    # agent's delegated credential is never one.
+    def manager_of(headers, write)
+      caller, reply = resolve(headers, write)
+      return [nil, reply] if reply
+      if caller.grant
+        unless caller.grant["admin"]
+          return [nil, err(403, "not_a_manager", "An agent's credential cannot manage accounts or credentials.")]
+        end
+        return [{ "principal" => OWNER["id"], "role" => "owner" }, nil]
+      end
+      if caller.ctx["credentialId"] == "anonymous"
+        return [nil, unauthenticated(headers, "Managing this app needs a credential.")]
+      end
+      [{ "principal" => caller.ctx["principal"], "role" => caller.ctx["role"] }, nil]
+    end
+
+    # Where this app is reached, for links handed to a person. The Host header
+    # has already passed the host check by the time a route runs.
+    def public_origin(headers)
+      return @public_url if @public_url
+      host = headers["host"]
+      host ? "http://#{host}" : (@own_origins[0] || "")
     end
 
     def rate_gate(headers, cls)
-      caller_id = headers["x-a2app-token"] || (headers["origin"] ? "origin:" + headers["origin"] : "anon")
+      caller_id = headers["x-a2app-token"] || headers["x-lui-token"] ||
+                  (headers["origin"] ? "origin:" + headers["origin"] : "anon")
       decision = @limiter.check(caller_id, cls)
       return nil if decision["allowed"]
       err(429, ERROR_CODES["RATE_LIMITED"],
@@ -1341,35 +1938,61 @@ module A2appAdapter
           "retryAfterSeconds" => decision["retryAfterSeconds"])
     end
 
-    # True when the request carries one of the app's OWN origins — the trusted
-    # browser-UI path `authorize` also honours.
-    def is_same_origin(headers)
-      origin = headers["origin"]
-      !origin.nil? && @allowed_origins.key?(origin)
+    # -- ownership (spec/v0_2/auth.md §5) -----------------------------------
+
+    # Whether `ctx` sees only the records it owns in entity `d`.
+    def owned_only?(d, ctx)
+      multi_user? && !d["ownedBy"].nil? && ctx["role"] != "owner"
+    end
+
+    # The record if `ctx` may see it, else nil (another member's record is
+    # indistinguishable from a missing one).
+    def visible(d, ctx, rec)
+      return nil if rec.nil?
+      owned_only?(d, ctx) && rec[d["ownedBy"]] != ctx["principal"] ? nil : rec
     end
 
     # -- dispatch -----------------------------------------------------------
 
+    NO_ACCESS = { "read" => ->(_e) { false }, "write" => ->(_e) { false }, "run" => ->(_o) { false } }.freeze
+
     # What this caller may do, for rendering access on a describe level.
     #
-    # Mirrors `authorize`'s precedence including its two bypasses — the app's
-    # own UI and an anonymous read on a single-user app both reach a context
-    # without meeting the scope check, so both genuinely have full access.
+    # Mirrors `authorize`'s own precedence exactly, including its two
+    # bypasses: the app's own UI and an anonymous read on a single-user app
+    # both reach a context without meeting the scope check. The UI holds the
+    # owner's permissions; an anonymous caller reads, and runs only read-only
+    # operations — `authorize` answers its writes with a 401, so describe must
+    # not tell it otherwise.
     def access_for(headers)
-      if is_same_origin(headers)
-        return { "read" => ->(_e) { true }, "write" => ->(_e) { true }, "run" => ->(_o) { true } }
+      caller, reply = resolve(headers, false)
+      return NO_ACCESS if reply
+      if caller.held == :anonymous
+        return {
+          "read" => ->(_e) { true },
+          "write" => ->(_e) { false },
+          "run" => ->(o) { @op_by_name[o] && @op_by_name[o]["readOnly"] == true },
+        }
       end
-      grant = credential_of(headers)
-      unless grant
-        allow = @auth_mode != "multi-user"
-        return { "read" => ->(_e) { allow }, "write" => ->(_e) { allow }, "run" => ->(_o) { allow } }
-      end
-      held = expand_scopes(grant)
+      held = caller.held
       {
         "read" => ->(e) { held.include?("data:#{e}:read") },
         "write" => ->(e) { held.include?("data:#{e}:write") },
         "run" => ->(o) { held.include?("op:#{o}") },
       }
+    end
+
+    # The same reach, written as the scope names a grant would have carried —
+    # how whoami answers a caller that holds no grant, rendered from the very
+    # access describe uses so the two cannot disagree.
+    def reach_as_scopes(access)
+      scopes = []
+      @entity_defs.each_key do |name|
+        scopes << "data:#{name}:read" if access["read"].call(name)
+        scopes << "data:#{name}:write" if access["write"].call(name)
+      end
+      @operations.each { |o| scopes << "op:#{o["name"]}" if access["run"].call(o["name"]) }
+      scopes
     end
 
     # Serve one level of describe.
@@ -1414,11 +2037,11 @@ module A2appAdapter
 
       limited = rate_gate(headers, "data")
       return limited if limited
-      _ctx, reply = authorize(headers, "data:#{entity}:read", false)
+      ctx, reply = authorize(headers, "data:#{entity}:read", false)
       return reply if reply
 
       record_id = segments[2]
-      record = @store.get_record(entity, record_id)
+      record = visible(d, ctx, @store.get_record(entity, record_id))
       return err(404, "record_not_found", "No #{entity} record \"#{record_id}\".") if record.nil?
       return [200, describe_record(module_name, entity, d, record, access)] if segments.length == 3
 
@@ -1458,6 +2081,20 @@ module A2appAdapter
       !name.nil? && (Network.loopback_name?(name) || @allowed_hosts.key?(name))
     end
 
+    # The refusal for a request addressed to a host this app does not answer
+    # to, or nil. Checked before any route, including the unauthenticated
+    # identity document, which is otherwise a free fingerprint of the app for a
+    # rebound page: binding loopback does not stop a page on evil.com whose
+    # DNS re-resolves to 127.0.0.1, but its Host header still says evil.com.
+    # The wiring asks the same question for the pages it serves itself.
+    def host_refusal(headers)
+      host = headers["host"]
+      return nil if host.nil? || allowed_host?(host)
+      err(403, "forbidden_host", %(Refused: this app answers only on its own host, not "#{host}".))
+    end
+
+    # Route one request. Answers [status, payload], or [status, payload,
+    # headers] when the reply sets a header of its own (the session cookie).
     def dispatch(method, path, headers, body, query = nil)
       headers = (headers || {}).to_h { |k, v| [k.to_s.downcase, v] }
       method = method.upcase
@@ -1470,14 +2107,8 @@ module A2appAdapter
       path = path.sub(%r{/+\z}, "")
       path = "/" if path.empty?
 
-      # Before any route, including the unauthenticated identity document,
-      # which is otherwise a free fingerprint of the app for a rebound page:
-      # binding loopback does not stop a page on evil.com whose DNS
-      # re-resolves to 127.0.0.1, but its Host header still says evil.com.
-      host = headers["host"]
-      if !host.nil? && !allowed_host?(host)
-        return err(403, "forbidden_host", %(Refused: this app answers only on its own host, not "#{host}".))
-      end
+      refused = host_refusal(headers)
+      return refused if refused
       return [200, identity] if ["/.well-known/a2app.json", "/api/_a2app"].include?(path)
       # Describe is navigational: the bare path is the root level, and each
       # extra segment moves one level inward (A2APP-SPEC 3).
@@ -1491,11 +2122,37 @@ module A2appAdapter
         return handle_describe(headers, segments, q)
       end
       if path == "/api/_a2app/whoami"
-        grant = credential_of(headers)
-        return err(401, ERROR_CODES["AGENT_TOKEN_REQUIRED"], "whoami requires a credential.") unless grant
-        return [200, { "a2app" => true, "credentialId" => grant["credentialId"],
-                       "agentName" => grant["agentName"], "principal" => grant["principal"],
-                       "scopes" => expand_scopes(grant).sort }]
+        # whoami answers whoever this app will actually serve, which is what
+        # `authorize` decides — so it asks the same question. The 401 that
+        # remains is the honest one: on a multi-user app, a caller with no
+        # credential and no session really would be refused.
+        caller, reply = resolve(headers, false)
+        return reply if reply
+        # The reach the request was given: a credential's scopes intersected
+        # with what its person may do now, or a person's own. An anonymous
+        # read on a single-user app was never scope-checked, so it reports
+        # the reach describe renders for it — one source, so they agree.
+        held = caller.held == :anonymous ? reach_as_scopes(access_for(headers)) : caller.held
+        return [200, {
+          "a2app" => true, "credentialId" => caller.ctx["credentialId"], "agentName" => caller.ctx["agentName"],
+          "principal" => caller.ctx["principal"], "principalName" => principal_info(caller.ctx["principal"])&.fetch("name"),
+          "role" => caller.ctx["role"], "expiresAt" => caller.grant && caller.grant["expiresAt"], "scopes" => held.sort,
+        }]
+      end
+      if path.start_with?("/api/_a2app/auth/")
+        # Unauthenticated by design (an agent starts here with nothing), so it
+        # is metered like an operation before anything is looked up.
+        limited = rate_gate(headers, "ops")
+        return limited if limited
+        reply = handle_device(method, path, headers, body)
+        return reply if reply
+      end
+      if path == "/api/_a2app/credentials" || path.start_with?("/api/_a2app/credentials/")
+        return handle_credentials(method, path, headers, body)
+      end
+      if %w[/api/_a2app/session /api/_a2app/invites /api/_a2app/users].any? { |p| path == p || path.start_with?("#{p}/") }
+        return err(404, "not_multi_user", "This app has no accounts: its authMode is none.") unless multi_user?
+        return handle_accounts(method, path, headers, body)
       end
       if path == "/api/_a2app/context"
         _ctx, reply = authorize(headers, nil, false)
@@ -1578,15 +2235,20 @@ module A2appAdapter
       server_now = now_iso
 
       if method == "GET"
-        _ctx, reply = authorize(headers, "data:#{entity}:read", false)
+        ctx, reply = authorize(headers, "data:#{entity}:read", false)
         return reply if reply
         if rec_id
-          rec = @store.get_record(entity, rec_id)
+          rec = visible(d, ctx, @store.get_record(entity, rec_id))
           return err(404, "record_not_found", "No #{entity} record \"#{rec_id}\".") unless rec
           return [200, rec]
         end
+        # Only the list parameters the protocol defines pass through: a member
+        # sees only its own records (`where`, applied before paging), and a
+        # caller cannot supply a constraint of its own under that name.
+        list_query = query.slice("filter", "sort", "perPage", "page")
+        list_query["where"] = { d["ownedBy"] => ctx["principal"] } if owned_only?(d, ctx)
         begin
-          return [200, @store.list_records(entity, query)]
+          return [200, @store.list_records(entity, list_query)]
         rescue UnsupportedFilter => e
           # Refuse, never ignore: unfiltered rows under a filter would be a
           # 200 with the wrong records (see the grammar's comment).
@@ -1600,6 +2262,9 @@ module A2appAdapter
 
       if method == "DELETE"
         return err(400, "usage", "DELETE requires a record id.") unless rec_id
+        if owned_only?(d, ctx) && !visible(d, ctx, @store.get_record(entity, rec_id))
+          return err(404, "record_not_found", "No #{entity} record \"#{rec_id}\".")
+        end
 
         # The app's referential rules bind THIS door too.
         #
@@ -1658,11 +2323,13 @@ module A2appAdapter
       end
 
       if method == "POST"
-        stored = materialize(entity, body)
+        # The owner field is the adapter's to set: the guard has already
+        # refused a client that tried, because it is read-only.
+        stored = materialize(entity, d["ownedBy"] ? body.merge(d["ownedBy"] => ctx["principal"]) : body)
         @store.put_record(entity, stored)
       else
         return err(400, "usage", "PATCH requires a record id.") unless rec_id
-        existing = @store.get_record(entity, rec_id)
+        existing = visible(d, ctx, @store.get_record(entity, rec_id))
         return err(404, "record_not_found", "No #{entity} record \"#{rec_id}\".") unless existing
         fields.each do |f|
           next if f["readOnly"] || !body.key?(f["name"])
@@ -1719,7 +2386,10 @@ module A2appAdapter
         return err(501, "not_implemented", "This app declares \"#{name}\" but implements no operation runner.")
       end
       begin
-        result = runner.call(args, ctx, @store)
+        # `ctx` is the caller ({"credentialId", "agentName", "principal",
+        # "role"}): a runner holds itself to the same ownership rule as the
+        # records API. A task it queues is done by an agent acting as them.
+        result = runner.call(args, ctx, CallerStore.new(@store, ctx["principal"]))
         [200, { "a2app" => true, "ok" => true, "operation" => name, "result" => result }]
       rescue StandardError => e
         err(500, "operation_failed", "Operation \"#{name}\" threw: #{e.message}")
@@ -1815,6 +2485,28 @@ module A2appAdapter
         task["status"] = "canceled"
         @store.save_task(task)
         [200, self.class.task_wire(task)]
+      when "credential"
+        # What the bridge runs the task's harness with (spec/v0_2/auth.md
+        # §6.2): the person who queued it, the capability's scopes, and no
+        # life past the task.
+        manager, reply = manager_of(headers, true)
+        return reply if reply
+        return err(403, "not_a_manager", "Only an owner issues a task's credential.") if manager["role"] != "owner"
+        if TERMINAL_TASK.include?(task["status"])
+          return err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], "Task #{task_id} already reached #{task["status"]}.")
+        end
+        principal = task["request"]["principal"] || OWNER["id"]
+        info = principal_info(principal)
+        unless info && info["active"]
+          return err(401, "principal_inactive", "The person who queued this task is no longer active.")
+        end
+        agent_name, problem = parse_agent_name(body["agentName"])
+        return err(400, "usage", problem) if problem
+        token, grant = mint_credential(
+          principal, agent_name, @capabilities.dig(task["request"]["capability"], "scopes") || ["*"],
+          TASK_CREDENTIAL_SECONDS, task: task["id"]
+        )
+        [201, { "a2app" => true, "token" => token, "credential" => credential_wire(grant, info["name"]) }]
       else
         err(404, "usage", "Unknown task action \"#{action}\".")
       end
@@ -1823,15 +2515,506 @@ module A2appAdapter
     def self.task_wire(t)
       {
         "id" => t["id"], "app" => t["app"], "event" => t["event"], "status" => t["status"],
-        "request" => t["request"], "claim" => t["claim"], "progress" => t["progress"],
-        "result" => t["result"], "reason" => t["reason"], "createdAt" => t["createdAt"],
-        "updatedAt" => t["updatedAt"], "pollAfterMs" => 2000,
+        "request" => t["request"].merge("principal" => t["request"]["principal"]), "claim" => t["claim"],
+        "progress" => t["progress"], "result" => t["result"], "reason" => t["reason"],
+        "createdAt" => t["createdAt"], "updatedAt" => t["updatedAt"], "pollAfterMs" => 2000,
       }
     end
 
+    # -- accounts and sessions (spec/v0_2/auth.md §4; multi-user only) -------
+    #
+    #   GET/POST/DELETE /api/_a2app/session        who is signed in · sign in · sign out
+    #   POST /api/_a2app/invites                    a one-time setup link (owner manager)
+    #   GET/POST /api/_a2app/invites/{code}         read · accept (creates the account)
+    #   GET /api/_a2app/users                       every account (owner manager)
+    #   PATCH /api/_a2app/users/{id}                activate/deactivate, change role
+    #
+    # Accounts are adapter state, never records: they are not served by the
+    # records API, and a password hash never leaves this section. Parity
+    # oracle: adapters/adapter-core/src/accounts.ts.
+
+    # The account as served: never its password hash.
+    def account_wire(a)
+      { "id" => a["id"], "name" => a["name"], "login" => a["login"], "role" => a["role"],
+        "active" => a["active"], "createdAt" => a["createdAt"] }
+    end
+
+    def accounts
+      @store.rows_of("users").map { |_key, a| a }
+    end
+
+    def account_by_login(login)
+      accounts.find { |a| a["login"] == login }
+    end
+
+    def active_owners
+      accounts.select { |a| a["role"] == "owner" && a["active"] }
+    end
+
+    def start_session(account, status)
+      secret = Auth.new_secret
+      created = now_ms
+      @store.put_row("sessions", Auth.hash_secret(secret), {
+        "principal" => account["id"], "createdAt" => iso_at(created), "expiresAt" => iso_at(created + SESSION_TTL_MS),
+      })
+      cookie = Auth.session_cookie(@session_cookie_name, secret, max_age_seconds: SESSION_TTL_MS / 1000, secure: @secure_cookies)
+      [status, { "a2app" => true }.merge(account_wire(account)), { "set-cookie" => cookie }]
+    end
+
+    # The reason `body` is not a valid new account, or nil.
+    def account_problem(body)
+      name, login, password = body.values_at("name", "login", "password")
+      if !name.is_a?(String) || Auth.js_trim(name).empty? || Auth.js_length(Auth.js_trim(name)) > NAME_MAX
+        return "name must be 1–#{NAME_MAX} characters."
+      end
+      if !login.is_a?(String) || Auth.normalize_login(login).empty? || Auth.js_length(Auth.normalize_login(login)) > LOGIN_MAX
+        return "login must be 1–#{LOGIN_MAX} characters."
+      end
+      if !password.is_a?(String) || Auth.js_length(password) < Auth::PASSWORD_MIN || Auth.js_length(password) > Auth::PASSWORD_MAX
+        return "password must be #{Auth::PASSWORD_MIN}–#{Auth::PASSWORD_MAX} characters."
+      end
+      nil
+    end
+
+    # The live invite for `code` as {"key", "invite"}, or nil; an expired one
+    # is dropped on the way.
+    def live_invite(code)
+      key = Auth.hash_secret(code)
+      invite = @store.row("invites", key)
+      return nil unless invite
+      if ms_of(invite["expiresAt"]) <= now_ms
+        @store.delete_row("invites", key)
+        return nil
+      end
+      { "key" => key, "invite" => invite }
+    end
+
+    def handle_session(method, headers, body)
+      if method == "GET"
+        session = session_of(headers)
+        return err(401, "sign_in_required", "Not signed in.", "signInUrl" => "#{ACCOUNT_URL}#sign-in") unless session
+        return [200, { "a2app" => true }.merge(account_wire(session["account"]))]
+      end
+      if method == "DELETE"
+        session = session_of(headers)
+        @store.delete_row("sessions", session["key"]) if session
+        cleared = Auth.session_cookie(@session_cookie_name, "", max_age_seconds: 0, secure: @secure_cookies)
+        return [200, { "a2app" => true, "ok" => true }, { "set-cookie" => cleared }]
+      end
+      return err(405, "usage", "#{method} not allowed on the session.") unless method == "POST"
+
+      unless body["login"].is_a?(String) && body["password"].is_a?(String)
+        return err(400, "usage", "Sign in with { login, password }.")
+      end
+      login = Auth.normalize_login(body["login"])
+      wait = @sign_in_failures.retry_after(login)
+      if wait.positive?
+        return err(429, "rate_limited", "Too many failed sign-ins for this login. Try again later.",
+                   "retryAfterSeconds" => wait)
+      end
+      account = account_by_login(login)
+      if account
+        matches = Auth.verify_password(body["password"], account["passwordHash"])
+      else
+        # Checked against when a login does not exist, so a missing account
+        # takes as long to refuse as a wrong password and the timing does not
+        # say which.
+        @dummy_hash ||= Auth.hash_password(Auth.new_secret)
+        Auth.verify_password(body["password"], @dummy_hash)
+        matches = false
+      end
+      if !account || !matches || !account["active"]
+        @sign_in_failures.fail(login)
+        return err(401, "sign_in_failed", "That login and password do not match an active account.")
+      end
+      @sign_in_failures.reset(login)
+      start_session(account, 200)
+    end
+
+    def handle_invites(method, headers, body, code)
+      if code.nil?
+        return err(405, "usage", "#{method} not allowed on invites.") unless method == "POST"
+        manager, reply = manager_of(headers, true)
+        return reply if reply
+        return err(403, "not_a_manager", "Only an owner can invite people.") if manager["role"] != "owner"
+        role = body["role"].nil? ? "member" : body["role"]
+        return err(400, "usage", 'role is "owner" or "member".') unless %w[owner member].include?(role)
+        secret = Auth.new_secret
+        created = now_ms
+        invite = { "role" => role, "createdAt" => iso_at(created), "expiresAt" => iso_at(created + INVITE_TTL_MS) }
+        @store.put_row("invites", Auth.hash_secret(secret), invite)
+        return [201, {
+          "a2app" => true, "code" => secret, "url" => "#{public_origin(headers)}#{ACCOUNT_URL}#setup/#{secret}",
+          "role" => invite["role"], "expiresAt" => invite["expiresAt"],
+        }]
+      end
+
+      invalid = "This invite link is not valid: it was used, or it expired."
+      found = live_invite(code)
+      return err(404, "invite_invalid", invalid) unless found
+      if method == "GET"
+        return [200, { "a2app" => true, "role" => found["invite"]["role"], "expiresAt" => found["invite"]["expiresAt"] }]
+      end
+      return err(405, "usage", "#{method} not allowed on an invite.") unless method == "POST"
+
+      problem = account_problem(body)
+      return err(400, "usage", problem) if problem
+      login = Auth.normalize_login(body["login"])
+      return err(409, "login_taken", "That login is already in use.") if account_by_login(login)
+      password_hash = Auth.hash_password(body["password"])
+      # The checks and the write are one step: a second acceptance of the same
+      # invite, or a second account racing for the same login, sees this one's
+      # result.
+      @auth_lock.synchronize do
+        still = live_invite(code)
+        return err(404, "invite_invalid", invalid) unless still
+        return err(409, "login_taken", "That login is already in use.") if account_by_login(login)
+        account = {
+          "id" => Auth.new_id("usr"), "name" => Auth.js_trim(body["name"]), "login" => login,
+          "role" => still["invite"]["role"], "active" => true, "createdAt" => iso_at(now_ms),
+          "passwordHash" => password_hash,
+        }
+        @store.delete_row("invites", still["key"])
+        @store.put_row("users", account["id"], account)
+        start_session(account, 201)
+      end
+    end
+
+    def handle_users(method, headers, body, id)
+      manager, reply = manager_of(headers, method != "GET")
+      return reply if reply
+      return err(403, "not_a_manager", "Only an owner can manage people.") if manager["role"] != "owner"
+
+      if id.nil?
+        return err(405, "usage", "#{method} not allowed on users.") unless method == "GET"
+        return [200, { "a2app" => true, "users" => accounts.sort_by { |a| a["createdAt"] }.map { |a| account_wire(a) } }]
+      end
+      return err(405, "usage", "#{method} not allowed on a user.") unless method == "PATCH"
+      # One step, so two owners demoting each other cannot both pass the
+      # last-owner check.
+      @auth_lock.synchronize do
+        account = @store.row("users", id)
+        return err(404, "not_found", "No account \"#{id}\".") unless account
+        if body.key?("active") && body["active"] != true && body["active"] != false
+          return err(400, "usage", "active is true or false.")
+        end
+        if body.key?("role") && !%w[owner member].include?(body["role"])
+          return err(400, "usage", 'role is "owner" or "member".')
+        end
+        changed = account.merge(body.slice("active", "role"))
+        loses_owner = account["role"] == "owner" && account["active"] && (changed["role"] != "owner" || !changed["active"])
+        if loses_owner && active_owners.length == 1
+          return err(409, "last_owner", "This is the last active owner. Make someone else an owner first.")
+        end
+        @store.put_row("users", changed["id"], changed)
+        [200, { "a2app" => true }.merge(account_wire(changed))]
+      end
+    end
+
+    # Route one request under /api/_a2app/{session,invites,users}.
+    def handle_accounts(method, path, headers, body)
+      body = body.is_a?(Hash) ? body : {}
+      return handle_session(method, headers, body) if path == "/api/_a2app/session"
+      return handle_invites(method, headers, body, nil) if path == "/api/_a2app/invites"
+      return handle_invites(method, headers, body, unquote(path["/api/_a2app/invites/".length..])) if path.start_with?("/api/_a2app/invites/")
+      return handle_users(method, headers, body, nil) if path == "/api/_a2app/users"
+      handle_users(method, headers, body, unquote(path["/api/_a2app/users/".length..]))
+    end
+
+    # -- credentials (spec/v0_2/auth.md §2, §8) -----------------------------
+    #
+    #   GET /api/_a2app/credentials          a manager's own (an owner: everyone's)
+    #   POST /api/_a2app/credentials         issue one; the token is in this reply only
+    #   DELETE /api/_a2app/credentials/{id}  revoke (a manager, or the credential itself)
+    #
+    # Every credential this app issues is made by `mint_credential`: a 256-bit
+    # token returned once, stored as its SHA-256, bound to one principal,
+    # always expiring. Whatever its scopes say, each request it makes is
+    # limited to what that principal may do at the time (`credential_of`).
+    # Parity oracle: adapters/adapter-core/src/credentials.ts.
+
+    # A credential as listed: never its token or the token's hash.
+    def credential_wire(g, principal_name)
+      { "credentialId" => g["credentialId"], "principal" => g["principal"], "principalName" => principal_name,
+        "agentName" => g["agentName"], "scopes" => g["scopes"], "createdAt" => g["createdAt"],
+        "expiresAt" => g["expiresAt"], "lastUsedAt" => g["lastUsedAt"], "task" => g["task"] }
+    end
+
+    # Issue a credential: store its hash, return [token (once), grant].
+    def mint_credential(principal, agent_name, scopes, expires_in_seconds, task: nil)
+      token = Auth.new_token
+      t = now_ms
+      grant = {
+        "credentialId" => Auth.new_id("cred"), "tokenHash" => Auth.hash_secret(token), "principal" => principal,
+        "agentName" => agent_name, "scopes" => scopes, "createdAt" => iso_at(t),
+        "expiresAt" => iso_at(t + expires_in_seconds * 1000), "lastUsedAt" => nil, "revokedAt" => nil,
+        "task" => task, "admin" => false,
+      }
+      @store.put_grant(grant)
+      [token, grant]
+    end
+
+    # The optional agent name a caller gave a credential, checked:
+    # [name or nil, nil] or [nil, problem].
+    def parse_agent_name(value)
+      return [nil, nil] if value.nil?
+      if !value.is_a?(String) || Auth.js_trim(value).empty? || Auth.js_length(value) > 100
+        return [nil, "agentName is 1–100 characters."]
+      end
+      [Auth.js_trim(value), nil]
+    end
+
+    # The scopes and lifetime a caller asked for, checked: [{"scopes",
+    # "expiresInSeconds"}, nil], or [nil, the reason they cannot be granted].
+    # `scopes` defaults to `*`; every entry must be `*` or a scope the app
+    # declares.
+    def parse_grant_request(body)
+      scopes = body["scopes"].nil? ? ["*"] : body["scopes"]
+      if !scopes.is_a?(Array) || scopes.empty? || !scopes.all? { |s| s.is_a?(String) }
+        return [nil, 'scopes is a non-empty list of scope names (or ["*"]).']
+      end
+      declared = all_scopes
+      unknown = scopes.reject { |s| s == "*" || declared.include?(s) }
+      return [nil, "Not scopes this app declares: #{unknown.join(", ")}."] unless unknown.empty?
+      expires_in = body["expiresIn"].nil? ? DEFAULT_EXPIRES_SECONDS : body["expiresIn"]
+      # A JSON number with no fraction is whole, whichever way the parser typed it.
+      whole = expires_in.is_a?(Integer) || (expires_in.is_a?(Float) && expires_in.finite? && expires_in == expires_in.floor)
+      unless whole && expires_in >= MIN_EXPIRES_SECONDS && expires_in <= MAX_EXPIRES_SECONDS
+        return [nil, "expiresIn is a whole number of seconds from #{MIN_EXPIRES_SECONDS} to #{MAX_EXPIRES_SECONDS} (365 days)."]
+      end
+      [{ "scopes" => scopes.uniq, "expiresInSeconds" => expires_in.to_i }, nil]
+    end
+
+    # Still able to make a request: not revoked, not expired, its task not over.
+    def live_grant?(g)
+      return false if g["admin"] || !g["revokedAt"].nil?
+      return false if !g["expiresAt"].nil? && ms_of(g["expiresAt"]) <= now_ms
+      unless g["task"].nil?
+        task = @store.get_task(g["task"])
+        return false if task.nil? || TERMINAL_TASK.include?(task["status"])
+      end
+      true
+    end
+
+    def list_credentials(headers)
+      manager, reply = manager_of(headers, false)
+      return reply if reply
+      credentials = @store.list_grants
+                          .select { |g| live_grant?(g) && (manager["role"] == "owner" || g["principal"] == manager["principal"]) }
+                          .sort_by { |g| g["createdAt"] }.reverse
+                          .map { |g| credential_wire(g, principal_info(g["principal"])&.fetch("name")) }
+      [200, { "a2app" => true, "credentials" => credentials }]
+    end
+
+    def issue_credential(headers, body)
+      manager, reply = manager_of(headers, true)
+      return reply if reply
+      principal = body["principal"].nil? ? manager["principal"] : body["principal"]
+      return err(400, "usage", 'principal is an account id (or "owner").') unless principal.is_a?(String)
+      if principal != manager["principal"] && manager["role"] != "owner"
+        return err(403, "not_a_manager", "Only an owner can issue a credential for someone else.")
+      end
+      info = principal_info(principal)
+      return err(400, "usage", "\"#{principal}\" is not an active account of this app.") unless info && info["active"]
+      agent_name, problem = parse_agent_name(body["agentName"])
+      return err(400, "usage", problem) if problem
+      parsed, problem = parse_grant_request(body)
+      return err(400, "usage", problem) if problem
+      token, grant = mint_credential(principal, agent_name, parsed["scopes"], parsed["expiresInSeconds"])
+      [201, { "a2app" => true, "token" => token, "credential" => credential_wire(grant, info["name"]) }]
+    end
+
+    def revoke_credential(headers, id)
+      grant = @store.grant_by_id(id)
+      return err(404, "not_found", "No credential \"#{id}\".") unless grant
+      if grant["admin"]
+        return err(403, "not_a_manager", "The admin credential is the app's .agent-token: rotate that file instead.")
+      end
+      # A credential may always revoke itself — the one thing an agent may do
+      # with credentials — so an agent can hand back access it no longer needs.
+      unless presented_grant(headers)&.fetch("credentialId") == id
+        manager, reply = manager_of(headers, true)
+        return reply if reply
+        if manager["role"] != "owner" && grant["principal"] != manager["principal"]
+          return err(404, "not_found", "No credential \"#{id}\".")
+        end
+      end
+      @store.put_grant(grant.merge("revokedAt" => now_iso)) if grant["revokedAt"].nil?
+      [200, { "a2app" => true, "ok" => true, "revoked" => id }]
+    end
+
+    # Route one request under /api/_a2app/credentials.
+    def handle_credentials(method, path, headers, body)
+      body = body.is_a?(Hash) ? body : {}
+      if path == "/api/_a2app/credentials"
+        return list_credentials(headers) if method == "GET"
+        return issue_credential(headers, body) if method == "POST"
+        return err(405, "usage", "#{method} not allowed on credentials.")
+      end
+      return err(405, "usage", "A credential is revoked with DELETE.") unless method == "DELETE"
+      revoke_credential(headers, unquote(path["/api/_a2app/credentials/".length..]))
+    end
+
+    # -- device-code sign-in (spec/v0_2/auth.md §7, RFC 8628 shape) ----------
+    #
+    #   POST /api/_a2app/auth/device               an agent asks; gets a code to show
+    #   GET  /api/_a2app/auth/device/{userCode}     the person reviews (a manager)
+    #   POST /api/_a2app/auth/device/{userCode}     the person approves or denies
+    #   POST /api/_a2app/auth/token                 the agent polls; gets its credential
+    #
+    # The person approves on the app's own account page, signed in as
+    # themselves; the credential issued acts for them, with the scopes they
+    # approved. No password or session ever reaches the agent. Codes live 10
+    # minutes, are single use, and the device code is stored only as its hash.
+    # Parity oracle: adapters/adapter-core/src/device.ts.
+
+    # Live rows as [key, row] pairs, dropping the expired as it goes.
+    def live_devices
+      t = now_ms
+      live, expired = @store.rows_of("devices").partition { |_key, row| ms_of(row["expiresAt"]) > t }
+      expired.each { |key, _row| @store.delete_row("devices", key) }
+      live
+    end
+
+    # The pending request a person typed the code of, as [key, row], or nil.
+    def device_by_user_code(input)
+      code = Auth.normalize_user_code(input)
+      return nil if code.empty?
+      live_devices.find { |_key, row| row["userCode"] == code && row["status"] == "pending" }
+    end
+
+    def start_device(headers, body)
+      parsed, problem = parse_grant_request(body)
+      return err(400, "usage", problem) if problem
+      agent_name = body["agentName"]
+      if body.key?("agentName") &&
+         (!agent_name.is_a?(String) || Auth.js_trim(agent_name).empty? || Auth.js_length(agent_name) > 100)
+        return err(400, "usage", "agentName is 1–100 characters.")
+      end
+      taken = live_devices.map { |_key, row| row["userCode"] }
+      user_code = Auth.new_user_code
+      user_code = Auth.new_user_code while taken.include?(user_code)
+      device_code = Auth.new_secret
+      t = now_ms
+      @store.put_row("devices", Auth.hash_secret(device_code), {
+        "userCode" => user_code, "agentName" => agent_name.is_a?(String) ? Auth.js_trim(agent_name) : nil,
+        # what the agent asked for, and the issued credential's lifetime
+        "scopes" => parsed["scopes"], "expiresInSeconds" => parsed["expiresInSeconds"],
+        # when the codes stop working
+        "createdAt" => iso_at(t), "expiresAt" => iso_at(t + CODE_TTL_SECONDS * 1000),
+        "interval" => POLL_INTERVAL_SECONDS, "lastPolledAt" => nil,
+        "status" => "pending", "approvedBy" => nil, "approvedScopes" => nil,
+      })
+      approve = "#{public_origin(headers)}#{ACCOUNT_URL}#approve"
+      [200, {
+        "a2app" => true, "deviceCode" => device_code, "userCode" => user_code,
+        "verificationUri" => approve, "verificationUriComplete" => "#{approve}/#{user_code}",
+        "expiresIn" => CODE_TTL_SECONDS, "interval" => POLL_INTERVAL_SECONDS,
+      }]
+    end
+
+    def poll_device(body)
+      device_code = body["deviceCode"]
+      return err(400, "usage", "Poll with { deviceCode }.") unless device_code.is_a?(String)
+      key = Auth.hash_secret(device_code)
+      # Single use: reading the row and acting on it are one step.
+      @auth_lock.synchronize do
+        row = @store.row("devices", key)
+        t = now_ms
+        if row.nil? || ms_of(row["expiresAt"]) <= t
+          @store.delete_row("devices", key) if row
+          return err(400, "expired_token", "This sign-in request expired or was already used. Start again.")
+        end
+        if row["status"] == "denied"
+          @store.delete_row("devices", key)
+          return err(400, "access_denied", "The person declined this agent's request.")
+        end
+        if row["status"] == "approved" && row["approvedBy"] && row["approvedScopes"]
+          # The row goes before the credential is handed out.
+          @store.delete_row("devices", key)
+          info = principal_info(row["approvedBy"])
+          return err(400, "access_denied", "The person who approved this is no longer active.") unless info && info["active"]
+          token, grant = mint_credential(row["approvedBy"], row["agentName"], row["approvedScopes"], row["expiresInSeconds"])
+          return [200, { "a2app" => true, "token" => token, "credential" => credential_wire(grant, info["name"]) }]
+        end
+        if row["lastPolledAt"] && t - row["lastPolledAt"] < row["interval"] * 1000
+          interval = row["interval"] + SLOW_DOWN_STEP_SECONDS
+          @store.put_row("devices", key, row.merge("interval" => interval, "lastPolledAt" => t))
+          return err(400, "slow_down", "Polling too fast: wait #{interval} s between polls.", "interval" => interval)
+        end
+        @store.put_row("devices", key, row.merge("lastPolledAt" => t))
+        err(400, "authorization_pending", "Waiting for the person to approve.", "interval" => row["interval"])
+      end
+    end
+
+    def review_device(headers, user_code)
+      _manager, reply = manager_of(headers, false)
+      return reply if reply
+      found = device_by_user_code(user_code)
+      unless found
+        return err(404, "device_code_invalid", "No sign-in request with that code is waiting: it was used, or it expired.")
+      end
+      row = found[1]
+      [200, { "a2app" => true, "userCode" => row["userCode"], "agentName" => row["agentName"], "scopes" => row["scopes"],
+              "expiresIn" => row["expiresInSeconds"], "expiresAt" => row["expiresAt"] }]
+    end
+
+    def decide_device(headers, body, user_code)
+      manager, reply = manager_of(headers, true)
+      return reply if reply
+      @auth_lock.synchronize do
+        found = device_by_user_code(user_code)
+        unless found
+          return err(404, "device_code_invalid", "No sign-in request with that code is waiting: it was used, or it expired.")
+        end
+        key, row = found
+        approve = body["approve"]
+        return err(400, "usage", "Decide with { approve: true | false }.") unless [true, false].include?(approve)
+        unless approve
+          @store.put_row("devices", key, row.merge("status" => "denied"))
+          return [200, { "a2app" => true, "ok" => true, "status" => "denied" }]
+        end
+        # The person may only narrow what was asked for.
+        scopes = row["scopes"]
+        if body.key?("scopes")
+          parsed, problem = parse_grant_request({ "scopes" => body["scopes"] })
+          return err(400, "usage", problem) if problem
+          asked = row["scopes"].include?("*") ? nil : row["scopes"]
+          wider = asked.nil? ? [] : parsed["scopes"].select { |s| s == "*" || !asked.include?(s) }
+          unless wider.empty?
+            return err(400, "usage", "Approval can only narrow what the agent asked for, not add #{wider.join(", ")}.")
+          end
+          scopes = parsed["scopes"]
+        end
+        @store.put_row("devices", key, row.merge("status" => "approved", "approvedBy" => manager["principal"],
+                                                 "approvedScopes" => scopes))
+        [200, { "a2app" => true, "ok" => true, "status" => "approved" }]
+      end
+    end
+
+    # Route one request under /api/_a2app/auth/, or nil.
+    def handle_device(method, path, headers, body)
+      body = body.is_a?(Hash) ? body : {}
+      if path == "/api/_a2app/auth/device"
+        return method == "POST" ? start_device(headers, body) : err(405, "usage", "Start a sign-in with POST.")
+      end
+      if path == "/api/_a2app/auth/token"
+        return method == "POST" ? poll_device(body) : err(405, "usage", "Poll with POST.")
+      end
+      return nil unless path.start_with?("/api/_a2app/auth/device/")
+      code = unquote(path["/api/_a2app/auth/device/".length..])
+      return review_device(headers, code) if method == "GET"
+      return decide_device(headers, body, code) if method == "POST"
+      err(405, "usage", "#{method} not allowed on a sign-in request.")
+    end
+
     # -- app -> agent -------------------------------------------------------
-    def trigger(etype, payload, capability = nil)
-      @store.trigger(etype, payload, capability)
+
+    # Emit a declared event and, with a capability, queue a task. `principal`
+    # is who asked for the work; work the app queues on its own has none and
+    # its agent acts as the owner.
+    def trigger(etype, payload, capability = nil, principal: nil)
+      @store.trigger(etype, payload, capability, principal: principal)
     end
   end
 
@@ -2076,11 +3259,151 @@ module A2appAdapter
                ["127.0.0.1", "http://localhost:9000"])
     check.call("a public URL that is not a URL is refused", policy.call(nil, "crm.example.com"), "refused")
 
+    # 7. Auth primitives (spec/v0_2/auth.md): the expected values are what
+    #    adapter-core's auth.ts produces, so a password set on one stack
+    #    signs in on every other, and a code or cookie reads the same.
+    check.call("a stored secret is its hex SHA-256", Auth.hash_secret("abc"),
+               "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    check.call("a token is a2a_ + 256 bits, base64url", Auth.new_token.match?(/\Aa2a_[A-Za-z0-9_-]{43}\z/), true)
+    # Produced by adapter-core's hashPassword("correct horse battery", 1000).
+    vector = "pbkdf2_sha256$1000$2sUk4tIcL7NboFK4NwYlkg==$nUNx8GkVexI8Drhlp/ZJQdZ8zjj6t3TymkkMvr+kIF8="
+    check.call("adapter-core's password hash verifies", Auth.verify_password("correct horse battery", vector), true)
+    check.call("…and refuses a wrong password", Auth.verify_password("correct horse batterY", vector), false)
+    stored = Auth.hash_password("a long enough password")
+    parts = stored.split("$")
+    check.call("a password is stored as pbkdf2_sha256 at 600 000 iterations",
+               [parts[0], parts[1], parts[2].unpack1("m").bytesize, parts[3].unpack1("m").bytesize],
+               ["pbkdf2_sha256", "600000", 16, 32])
+    check.call("…and verifies", Auth.verify_password("a long enough password", stored), true)
+    check.call("a malformed hash never matches", Auth.verify_password("x", "pbkdf2_sha256$0$AA==$AA=="), false)
+    check.call("…nor another scheme", Auth.verify_password("x", "md5$1$AA==$AA=="), false)
+    check.call("a user code is XXXX-XXXX from the consonant alphabet",
+               Auth.new_user_code.match?(/\A[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}\z/), true)
+    check.call("a typed code ignores case and the dash",
+               [Auth.normalize_user_code("bcdf-ghjk"), Auth.normalize_user_code(" b c d f g h j k ")],
+               ["BCDF-GHJK", "BCDF-GHJK"])
+    check.call("…and is empty when it is not 8 letters of the alphabet",
+               [Auth.normalize_user_code("bcdfghj"), Auth.normalize_user_code("AEIOUBCDFGHJK")], ["", "BCDF-GHJK"])
+    check.call("cookies: the first of a name wins, values are decoded",
+               Auth.parse_cookies("a=1; b=x%20y; a=2; =bad; c"), { "a" => "1", "b" => "x y", "" => "bad" })
+    check.call("…and a value this app did not write is dropped", Auth.parse_cookies("x=%E0%A4%A"), {})
+    check.call("the session cookie's attributes",
+               Auth.session_cookie("a2app_session_x", "v", max_age_seconds: 1_209_600, secure: true),
+               "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure")
+    check.call("a login is trimmed and lower-cased", Auth.normalize_login("  Bob@Example.COM "), "bob@example.com")
+    clock = 0
+    limiter = Auth::FailureLimiter.new(10, 900_000, -> { clock })
+    10.times { limiter.fail("bob") }
+    check.call("ten failures lock a login for the window", limiter.retry_after("bob"), 900)
+    clock = 900_000
+    check.call("…and the window ending frees it", limiter.retry_after("bob"), 0)
+
+    # 8. The ceiling, the refusals in spec §9's order, and ownership, through
+    #    dispatch on a multi-user app with two accounts.
+    owned_defs = { "tasks" => { "module" => "core", "ownedBy" => "owner", "fields" => [
+      { "name" => "title", "type" => "string" }, { "name" => "owner", "type" => "string", "readOnly" => true },
+    ] } }
+    multi = Adapter.new(app_id: "selftest", app_name: nil, entities: owned_defs, operations: [], store: Store.new,
+                        token: "admin-token", modules: [{ "name" => "core" }], auth_mode: "multi-user",
+                        allowed_origins: ["http://127.0.0.1:9931"],
+                        permissions_of: ->(p) { p["role"] == "owner" ? ["*"] : ["data:tasks:read"] })
+    mstore = multi.store
+    { "usr_o" => "owner", "usr_m" => "member" }.each do |id, role|
+      mstore.put_row("users", id, { "id" => id, "name" => role.capitalize, "login" => role, "role" => role,
+                                    "active" => true, "createdAt" => Rules.now_iso, "passwordHash" => "" })
+    end
+    mstore.put_record("tasks", { "id" => "t_o", "title" => "the owner's", "owner" => "usr_o" })
+    mstore.put_record("tasks", { "id" => "t_m", "title" => "the member's", "owner" => "usr_m" })
+    call = lambda do |method, path, headers = {}, body = nil|
+      multi.dispatch(method, path, { "host" => "127.0.0.1:9931" }.merge(headers), body)
+    end
+    admin = { "x-a2app-token" => "admin-token" }
+    issued = call.call("POST", "/api/_a2app/credentials", admin, { "principal" => "usr_m", "agentName" => "selftest" })
+    member = { "x-a2app-token" => issued[1]["token"] }
+    check.call("the admin credential issues for anyone, expiring", [issued[0], issued[1]["credential"]["principal"],
+                                                                   issued[1]["credential"]["expiresAt"].nil?],
+               [201, "usr_m", false])
+    check.call("only the token's hash is stored",
+               mstore.grant_by_token_hash(Auth.hash_secret(issued[1]["token"]))&.key?("token"), false)
+    who = call.call("GET", "/api/_a2app/whoami", member)[1]
+    check.call("a `*` credential is held to its person's permissions",
+               [who["principal"], who["principalName"], who["role"], who["scopes"]],
+               ["usr_m", "Member", "member", ["data:tasks:read"]])
+    check.call("…on every request", call.call("POST", "/api/collections/tasks/records", member, { "title" => "x" })[1]["code"],
+               "insufficient_scope")
+    check.call("a member lists only its own records",
+               call.call("GET", "/api/collections/tasks/records", member)[1]["items"].map { |r| r["id"] }, ["t_m"])
+    check.call("…and another's answers 404", call.call("GET", "/api/collections/tasks/records/t_o", member)[0], 404)
+    check.call("the owner sees every record",
+               call.call("GET", "/api/collections/tasks/records", admin)[1]["items"].map { |r| r["id"] }.sort, ["t_m", "t_o"])
+    created = call.call("POST", "/api/collections/tasks/records", admin, { "title" => "new" })[1]
+    check.call("create fills the owner field with the caller", created["owner"], "owner")
+    check.call("…which no client may write",
+               call.call("POST", "/api/collections/tasks/records", admin, { "title" => "y", "owner" => "usr_m" })[1]["code"],
+               "read_only_field")
+    check.call("an unknown token", call.call("GET", "/api/_a2app/whoami", { "x-a2app-token" => "a2a_nope" })[1]["code"],
+               "credential_invalid")
+    mstore.put_row("users", "usr_m", mstore.row("users", "usr_m").merge("active" => false))
+    check.call("a deactivated person's credential", call.call("GET", "/api/_a2app/whoami", member)[1]["code"],
+               "principal_inactive")
+    mstore.put_row("users", "usr_m", mstore.row("users", "usr_m").merge("active" => true))
+    grant = mstore.grant_by_id(issued[1]["credential"]["credentialId"])
+    mstore.put_grant(grant.merge("expiresAt" => "2020-01-01T00:00:00.000Z"))
+    check.call("an expired credential", call.call("GET", "/api/_a2app/whoami", member)[1]["code"], "token_expired")
+    mstore.put_grant(grant.merge("revokedAt" => Rules.now_iso, "expiresAt" => "2020-01-01T00:00:00.000Z"))
+    check.call("a revoked one says so before expired", call.call("GET", "/api/_a2app/whoami", member)[1]["code"],
+               "credential_revoked")
+    check.call("a stranger needs a credential", call.call("GET", "/api/collections/tasks/records")[1]["code"],
+               "agent_token_required")
+    check.call("…or, from the app's own page, to sign in",
+               call.call("GET", "/api/collections/tasks/records", { "sec-fetch-site" => "same-origin" })[1]["code"],
+               "sign_in_required")
+    other = call.call("POST", "/api/_a2app/credentials", admin, { "principal" => "usr_o" })[1]["token"]
+    check.call("an agent's credential manages nothing, even an owner's",
+               call.call("GET", "/api/_a2app/credentials", { "x-a2app-token" => other })[1]["code"], "not_a_manager")
+    check.call("the admin credential cannot be revoked through the API",
+               call.call("DELETE", "/api/_a2app/credentials/cred_local", admin)[1]["code"], "not_a_manager")
+    check.call("a scope the app does not declare is not granted",
+               call.call("POST", "/api/_a2app/credentials", admin, { "scopes" => ["data:nope:read"] })[0], 400)
+    check.call("the same request from two people is two tasks", [
+      mstore.trigger("t.x", { "a" => 1 }, "cap", principal: "usr_m")["taskId"] ==
+        mstore.trigger("t.x", { "a" => 1 }, "cap", principal: "usr_m")["taskId"],
+      mstore.trigger("t.x", { "a" => 1 }, "cap", principal: "usr_m")["taskId"] ==
+        mstore.trigger("t.x", { "a" => 1 }, "cap", principal: "usr_o")["taskId"],
+    ], [true, false])
+
+    # 9. A single-user app: the View reads as the owner, accounts do not exist,
+    #    and the model is refused when ownership or capabilities are miswired.
+    single = Adapter.new(app_id: "selftest", app_name: nil, entities: owned_defs, operations: [], store: Store.new,
+                         token: "admin-token", modules: [{ "name" => "core" }], allowed_origins: ["http://127.0.0.1:9931"])
+    view_read = single.dispatch("GET", "/api/_a2app/whoami", { "sec-fetch-site" => "same-origin" }, nil)[1]
+    check.call("the single-user View reads as the owner", [view_read["credentialId"], view_read["principal"]], ["ui", "owner"])
+    check.call("…a foreign page does not",
+               single.dispatch("GET", "/api/_a2app/whoami", { "origin" => "https://evil.example" }, nil)[1]["code"],
+               "forbidden_origin")
+    check.call("accounts exist only on a multi-user app",
+               single.dispatch("GET", "/api/_a2app/session", {}, nil)[1]["code"], "not_multi_user")
+    miswired = lambda do |defs, capabilities = nil|
+      Adapter.new(app_id: "selftest", app_name: nil, entities: defs, operations: [], store: Store.new, token: "t",
+                  modules: [{ "name" => "core" }], capabilities: capabilities)
+      "served"
+    rescue ArgumentError
+      "refused"
+    end
+    check.call("ownedBy must name a field", miswired.call({ "tasks" => owned_defs["tasks"].merge("ownedBy" => "nope") }),
+               "refused")
+    check.call("…a readOnly string one", miswired.call({ "tasks" => { "module" => "core", "ownedBy" => "owner",
+                                                                   "fields" => [{ "name" => "owner", "type" => "string" }] } }),
+               "refused")
+    check.call("a capability may only need declared scopes",
+               miswired.call(owned_defs, { "triage" => { "scopes" => ["data:nope:read"] } }), "refused")
+
     if failures.any?
       puts "a2app_adapter selftest FAILED:\n  - " + failures.join("\n  - ")
       return 1
     end
-    puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)"
+    puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, " \
+         "host and network policy, auth primitives, the ceiling and refusals, ownership)"
     0
   end
 end

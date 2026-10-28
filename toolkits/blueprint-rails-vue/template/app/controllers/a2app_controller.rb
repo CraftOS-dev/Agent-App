@@ -5,12 +5,14 @@
 # protocol; this controller only moves bytes. An agent evolves the app by
 # editing `lib/a2app_schema.rb` and the View in `ui/` — never this file.
 class A2appController < ActionController::Base
-  # No CSRF here, deliberately. CSRF tokens protect cookie-authenticated HTML
-  # forms; this is an API adapter surface with no session and no cookies. The
-  # adapter's own origin rule is the protection: a browser request carrying a
-  # foreign Origin is refused (403 forbidden_origin) before anything else runs,
-  # and agent writes authenticate with the x-a2app-token header a foreign page
-  # cannot read. A CSRF check would only 422 the app's own View.
+  # No Rails CSRF here, deliberately. Rails' tokens protect its own
+  # cookie-authenticated HTML forms; this is an API adapter surface, and the
+  # adapter carries its own protection: a browser request carrying a foreign
+  # Origin is refused (403 forbidden_origin) before anything else runs, a
+  # change made with a multi-user app's session cookie must carry the app's
+  # own Origin (the cookie is SameSite=Lax besides), and agent writes
+  # authenticate with the x-a2app-token header a foreign page cannot read. A
+  # Rails CSRF check would only 422 the app's own View.
   skip_forgery_protection
 
   # A protocol write is tiny; anything larger is a mistake or an attack.
@@ -19,25 +21,33 @@ class A2appController < ActionController::Base
   # envelope as @a2app/adapter-core's Node transport and the python blueprint.
   MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024
 
-  # /api/** — every A2App route (identity, describe, records, operations,
-  # tasks/events) goes through the adapter's own router.
+  # /api/** and /.well-known/a2app.json — every A2App route (identity,
+  # describe, records, operations, tasks/events, accounts, credentials,
+  # sign-in) goes through the adapter's own router, Host check first. A reply
+  # may set a header of its own: the session cookie.
   def handle
     body = nil
     if %w[POST PATCH PUT].include?(request.request_method)
       body, too_large = read_body
       return render json: too_large[1], status: too_large[0] if too_large
     end
-    status, payload = self.class.adapter.dispatch(
+    status, payload, headers = self.class.adapter.dispatch(
       request.request_method, request.path, a2app_headers, body, request.query_parameters
     )
+    (headers || {}).each { |name, value| response.headers[name] = value }
     render json: payload, status: status
   end
 
-  # /.well-known/a2app.json — the discovery document. The same identity the
-  # adapter serves at /api/_a2app (dispatch owns that route), including the
-  # appVersion the wiring's lambda contributes.
-  def identity
-    render json: self.class.adapter.identity
+  # /_a2app/account — the framework's account page: sign in, accept an
+  # invite, people (owner), the agents acting for you, approving an agent's
+  # sign-in. The same file in every blueprint, served from the project root;
+  # it speaks only the adapter's JSON routes. Answered only on the app's own
+  # hosts, like every adapter route.
+  def account_page
+    refused = self.class.adapter.host_refusal(a2app_headers)
+    return render json: refused[1], status: refused[0] if refused
+    response.headers["Cache-Control"] = "no-cache"
+    send_file Rails.root.join("a2app-account.html"), type: "text/html; charset=utf-8", disposition: "inline"
   end
 
   # /_a2app/update.js — the system-owned update watcher, served from the
@@ -61,11 +71,11 @@ class A2appController < ActionController::Base
     # identity's `appVersion`: a fingerprint of everything a browser tab is
     # actually running — the built View (public/**, sorted paths + contents),
     # the agent-owned schema (an operation's description changes what the app
-    # tells an agent, yet moves neither schemaVersion nor the View bytes) and
-    # the update watcher itself, salted with manifest.appVersion so an author
-    # can move the marker by hand. Recomputed at most once per second: every
-    # open tab polls identity, and hashing the whole View per probe would make
-    # the watcher the app's main workload.
+    # tells an agent, yet moves neither schemaVersion nor the View bytes), the
+    # update watcher and the account page, salted with manifest.appVersion so
+    # an author can move the marker by hand. Recomputed at most once per
+    # second: every open tab polls identity, and hashing the whole View per
+    # probe would make the watcher the app's main workload.
     def app_version
       VERSION_LOCK.synchronize do
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -97,10 +107,20 @@ class A2appController < ActionController::Base
         app_name: manifest["name"],
         entities: A2appSchema::ENTITIES,
         operations: A2appSchema::OPERATIONS,
-        # Durable store: records + idempotency keys in SQLite inside the
-        # lifecycle dataDir. Seeded only when this boot CREATED the file.
+        # Durable store: records, idempotency keys, credentials and accounts
+        # in SQLite inside the lifecycle dataDir. Seeded only when this boot
+        # CREATED the file.
         store: A2appAdapter::SqliteStore.new(File.join(data_dir, "db.sqlite"), A2appSchema::SEED),
+        # The app's own .agent-token is its admin credential (spec/v0_2/auth.md §2.3).
         token: agent_token,
+        # `multi-user` gives the app accounts, sign-in and per-person records;
+        # `none` is a personal tool with one principal, the owner.
+        auth_mode: manifest["authMode"] == "multi-user" ? "multi-user" : "none",
+        # What each person may do (spec/v0_2/auth.md §3), when the schema says;
+        # every agent acting for them is limited to the same.
+        permissions_of: A2appSchema.const_defined?(:PERMISSIONS_OF, false) ? A2appSchema::PERMISSIONS_OF : nil,
+        # What each capability's agent may do (spec/v0_2/auth.md §6.2).
+        capabilities: A2appSchema.const_defined?(:CAPABILITIES, false) ? A2appSchema::CAPABILITIES : {},
         # Modules are declared in the manifest and are what describe's root
         # level lists; every entity and operation names one.
         modules: manifest["modules"] || [],
@@ -143,7 +163,8 @@ class A2appController < ActionController::Base
           digest.update(File.binread(full))
         end
       end
-      [Rails.root.join("lib", "a2app_schema.rb"), Rails.root.join("a2app-update.js")].each do |extra|
+      [Rails.root.join("lib", "a2app_schema.rb"), Rails.root.join("a2app-update.js"),
+       Rails.root.join("a2app-account.html")].each do |extra|
         digest.update(File.binread(extra)) if File.exist?(extra)
       end
       "av_" + digest.hexdigest[0, 16]

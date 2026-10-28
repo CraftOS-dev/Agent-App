@@ -40,6 +40,7 @@ const toast = useToast();
 const { request: confirmRequest, confirm, done: confirmDone } = useConfirm();
 
 const appName = ref("Tasks");
+const accountUrl = ref(null);
 const items = ref([]);
 const totalItems = ref(0);
 const filter = ref("all");
@@ -108,6 +109,7 @@ onMounted(() => {
     .then((id) => {
       const name = id?.app?.name ?? "Tasks";
       appName.value = name;
+      accountUrl.value = id?.accountUrl ?? null;
       document.title = name;
     })
     .catch(() => {
@@ -366,7 +368,9 @@ const count = computed(() => {
 
     <footer class="app-footer">
       <span aria-live="polite">{{ count }}</span>
-      <span class="hint">Press / to add a task</span>
+      <span class="hint">
+        Press / to add a task<template v-if="accountUrl"> · <a :href="accountUrl">Account</a></template>
+      </span>
     </footer>
 
     <ConfirmDialog

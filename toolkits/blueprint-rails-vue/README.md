@@ -7,9 +7,10 @@ Layout:
 | Path | Ownership | Role |
 |---|---|---|
 | `config/application.rb`, `config/routes.rb`, `config/puma.rb` | system-owned (hash-locked) | the minimal Rails app: action_controller only, `public/` served with no-cache headers, loopback bind, headless boot (no credentials ritual) |
-| `app/controllers/a2app_controller.rb` | system-owned (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap, identity's `appVersion` fingerprint, the watcher route |
-| `lib/a2app_adapter.rb` | system-owned (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store + `--selftest` |
+| `app/controllers/a2app_controller.rb` | system-owned (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap, identity's `appVersion` fingerprint, the watcher and account-page routes |
+| `lib/a2app_adapter.rb` | system-owned (hash-locked) | the served surface (protocol 0.2: accounts, credentials, device sign-in, the user ceiling) + pure rules (parity with `@a2app/rules`) + the SQLite store + `--selftest` |
 | `a2app-update.js` | system-owned (hash-locked) | the View's update watcher, served at `/_a2app/update.js` |
+| `a2app-account.html` | system-owned (hash-locked) | the framework's account page (sign in, invites, people, connected agents), served at `/_a2app/account`; the same file in every blueprint |
 | `lib/a2app_schema.rb` | agent-owned | the data model + operations — edit this to evolve the app; `describe`/`schemaVersion` derive from it |
 | `ui/` | agent-owned | the human View: a Vue 3 app compiled by `vite build` into `public/` (git-ignored build output — never hand-edited) |
 | `ui/public/` | agent-owned | assets copied through the build verbatim — the kit token sheet (`tokens.css`) and component styles (`ui.css`) |

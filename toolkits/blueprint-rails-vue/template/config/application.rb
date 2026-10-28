@@ -41,11 +41,13 @@ module RailsVueAgentApp
 
     # No credentials ritual, on purpose. An Agent App must boot headlessly —
     # scaffolded, gated and served by a framework, with no human around to run
-    # `rails credentials:edit` or export a master key. This app also keeps no
-    # sessions and no cookies (the adapter's origin rule + agent token are the
-    # whole auth surface), so secret_key_base signs nothing that matters; it
-    # exists because Rails requires one to boot. Minted once into a
-    # git-ignored runtime file, overridable via ENV.
+    # `rails credentials:edit` or export a master key. Rails' own sessions and
+    # signed cookies are unused (the adapter's origin rule, its credentials
+    # and, on a multi-user app, its own random session secrets — stored as
+    # hashes, never signed by Rails — are the whole auth surface), so
+    # secret_key_base signs nothing that matters; it exists because Rails
+    # requires one to boot. Minted once into a git-ignored runtime file,
+    # overridable via ENV.
     config.secret_key_base = ENV.fetch("SECRET_KEY_BASE") do
       require "securerandom"
       file = root.join("tmp", "secret_key_base")

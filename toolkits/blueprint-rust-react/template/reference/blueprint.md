@@ -142,11 +142,24 @@ fn run_complete_task(args: &Value, _ctx: &Value, store: &mut Store) -> Result<Va
 ```
 
 - **Runner signature:** `fn(&Value, &Value, &mut Store) -> Result<Value, String>`
-  — (args, ctx, store) to a JSON-able result; an `Err` surfaces as a 500
-  `operation_failed` envelope. `store` is the SQLite-backed record store —
-  `list_records(entity, query)` · `get_record(entity, id)` ·
-  `put_record(entity, record)` · `delete_record(entity, id)`. Writes are
-  durable when the call returns; there is no separate persist() step.
+  — (args, ctx, store) to a JSON-able result; an `Err` (or a panic) surfaces
+  as a 500 `operation_failed` envelope, and the app carries on. `store` is the
+  SQLite-backed record store — `list_records(entity, query)` ·
+  `get_record(entity, id)` · `put_record(entity, record)` ·
+  `delete_record(entity, id)`. Writes are durable when the call returns; there
+  is no separate persist() step.
+- **To refuse a call with a code of your own**, return
+  `Result<Value, OperationError>` and declare `operation_runner` as
+  `-> Option<Runner<OperationError>>` (every runner then uses it; `?` on a
+  `String` error still works and is still a 500).
+  `Err(OperationError::new("over_budget", "That would go over budget.").status(402).with("limit", json!(3)))`
+  answers 402 with that `code`, `message` and `limit` — 400 when no status is
+  set.
+- **Arguments are guarded before your runner sees them**, by the same rules as
+  a record write: an undeclared, ill-typed or missing `required` parameter is
+  a 400 (`unknown_field`, `invalid_*`, `missing_required`), and nothing runs —
+  not even the approval prompt of a destructive operation. A caller's
+  `Idempotency-Key` makes a repeat a `409 duplicate_request`.
 - **A fetched record is a COPY** — mutate it, then `put_record` it back, or
   the change never happened.
 - **`params` is REQUIRED and typed** (same vocabulary as fields); use `{}` for

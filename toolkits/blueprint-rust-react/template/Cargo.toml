@@ -11,7 +11,10 @@ publish = false
 [dependencies]
 tiny_http = "0.12"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: an object keeps its keys in the order they arrived, as a
+# JavaScript object does — the guard reports a body's violations in body order
+# and describe lists entities in declaration order, both as adapter-core does.
+serde_json = { version = "1", features = ["preserve_order"] }
 # "bundled" compiles SQLite in, so the app needs no system library — the first
 # build is slow for exactly that reason, and fast ever after.
 rusqlite = { version = "0.32", features = ["bundled"] }

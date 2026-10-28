@@ -15,33 +15,39 @@
 //! device-code sign-in. Parity oracle: adapters/adapter-core/src (auth.ts,
 //! accounts.ts, credentials.ts, device.ts, server.ts).
 //!
-//! The pure validation rules below MUST match `@a2app/rules` (behavioral
-//! oracle: the python-fastapi blueprint's `a2app_adapter.py`) so a Rust app and
-//! a Node app reject identical payloads identically — verified by the
-//! conformance suite. HTTP wiring lives in `main.rs`; this file never touches
-//! the network. An agent evolves the app by editing `schema.rs`, never this
-//! file.
+//! The pure validation rules below MUST match `@a2app/rules`
+//! (adapters/rules/src) so a Rust app and a Node app reject identical payloads
+//! identically — verified by the conformance suites. adapter-core is
+//! TypeScript, so where its behaviour is JavaScript's (how `Number()` reads
+//! text, how `String()` and `JSON.stringify` write numbers, what `Object.keys`
+//! sees in a body that is not an object) this port reproduces JavaScript's
+//! rules; see "JavaScript semantics" below. HTTP wiring lives in `main.rs`;
+//! this file never touches the network. An agent evolves the app by editing
+//! `schema.rs`, never this file.
 //!
-//! Everything is plumbed as owned `serde_json::Value`s on serde_json's DEFAULT
-//! map (BTreeMap-backed, keys sorted) — sorted keys are what makes the stable
-//! JSON the fingerprint and approval key need trivial. Do not enable
-//! `preserve_order`.
+//! Everything is plumbed as owned `serde_json::Value`s with `preserve_order`:
+//! an object keeps its keys in arrival order, as a JavaScript object does, so a
+//! body's violations come back in body order and entities in declaration
+//! order. Where a key order must not matter (the fingerprint, the approval
+//! key, dedup keys) `stable_json` sorts explicitly.
 
 // The port is kept whole — every error code, and the app->agent trigger — even
 // where this starter does not exercise a corner yet; dead-code warnings on a
 // deliberately complete protocol surface would train readers to ignore them.
 #![allow(dead_code)]
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::net::IpAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64URL};
 use base64::Engine;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -50,8 +56,8 @@ pub const RULES_VERSION: &str = "0.1.0";
 pub const PROTOCOL_VERSION: &str = "0.2";
 pub const ADAPTER_VERSION: &str = "0.1.0";
 
-// Error codes — identical strings to ERROR_CODES in the python oracle and
-// @a2app/rules. Every rejection envelope carries one of these.
+// Error codes — identical strings to ERROR_CODES in @a2app/rules. Every
+// rejection envelope carries one of these.
 pub const ERR_UNKNOWN_FIELD: &str = "unknown_field";
 pub const ERR_READ_ONLY_FIELD: &str = "read_only_field";
 pub const ERR_INVALID_DATE: &str = "invalid_date";
@@ -60,6 +66,8 @@ pub const ERR_INVALID_STRING: &str = "invalid_string";
 pub const ERR_INVALID_NUMBER: &str = "invalid_number";
 pub const ERR_INVALID_BOOLEAN: &str = "invalid_boolean";
 pub const ERR_INVALID_ENUM: &str = "invalid_enum";
+pub const ERR_MISSING_REQUIRED: &str = "missing_required";
+pub const ERR_INVALID_FILTER: &str = "invalid_filter";
 pub const ERR_NOT_STORED: &str = "not_stored";
 pub const ERR_DUPLICATE_REQUEST: &str = "duplicate_request";
 pub const ERR_APPROVAL_REQUIRED: &str = "approval_required";
@@ -104,7 +112,29 @@ pub const TASK_MAX_DELIVERIES: u64 = 5;
 /// issued for it.
 const TERMINAL_TASK: [&str; 3] = ["completed", "failed", "canceled"];
 
+/// Adapter state that outlives a request, with adapter-core's bounds: an
+/// idempotency key holds for at least a day, an approval key for ten minutes,
+/// and the event log and the audit log are rings of the newest 5000 rows. An
+/// event's `seq` keeps counting across a prune, so a saved cursor stays good.
+const IDEMPOTENCY_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+const APPROVAL_TTL_MS: i64 = 10 * 60 * 1000;
+const EVENT_RETENTION: i64 = 5000;
+const AUDIT_RETENTION: i64 = 5000;
+
+/// A tab's heartbeat (its update watcher's identity poll) counts it as a
+/// viewer for this long; the table is pruned once it holds more than the cap.
+const VIEWER_TTL_MS: i64 = 60_000;
+const VIEWER_CAP: usize = 1_000;
+const VIEWER_ID_MAX: usize = 64;
+
 pub const DESCRIBE_BUDGET_CHARS: usize = 2000;
+
+/// A miss inside the adapter's own namespaces names the routes that answer.
+const UNKNOWN_ROUTE_MESSAGE: &str =
+    "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.";
+/// Path prefixes the adapter owns outright: a miss below one is its 404, while
+/// anything else is the View's.
+const ADAPTER_NAMESPACES: [&str; 3] = ["/api/_a2app", "/api/ops", "/api/collections"];
 
 // --- principals, credentials, accounts (spec/v0_2/auth.md); the values are
 // adapter-core's.
@@ -148,6 +178,13 @@ const AGENT_NAME_MAX: usize = 100;
 const DEVICE_CODE_TTL_SECONDS: i64 = 600;
 const DEVICE_POLL_INTERVAL_SECONDS: i64 = 5;
 const DEVICE_SLOW_DOWN_STEP_SECONDS: i64 = 5;
+/// Wrong confirmation codes a sign-in request survives before it is void.
+const DEVICE_CONFIRM_ATTEMPTS: i64 = 5;
+/// Where an agent on the person's own computer waits for the confirmation
+/// (RFC 8252): `http://127.0.0.1:<loopbackPort>` + this.
+const LOOPBACK_CALLBACK: &str = "/a2app/callback";
+const LOOPBACK_PORT_MIN: f64 = 1024.0;
+const LOOPBACK_PORT_MAX: f64 = 65535.0;
 
 /// One protocol reply: HTTP status plus the JSON payload.
 pub type Reply = (u16, Value);
@@ -160,18 +197,33 @@ pub struct Answer {
     pub headers: Vec<(String, String)>,
 }
 
+impl Answer {
+    fn of((status, json): Reply) -> Answer {
+        Answer { status, json, headers: Vec::new() }
+    }
+}
+
+/// What a panic said, as a thrown error's message would: the runner's or the
+/// adapter's own words when it gave some.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "it panicked".to_string())
+}
+
 // ------------------------------------------------------------ small helpers
 
-/// Python truthiness for a JSON value — the oracle leans on `if x.get(...)` in
-/// many places, so the port needs the same notion of "present and non-empty".
+/// JavaScript truthiness: what `if (x.flag)` means in the reference. Only
+/// null, false, 0 and "" are falsy — an empty list or object is truthy.
 fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
         Value::Number(n) => n.as_f64().map_or(false, |f| f != 0.0),
         Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
     }
 }
 
@@ -183,35 +235,334 @@ fn get_str<'a>(v: &'a Value, key: &str) -> &'a str {
     get(v, key).as_str().unwrap_or("")
 }
 
-/// Python's `str()` for the JSON values that reach it in the oracle (enum
-/// comparison, sort keys, blocker ids). Floats that carry no fraction render
-/// "1.0" the way Python does; containers fall back to stable JSON — the oracle
-/// would render Python repr there, but no declared vocabulary puts a container
-/// through these paths.
-fn py_str(v: &Value) -> String {
-    match v {
-        Value::Null => "None".to_string(),
-        Value::Bool(b) => (if *b { "True" } else { "False" }).to_string(),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i.to_string()
-            } else if let Some(f) = n.as_f64() {
-                if f.is_finite() && f.fract() == 0.0 {
-                    format!("{f:.1}")
-                } else {
-                    format!("{f}")
-                }
-            } else {
-                n.to_string()
+fn is_blank(v: &Value) -> bool {
+    v.is_null() || v.as_str() == Some("")
+}
+
+/// A non-empty list (`x && x.length` in the reference).
+fn non_empty_list(v: &Value) -> Option<&Vec<Value>> {
+    v.as_array().filter(|a| !a.is_empty())
+}
+
+// ------------------------------------------------------ JavaScript semantics
+//
+// adapter-core is TypeScript, so its observable behaviour is JavaScript's.
+// These reproduce exactly the parts a client can see: how `Number("…")` reads
+// text, how `String(x)` and `JSON.stringify` write a number (`1`, not `1.0`),
+// how strings compare (UTF-16 code units), and what `Object.keys` finds in a
+// request body that is not an object.
+
+/// JavaScript's WhiteSpace and LineTerminator characters: what `trim()` and
+/// `Number()` strip. (Not Rust's `char::is_whitespace`, which differs on
+/// U+0085 and U+FEFF.)
+fn is_js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{9}'..='\u{d}'
+            | ' '
+            | '\u{a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+/// `String.prototype.trim`.
+fn js_trim(s: &str) -> &str {
+    s.trim_matches(is_js_space)
+}
+
+/// `Number(text)`: a JavaScript numeric literal (decimal, `0x`/`0o`/`0b`, or
+/// `Infinity`), surrounded by optional white space; blank is 0; anything else
+/// is NaN.
+pub fn js_number(text: &str) -> f64 {
+    let s = js_trim(text);
+    if s.is_empty() {
+        return 0.0;
+    }
+    match s {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0o", 8), ("0O", 8), ("0b", 2), ("0B", 2)] {
+        if let Some(digits) = s.strip_prefix(prefix) {
+            if digits.is_empty() {
+                return f64::NAN;
             }
+            return digits
+                .chars()
+                .try_fold(0f64, |n, c| c.to_digit(radix).map(|d| n * f64::from(radix) + f64::from(d)))
+                .unwrap_or(f64::NAN);
         }
-        Value::String(s) => s.clone(),
-        other => stable_json(other),
+    }
+    // [+-] (digits [. digits] | . digits) [(e|E) [+-] digits] — checked by hand,
+    // because Rust's own parser also takes "inf" and "nan", which are NaN here.
+    let b = s.as_bytes();
+    let digits_from = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        i
+    };
+    let mut i = usize::from(matches!(b[0], b'+' | b'-'));
+    let int_end = digits_from(i);
+    let mut mantissa = int_end - i;
+    i = int_end;
+    if b.get(i) == Some(&b'.') {
+        let frac_end = digits_from(i + 1);
+        mantissa += frac_end - (i + 1);
+        i = frac_end;
+    }
+    if mantissa == 0 {
+        return f64::NAN;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let start = i + 1 + usize::from(matches!(b.get(i + 1), Some(b'+' | b'-')));
+        let end = digits_from(start);
+        if end == start {
+            return f64::NAN;
+        }
+        i = end;
+    }
+    if i != b.len() {
+        return f64::NAN;
+    }
+    s.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// `Number.prototype.toString()`: the shortest digits that read back as the
+/// same number, laid out as ECMAScript lays them out (`1`, `0.5`, `1e+21`,
+/// `1.5e-7`).
+pub fn js_number_string(n: f64) -> String {
+    if n.is_nan() {
+        return "NaN".to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if n.is_infinite() {
+        return (if n > 0.0 { "Infinity" } else { "-Infinity" }).to_string();
+    }
+    // `{:e}` is Rust's shortest round-trip form: "1.5e-7", "1e21", "1.23e2".
+    let sci = format!("{:e}", n.abs());
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i64;
+    // ECMAScript's `n`: where the decimal point falls relative to the digits.
+    let point = exponent.parse::<i64>().unwrap_or(0) + 1;
+    let body = if k <= point && point <= 21 {
+        format!("{digits}{}", "0".repeat((point - k) as usize))
+    } else if 0 < point && point <= 21 {
+        format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
+    } else if -6 < point && point <= 0 {
+        format!("0.{}{digits}", "0".repeat((-point) as usize))
+    } else {
+        let e = point - 1;
+        let e = if e < 0 { format!("-{}", -e) } else { format!("+{e}") };
+        if k == 1 {
+            format!("{digits}e{e}")
+        } else {
+            format!("{}.{}e{e}", &digits[..1], &digits[1..])
+        }
+    };
+    format!("{}{body}", if n < 0.0 { "-" } else { "" })
+}
+
+/// A JSON number as JavaScript holds it: a double.
+fn js_value_number(n: &serde_json::Number) -> f64 {
+    n.as_f64().unwrap_or(f64::NAN)
+}
+
+/// A double as a JSON value, written the way JavaScript would serialize it: a
+/// whole number stays whole (`2`, not `2.0`), and NaN or an infinity — which
+/// JSON cannot carry — is null.
+fn json_number(n: f64) -> Value {
+    if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0 {
+        json!(n as i64)
+    } else {
+        serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
     }
 }
 
-fn is_blank(v: &Value) -> bool {
-    v.is_null() || v.as_str() == Some("")
+/// `String(value)`.
+fn js_string(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => js_number_string(js_value_number(n)),
+        Value::String(s) => s.clone(),
+        // Array.prototype.join: a null element is written as nothing.
+        Value::Array(items) => {
+            items.iter().map(|i| if i.is_null() { String::new() } else { js_string(i) }).collect::<Vec<_>>().join(",")
+        }
+        Value::Object(_) => "[object Object]".to_string(),
+    }
+}
+
+/// `values.join(sep)` for a declared list of values.
+fn js_join(values: &[Value], sep: &str) -> String {
+    values.iter().map(|v| if v.is_null() { String::new() } else { js_string(v) }).collect::<Vec<_>>().join(sep)
+}
+
+/// JavaScript's string order: by UTF-16 code unit.
+fn js_cmp(a: &str, b: &str) -> Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
+/// Sort strings as JavaScript's default `sort()` does.
+fn js_sort(items: &mut [String]) {
+    items.sort_by(|a, b| js_cmp(a, b));
+}
+
+/// A canonical array index ("0", "7", not "07"): JavaScript lists these keys
+/// first, in numeric order, ahead of every other key.
+fn array_index(key: &str) -> Option<u32> {
+    if key != "0" && (key.starts_with('0') || key.is_empty()) {
+        return None;
+    }
+    key.parse::<u32>().ok().filter(|i| *i < u32::MAX && key.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// An object's keys in JavaScript's own-key order.
+fn js_key_order(map: &Map<String, Value>) -> Vec<(&String, &Value)> {
+    let (mut indexed, named): (Vec<_>, Vec<_>) = map.iter().partition(|(k, _)| array_index(k).is_some());
+    indexed.sort_by_key(|(k, _)| array_index(k));
+    indexed.into_iter().chain(named).collect()
+}
+
+/// What `Object.keys(body)` and `body[key]` see — how the reference walks a
+/// request body: an object's own keys; an array's or a string's indices; and
+/// nothing at all for a number, a boolean or null.
+fn js_object(body: &Value) -> Map<String, Value> {
+    match body {
+        Value::Object(map) => js_key_order(map).into_iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Value::Array(items) => items.iter().enumerate().map(|(i, v)| (i.to_string(), v.clone())).collect(),
+        Value::String(s) => s
+            .encode_utf16()
+            .enumerate()
+            .map(|(i, unit)| (i.to_string(), json!(String::from_utf16_lossy(&[unit]))))
+            .collect(),
+        _ => Map::new(),
+    }
+}
+
+fn write_json(v: &Value, sorted: bool, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => {
+            let f = js_value_number(n);
+            out.push_str(&if f.is_finite() { js_number_string(f) } else { "null".to_string() });
+        }
+        // serde_json escapes exactly what JSON.stringify and RFC 8785 escape.
+        Value::String(s) => out.push_str(&serde_json::to_string(s).unwrap_or_default()),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json(item, sorted, out);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            let mut entries = js_key_order(map);
+            if sorted {
+                entries.sort_by(|a, b| js_cmp(a.0, b.0));
+            }
+            out.push('{');
+            for (i, (key, item)) in entries.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                out.push(':');
+                write_json(item, sorted, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// `JSON.stringify(value)`: keys in their own order, numbers as JavaScript
+/// writes them.
+pub fn js_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_json(value, false, &mut out);
+    out
+}
+
+/// JSON with object keys sorted (by UTF-16 code unit) at every depth, so two
+/// equal values that differ only in key order serialize identically. For the
+/// JSON value subset A2App carries this IS RFC 8785 (JCS): the approval key and
+/// the dedup key are hashed over it, so they match adapter-core's exactly.
+pub fn stable_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_json(value, true, &mut out);
+    out
+}
+
+/// `items.slice(start, end)` with JavaScript's argument rules: a fraction is
+/// truncated, NaN is 0, and a negative position counts from the end.
+fn js_slice<T: Clone>(items: &[T], start: f64, end: f64) -> Vec<T> {
+    let len = items.len() as f64;
+    let at = |x: f64| -> usize {
+        let x = if x.is_nan() { 0.0 } else { x.trunc() };
+        (if x < 0.0 { (len + x).max(0.0) } else { x.min(len) }) as usize
+    };
+    let (from, to) = (at(start), at(end));
+    if to <= from {
+        Vec::new()
+    } else {
+        items[from..to].to_vec()
+    }
+}
+
+/// `n.toString(36)`.
+fn base36(mut n: u64) -> String {
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit((n % 36) as u32, 36).unwrap_or('0'));
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    digits.iter().rev().collect()
+}
+
+/// The cap on app-supplied text forwarded into an agent's context: long
+/// enough for a real hint, far too short to carry a payload of instructions.
+const APP_TEXT_MAX: usize = 300;
+
+/// Text the APP supplied (its `credentialHint`), bounded before it reaches an
+/// agent: one line, at most 300 characters, and a cut is marked with how much
+/// went. None for blank text, so the framework's own sentence is used instead.
+/// Parity oracle: `boundAppText` in adapter-core's agentText.ts.
+fn bound_app_text(value: &str) -> Option<String> {
+    let single = value.split(is_js_space).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    if single.is_empty() {
+        return None;
+    }
+    let length = js_len(&single);
+    if length <= APP_TEXT_MAX {
+        return Some(single);
+    }
+    // The marker counts towards the cap and its own length changes the count it
+    // reports; three passes reach the fixed point.
+    let mut suffix = String::new();
+    for _ in 0..3 {
+        suffix = format!(" [truncated by adapter, {} chars cut]", length - APP_TEXT_MAX + js_len(&suffix));
+    }
+    let kept: Vec<u16> = single.encode_utf16().take(APP_TEXT_MAX.saturating_sub(js_len(&suffix))).collect();
+    Some(String::from_utf16_lossy(&kept) + &suffix)
 }
 
 // --------------------------------------------------------------- pure rules
@@ -229,7 +580,7 @@ fn valid_ymd(y: i64, m: u32, d: u32) -> bool {
     d <= mx
 }
 
-/// Hand-rolled equivalent of the oracle's `_DATE_RE`:
+/// Hand-rolled equivalent of @a2app/rules' `looksLikeDate` pattern:
 /// `^(\d{4})-(\d{2})-(\d{2})([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?\s*(Z|[+-]\d{2}:?\d{2})?$`
 /// plus the calendar check. Hand-parsed so the stack needs no regex crate.
 pub fn looks_like_date(v: &Value) -> bool {
@@ -273,9 +624,10 @@ pub fn looks_like_date(v: &Value) -> bool {
             }
         }
     }
-    // Optional whitespace, then an optional zone (Z, +HH:MM or +HHMM), then end.
-    while i < b.len() && (b[i] as char).is_ascii_whitespace() {
-        i += 1;
+    // Optional white space (`\s`, JavaScript's), then an optional zone (Z,
+    // +HH:MM or +HHMM), then end.
+    while let Some(c) = s[i..].chars().next().filter(|c| is_js_space(*c)) {
+        i += c.len_utf8();
     }
     if i < b.len() {
         if b[i] == b'Z' {
@@ -325,19 +677,14 @@ fn violation(code: &str, field: &str, expected: String, got: &Value) -> Value {
     json!({ "code": code, "field": field, "expected": expected, "got": got })
 }
 
-fn is_number_string(s: &str) -> bool {
-    // Mirrors Python's float(): leading/trailing whitespace tolerated.
-    !s.trim().is_empty() && s.trim().parse::<f64>().is_ok()
-}
-
-/// Validate a RAW body against normalized fields; returns every violation.
+/// Validate a RAW body against normalized fields; returns every violation, in
+/// body order. Parity oracle: `validate` in @a2app/rules.
 ///
-/// One quirk is ported deliberately: the oracle's number check is
-/// `isinstance(value, (int, float))`, and a Python bool IS an int — so a JSON
-/// boolean passes a `number` field's guard there, and it passes here too.
-pub fn validate(fields: &Value, body: &Value, allow: Option<&Value>) -> Vec<Value> {
-    let empty = Map::new();
-    let body_map = body.as_object().unwrap_or(&empty);
+/// `allow` names extra keys accepted without being fields. `require_required`
+/// is set on a create only: a required field that is absent is then
+/// `missing_required` too. (One that is present but blank is refused on any
+/// write: clearing it would leave a record the schema says cannot exist.)
+pub fn validate(fields: &Value, body: &Value, allow: Option<&Value>, require_required: bool) -> Vec<Value> {
     let field_list: Vec<&Value> = fields.as_array().map(|a| a.iter().collect()).unwrap_or_default();
     let by_name: HashMap<&str, &Value> = field_list.iter().map(|f| (get_str(f, "name"), *f)).collect();
     let writable: Vec<&str> = field_list
@@ -345,82 +692,124 @@ pub fn validate(fields: &Value, body: &Value, allow: Option<&Value>) -> Vec<Valu
         .filter(|f| !truthy(get(f, "readOnly")))
         .map(|f| get_str(f, "name"))
         .collect();
+    let body = js_object(body);
     let mut out = Vec::new();
-    for (key, value) in body_map {
+    for (key, value) in &body {
         if allow.map_or(false, |a| truthy(get(a, key))) {
             continue;
         }
-        let f = match by_name.get(key.as_str()) {
-            Some(f) => *f,
-            None => {
-                out.push(violation(ERR_UNKNOWN_FIELD, key, format!("one of: {}", writable.join(", ")), value));
-                continue;
-            }
+        let Some(f) = by_name.get(key.as_str()).copied() else {
+            // "one of: " with nothing after it would read as a truncated
+            // message rather than as the answer it is.
+            let accepted = if writable.is_empty() {
+                "nothing — no writable fields are declared".to_string()
+            } else {
+                format!("one of: {}", writable.join(", "))
+            };
+            out.push(violation(ERR_UNKNOWN_FIELD, key, accepted, value));
+            continue;
         };
         if truthy(get(f, "readOnly")) {
             out.push(violation(ERR_READ_ONLY_FIELD, key, "not writable (server-managed)".to_string(), value));
             continue;
         }
         if is_blank(value) {
+            if truthy(get(f, "required")) {
+                out.push(violation(ERR_MISSING_REQUIRED, key, "a non-blank value (required field)".to_string(), value));
+            }
             continue;
         }
         let ftype = get_str(f, "type");
-        let values = get(f, "values");
         if ftype == "datetime" && !looks_like_date(value) {
             out.push(violation(ERR_INVALID_DATE, key, "an ISO 8601 date".to_string(), value));
-        } else if truthy(get(f, "dayKey")) && !is_day_key_value(value) {
+            continue;
+        }
+        if truthy(get(f, "dayKey")) && !is_day_key_value(value) {
             out.push(violation(ERR_INVALID_DAYKEY, key, "a day key \"YYYY-MM-DD\"".to_string(), value));
-        } else if ftype == "string" && !value.is_string() {
-            out.push(violation(ERR_INVALID_STRING, key, "text".to_string(), value));
-        } else if ftype == "number"
+            continue;
+        }
+        if ftype == "string" {
+            let Some(text) = value.as_str() else {
+                out.push(violation(ERR_INVALID_STRING, key, "text".to_string(), value));
+                continue;
+            };
+            // `max` is published in describe, so a client plans against it:
+            // length in UTF-16 code units, as JavaScript counts it.
+            if let Some(max) = get(f, "max").as_f64() {
+                if js_len(text) as f64 > max {
+                    let expected = format!("text of at most {} characters", js_number_string(max));
+                    out.push(violation(ERR_INVALID_STRING, key, expected, value));
+                    continue;
+                }
+            }
+        }
+        // A JSON number, or text that reads as one. A boolean is neither.
+        if ftype == "number"
             && !value.is_number()
-            && !value.is_boolean()
-            && !value.as_str().map_or(false, is_number_string)
+            && !value.as_str().map_or(false, |s| !js_trim(s).is_empty() && !js_number(s).is_nan())
         {
             out.push(violation(ERR_INVALID_NUMBER, key, "a number".to_string(), value));
-        } else if ftype == "boolean"
-            && !value.is_boolean()
-            && value.as_str() != Some("true")
-            && value.as_str() != Some("false")
-        {
+            continue;
+        }
+        if ftype == "boolean" && !value.is_boolean() && value != "true" && value != "false" {
             out.push(violation(ERR_INVALID_BOOLEAN, key, "true or false".to_string(), value));
-        } else if ftype == "enum" && truthy(values) {
-            let allowed: Vec<String> = values.as_array().map(|a| a.iter().map(py_str).collect()).unwrap_or_default();
-            if !allowed.contains(&py_str(value)) {
-                out.push(violation(ERR_INVALID_ENUM, key, format!("one of: {}", allowed.join(" | ")), value));
+            continue;
+        }
+        let values = non_empty_list(get(f, "values"));
+        if let (Some(values), "enum") = (values, ftype) {
+            if !values.iter().any(|v| js_string(v) == js_string(value)) {
+                out.push(violation(ERR_INVALID_ENUM, key, format!("one of: {}", js_join(values, " | ")), value));
+                continue;
             }
-        } else if ftype == "list<enum>" && truthy(values) {
-            let allowed: Vec<String> = values.as_array().map(|a| a.iter().map(py_str).collect()).unwrap_or_default();
-            let items: Vec<&Value> = match value.as_array() {
-                Some(a) => a.iter().collect(),
-                None => vec![value],
+        }
+        if let (Some(values), "list<enum>") = (values, ftype) {
+            // The wire form of a list is an array: wrapping a bare scalar would
+            // hide a client bug and make the stored shape depend on how many
+            // values happened to be sent.
+            let Some(items) = value.as_array() else {
+                out.push(violation(ERR_INVALID_ENUM, key, format!("an array of: {}", js_join(values, " | ")), value));
+                continue;
             };
-            if items.iter().any(|i| !allowed.contains(&py_str(i))) {
-                out.push(violation(ERR_INVALID_ENUM, key, format!("each of: {}", allowed.join(" | ")), value));
+            if items.iter().any(|item| !values.iter().any(|v| js_string(v) == js_string(item))) {
+                out.push(violation(ERR_INVALID_ENUM, key, format!("each of: {}", js_join(values, " | ")), value));
+                continue;
+            }
+        }
+    }
+    // A create that leaves a required field out entirely. One sent blank was
+    // reported above; reporting both would list one mistake twice.
+    if require_required {
+        for f in &field_list {
+            if truthy(get(f, "required")) && !truthy(get(f, "readOnly")) && !body.contains_key(get_str(f, "name")) {
+                out.push(violation(
+                    ERR_MISSING_REQUIRED,
+                    get_str(f, "name"),
+                    "a non-blank value (required field)".to_string(),
+                    &Value::Null,
+                ));
             }
         }
     }
     out
 }
 
-/// Read-back backstop: which non-blank requested values failed to land?
+/// Read-back backstop: which non-blank requested values failed to land? A
+/// write-only field (a password) is never read back, so it is exempt.
 pub fn divergences<F: Fn(&str) -> Value>(fields: &Value, body: &Value, read: F) -> Vec<Value> {
-    let empty = Map::new();
-    let body_map = body.as_object().unwrap_or(&empty);
-    let field_list: Vec<&Value> = fields.as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    let by_name: HashMap<&str, &Value> = field_list.iter().map(|f| (get_str(f, "name"), *f)).collect();
+    let by_name: HashMap<&str, &Value> =
+        fields.as_array().map(|a| a.iter().map(|f| (get_str(f, "name"), f)).collect()).unwrap_or_default();
     let mut out = Vec::new();
-    for (key, requested) in body_map {
+    for (key, requested) in js_object(body) {
         let f = match by_name.get(key.as_str()) {
-            Some(f) if !truthy(get(f, "readOnly")) => *f,
+            Some(f) if !truthy(get(f, "readOnly")) && !truthy(get(f, "writeOnly")) => *f,
             _ => continue,
         };
-        if is_blank(requested) {
+        if is_blank(&requested) {
             continue;
         }
-        let stored = read(key);
+        let stored = read(&key);
         if is_blank(&stored) {
-            out.push(json!({ "field": key, "type": get_str(f, "type"), "stored": py_str(&stored) }));
+            out.push(json!({ "field": key, "type": get(f, "type"), "stored": js_string(&stored) }));
         }
     }
     out
@@ -448,7 +837,7 @@ pub fn label_field_of(fields: &Value) -> Option<String> {
 /// describe against this value is told never to write against a stale schema,
 /// so narrowing an enum or tightening a max has to move the hash.
 fn field_print(f: &Value) -> String {
-    let mut parts = vec![format!("{}:{}", get_str(f, "name"), get_str(f, "type"))];
+    let mut parts = vec![format!("{}:{}", js_string(get(f, "name")), js_string(get(f, "type")))];
     if truthy(get(f, "required")) {
         parts.push("req".to_string());
     }
@@ -461,28 +850,19 @@ fn field_print(f: &Value) -> String {
     if truthy(get(f, "dayKey")) {
         parts.push("day".to_string());
     }
-    if !get(f, "max").is_null() {
-        parts.push(format!("max={}", py_str(get(f, "max"))));
+    if let Some(max) = get(f, "max").as_f64() {
+        parts.push(format!("max={}", js_number_string(max)));
     }
     if truthy(get(f, "entity")) {
-        parts.push(format!("entity={}", get_str(f, "entity")));
+        parts.push(format!("entity={}", js_string(get(f, "entity"))));
     }
-    if truthy(get(f, "values")) {
-        let mut vals: Vec<String> = get(f, "values")
-            .as_array()
-            .map(|a| a.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect())
-            .unwrap_or_default();
-        vals.sort();
-        parts.push(format!("values={}", vals.join("|")));
+    if let Some(values) = non_empty_list(get(f, "values")) {
+        // `[...values].sort().join("|")`: sorted as text, a number included.
+        let mut sorted = values.clone();
+        sorted.sort_by(|a, b| js_cmp(&js_string(a), &js_string(b)));
+        parts.push(format!("values={}", js_join(&sorted, "|")));
     }
     parts.join(":")
-}
-
-/// JSON with keys sorted at every depth, so declaration order cannot move the
-/// hash. serde_json's default map is sorted, so plain serialization IS the
-/// stable form — the reason this port must never enable `preserve_order`.
-pub fn stable_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
 }
 
 fn operation_print(o: &Value) -> String {
@@ -492,15 +872,13 @@ fn operation_print(o: &Value) -> String {
             flags.push_str(c);
         }
     }
-    let name = get_str(o, "name");
-    let mut parts = vec![if flags.is_empty() { name.to_string() } else { format!("{name}:{flags}") }];
-    if truthy(get(o, "module")) {
-        parts.push(format!("mod={}", get_str(o, "module")));
-    }
+    let name = js_string(get(o, "name"));
+    let mut parts = vec![if flags.is_empty() { name } else { format!("{name}:{flags}") }];
+    parts.push(format!("mod={}", js_string(get(o, "module"))));
     if truthy(get(o, "entity")) {
-        parts.push(format!("on={}", get_str(o, "entity")));
+        parts.push(format!("on={}", js_string(get(o, "entity"))));
     }
-    if truthy(get(o, "params")) {
+    if truthy(get(o, "params")) && !js_object(get(o, "params")).is_empty() {
         parts.push(format!("params={}", stable_json(get(o, "params"))));
     }
     if truthy(get(o, "appliesWhen")) {
@@ -515,35 +893,31 @@ fn operation_print(o: &Value) -> String {
 /// `{"fields": [...], "module": str, "auth"?: bool}`. `module` is required for
 /// the same reason it is required there: an entity that could move between
 /// modules without moving the hash would leave caches placing it in the old
-/// one. The hash is djb2-xor over Unicode scalar values, matching Python's
-/// `ord` and the JS `codePointAt` walk.
+/// one. The hash is djb2-xor over UTF-16 code units, as the reference's
+/// `charCodeAt` walk computes it.
 pub fn schema_fingerprint(entities: &Value, operations: Option<&Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(map) = entities.as_object() {
         for (name, value) in map {
-            let mut prints: Vec<String> = get(value, "fields")
-                .as_array()
-                .map(|a| a.iter().map(field_print).collect())
-                .unwrap_or_default();
-            prints.sort();
+            let mut prints: Vec<String> =
+                get(value, "fields").as_array().map(|a| a.iter().map(field_print).collect()).unwrap_or_default();
+            js_sort(&mut prints);
             let mut attrs = vec![format!("{}({})", name, prints.join(","))];
             if truthy(get(value, "auth")) {
                 attrs.push("auth".to_string());
             }
-            attrs.push(format!("mod={}", get_str(value, "module")));
+            attrs.push(format!("mod={}", js_string(get(value, "module"))));
             parts.push(attrs.join(":"));
         }
     }
-    parts.sort();
-    let mut ops: Vec<String> = operations
-        .and_then(Value::as_array)
-        .map(|a| a.iter().map(operation_print).collect())
-        .unwrap_or_default();
-    ops.sort();
+    js_sort(&mut parts);
+    let mut ops: Vec<String> =
+        operations.and_then(Value::as_array).map(|a| a.iter().map(operation_print).collect()).unwrap_or_default();
+    js_sort(&mut ops);
     let joined = format!("{}|{}", parts.join(";"), ops.join(","));
     let mut h: u32 = 5381;
-    for ch in joined.chars() {
-        h = h.wrapping_mul(33) ^ (ch as u32);
+    for unit in joined.encode_utf16() {
+        h = h.wrapping_mul(33) ^ u32::from(unit);
     }
     format!("sv_{h:x}")
 }
@@ -551,6 +925,8 @@ pub fn schema_fingerprint(entities: &Value, operations: Option<&Value>) -> Strin
 // -- availability predicates (A2APP-SPEC 3.4) -------------------------------
 // Parity oracle: adapters/rules/src/predicate.ts. Same predicate + same record
 // must yield the same availability and the same blocked reason on every stack.
+// A form is recognised by the key it carries (`all`, `not`, `eq`, …), as the
+// reference's own-property tests do.
 
 /// Read a value as its field's DECLARED type.
 ///
@@ -561,36 +937,46 @@ fn as_declared(value: &Value, declared_type: Option<&str>) -> Value {
     if is_blank(value) {
         return Value::Null;
     }
-    match declared_type {
-        Some("boolean") => match value {
-            Value::Bool(_) => value.clone(),
-            Value::String(s) if s == "true" => Value::Bool(true),
-            Value::String(s) if s == "false" => Value::Bool(false),
-            _ => value.clone(),
-        },
-        Some("number") => match value {
-            Value::Bool(_) | Value::Number(_) => value.clone(),
-            Value::String(s) => match s.trim().parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
-                Some(n) => Value::Number(n),
-                None => value.clone(),
-            },
-            _ => value.clone(),
-        },
+    match (declared_type, value) {
+        (Some("boolean"), Value::String(s)) if s == "true" => Value::Bool(true),
+        (Some("boolean"), Value::String(s)) if s == "false" => Value::Bool(false),
+        (Some("number"), Value::String(s)) => {
+            let n = js_number(s);
+            if n.is_finite() {
+                json_number(n)
+            } else {
+                value.clone()
+            }
+        }
         _ => value.clone(),
     }
 }
 
-fn same_value(a: &Value, b: &Value) -> bool {
-    if a.is_array() || a.is_object() || b.is_array() || b.is_object() {
-        return stable_json(a) == stable_json(b);
+/// `a === b` for JSON values: a list or an object is never identical to
+/// another one.
+fn strictly_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Number(x), Value::Number(y)) => js_value_number(x) == js_value_number(y),
+        (Value::String(x), Value::String(y)) => x == y,
+        _ => false,
     }
-    if a.is_boolean() != b.is_boolean() {
+}
+
+/// Structural equality after declared-type reading. Lists and objects compare
+/// by their JSON, so `list<ref>` membership is well defined.
+fn same_value(a: &Value, b: &Value) -> bool {
+    if strictly_equal(a, b) {
+        return true;
+    }
+    if a.is_null() || b.is_null() {
         return false;
     }
-    if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
-        return x == y;
+    if a.is_array() || a.is_object() || b.is_array() || b.is_object() {
+        return js_json(a) == js_json(b);
     }
-    a == b
+    false
 }
 
 fn field_type<'a>(index: &'a HashMap<&str, &Value>, name: &str) -> Option<&'a str> {
@@ -612,12 +998,20 @@ pub fn evaluate_predicate(predicate: &Value, record: &Value, fields: &Value) -> 
     evaluate(predicate, record, &field_index(fields))
 }
 
+/// The list a form carries under `key` (its branches, or its candidates), when
+/// the form is that one; a malformed list reads as empty.
+fn branches(p: &Value, key: &str) -> Option<Vec<Value>> {
+    p.get(key).map(|b| b.as_array().cloned().unwrap_or_default())
+}
+
 fn evaluate(p: &Value, record: &Value, index: &HashMap<&str, &Value>) -> bool {
-    if let Some(all) = p.get("all").and_then(Value::as_array) {
-        return all.iter().all(|sub| evaluate(sub, record, index));
+    // A malformed list never holds: the reference would throw on it.
+    let listed = |key: &str| p.get(key).map(|b| b.as_array().map(Vec::as_slice));
+    if let Some(all) = listed("all") {
+        return all.map_or(false, |a| a.iter().all(|sub| evaluate(sub, record, index)));
     }
-    if let Some(any) = p.get("any").and_then(Value::as_array) {
-        return any.iter().any(|sub| evaluate(sub, record, index));
+    if let Some(any) = listed("any") {
+        return any.map_or(false, |a| a.iter().any(|sub| evaluate(sub, record, index)));
     }
     if let Some(not) = p.get("not") {
         return !evaluate(not, record, index);
@@ -626,8 +1020,9 @@ fn evaluate(p: &Value, record: &Value, index: &HashMap<&str, &Value>) -> bool {
     let field = get_str(p, "field");
     let actual = read_field(record, field, index);
     let declared = field_type(index, field);
-    if let Some(is_blank_flag) = p.get("isBlank").and_then(Value::as_bool) {
-        return actual.is_null() == is_blank_flag;
+    if let Some(flag) = p.get("isBlank") {
+        // `(actual === null) === isBlank`: anything but a boolean never holds.
+        return flag.as_bool().map_or(false, |blank| actual.is_null() == blank);
     }
     if let Some(eq) = p.get("eq") {
         return same_value(&actual, &as_declared(eq, declared));
@@ -635,11 +1030,12 @@ fn evaluate(p: &Value, record: &Value, index: &HashMap<&str, &Value>) -> bool {
     if let Some(ne) = p.get("ne") {
         return !same_value(&actual, &as_declared(ne, declared));
     }
-    if let Some(candidates) = p.get("in").and_then(Value::as_array) {
-        return candidates.iter().any(|c| same_value(&actual, &as_declared(c, declared)));
+    let matches_any = |list: &[Value]| list.iter().any(|c| same_value(&actual, &as_declared(c, declared)));
+    if let Some(candidates) = listed("in") {
+        return candidates.map_or(false, matches_any);
     }
-    if let Some(candidates) = p.get("notIn").and_then(Value::as_array) {
-        return !candidates.iter().any(|c| same_value(&actual, &as_declared(c, declared)));
+    if let Some(candidates) = listed("notIn") {
+        return candidates.map_or(false, |list| !matches_any(list));
     }
     // Unrecognised form: refuse rather than default to available. An unknown
     // condition must never silently unblock an action.
@@ -650,28 +1046,24 @@ fn render_value(v: &Value) -> String {
     match v {
         Value::Null => "blank".to_string(),
         Value::String(s) => format!("\"{s}\""),
-        Value::Array(_) | Value::Object(_) => stable_json(v),
-        other => serde_json::to_string(other).unwrap_or_default(),
+        Value::Array(_) | Value::Object(_) => js_json(v),
+        other => js_string(other),
     }
 }
 
 /// Every field name a predicate reads, for declaration-time validation.
 fn predicate_fields(predicate: &Value) -> Vec<String> {
     fn collect(p: &Value, out: &mut Vec<String>) {
-        if let Some(all) = p.get("all").and_then(Value::as_array) {
-            for sub in all {
-                collect(sub, out);
-            }
-        } else if let Some(any) = p.get("any").and_then(Value::as_array) {
-            for sub in any {
-                collect(sub, out);
-            }
+        if let Some(all) = branches(p, "all") {
+            all.iter().for_each(|sub| collect(sub, out));
+        } else if let Some(any) = branches(p, "any") {
+            any.iter().for_each(|sub| collect(sub, out));
         } else if let Some(not) = p.get("not") {
             collect(not, out);
         } else {
-            let field = get_str(p, "field");
-            if !field.is_empty() && !out.iter().any(|f| f.as_str() == field) {
-                out.push(field.to_string());
+            let field = p.get("field").map_or_else(|| "undefined".to_string(), js_string);
+            if !out.contains(&field) {
+                out.push(field);
             }
         }
     }
@@ -698,36 +1090,36 @@ pub fn explain_predicate(predicate: &Value, record: &Value, fields: &Value) -> S
 }
 
 fn explain(p: &Value, record: &Value, index: &HashMap<&str, &Value>) -> String {
-    if let Some(all) = p.get("all").and_then(Value::as_array) {
-        for sub in all {
-            if !evaluate(sub, record, index) {
-                return explain(sub, record, index);
-            }
-        }
-        return "the condition holds".to_string();
+    if let Some(all) = branches(p, "all") {
+        return match all.iter().find(|sub| !evaluate(sub, record, index)) {
+            Some(failing) => explain(failing, record, index),
+            None => "the condition holds".to_string(),
+        };
     }
-    if let Some(any) = p.get("any").and_then(Value::as_array) {
+    if let Some(any) = branches(p, "any") {
+        // None held, so every branch failed; the first is the most specific
+        // thing to say.
         return match any.first() {
             Some(first) => explain(first, record, index),
             None => "no condition is satisfiable".to_string(),
         };
     }
     if let Some(inner) = p.get("not") {
-        if let Some(is_blank_flag) = inner.get("isBlank").and_then(Value::as_bool) {
-            let field = get_str(inner, "field");
-            return if is_blank_flag { format!("{field} is blank") } else { format!("{field} is set") };
+        let field = get_str(inner, "field");
+        if let Some(flag) = inner.get("isBlank") {
+            return if truthy(flag) { format!("{field} is blank") } else { format!("{field} is set") };
         }
         if inner.get("eq").is_some() {
-            let field = get_str(inner, "field");
             return format!("{} is {}", field, render_value(&read_field(record, field, index)));
         }
-        return "the condition is not met".to_string();
+        let subject = if ["all", "any", "not"].iter().any(|k| inner.get(*k).is_some()) { "the record" } else { field };
+        return format!("the condition on {subject} is not met");
     }
 
     let field = get_str(p, "field");
     let actual = read_field(record, field, index);
-    if let Some(is_blank_flag) = p.get("isBlank").and_then(Value::as_bool) {
-        if is_blank_flag {
+    if let Some(flag) = p.get("isBlank") {
+        if truthy(flag) {
             return format!("{} is set to {}, not blank", field, render_value(&actual));
         }
         return format!("{field} is blank");
@@ -738,8 +1130,8 @@ fn explain(p: &Value, record: &Value, index: &HashMap<&str, &Value>) -> String {
     if p.get("ne").is_some() {
         return format!("{} is {}", field, render_value(&actual));
     }
-    if let Some(candidates) = p.get("in").and_then(Value::as_array) {
-        return format!("{} is {}, not {}", field, render_value(&actual), render_list(candidates));
+    if let Some(candidates) = branches(p, "in") {
+        return format!("{} is {}, not {}", field, render_value(&actual), render_list(&candidates));
     }
     if p.get("notIn").is_some() {
         return format!("{} is {}", field, render_value(&actual));
@@ -753,7 +1145,7 @@ pub fn describe_violation(v: &Value, server_now: Option<&str>) -> String {
         "Rejected by a2app ({code}): field \"{}\" expects {}; got {}",
         get_str(v, "field"),
         get_str(v, "expected"),
-        serde_json::to_string(get(v, "got")).unwrap_or_default()
+        js_json(get(v, "got"))
     );
     if let Some(now) = server_now {
         if code == ERR_INVALID_DATE || code == ERR_INVALID_DAYKEY {
@@ -812,7 +1204,8 @@ impl RateLimiter {
         count += 1;
         self.windows.insert(key, (ws, count));
         if count > limit {
-            let retry = (60_000u64.saturating_sub(now - ws)) / 1000;
+            // Whole seconds, rounded up: retrying a moment early is refused again.
+            let retry = (60_000u64.saturating_sub(now - ws)).div_ceil(1000);
             return RateDecision { allowed: false, limit, retry_after_seconds: retry.max(1) };
         }
         RateDecision { allowed: true, limit, retry_after_seconds: 0 }
@@ -852,7 +1245,7 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
-/// ISO 8601 UTC with milliseconds, "…Z" — what the oracle's `_now_iso` emits.
+/// ISO 8601 UTC with milliseconds, "…Z" — JavaScript's `toISOString()`.
 pub fn now_iso() -> String {
     iso_of_ms(epoch_ms_now())
 }
@@ -1025,7 +1418,7 @@ fn js_len(s: &str) -> usize {
 
 /// `decodeURIComponent`: None for a malformed escape or bytes that are not
 /// UTF-8, which is not a value this app wrote.
-fn decode_uri_component(s: &str) -> Option<String> {
+pub fn decode_uri_component(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1153,7 +1546,7 @@ pub fn parse_grant_request(body: &Value, declared: &BTreeSet<String>) -> Result<
     let scopes = match body.get("scopes").filter(|s| !s.is_null()) {
         None => vec!["*".to_string()],
         Some(Value::Array(list)) if !list.is_empty() && list.iter().all(Value::is_string) => {
-            list.iter().map(py_str).collect()
+            list.iter().map(js_string).collect()
         }
         Some(_) => return Err("scopes is a non-empty list of scope names (or [\"*\"]).".to_string()),
     };
@@ -1197,13 +1590,36 @@ impl fmt::Display for UnsupportedFilter {
 
 impl std::error::Error for UnsupportedFilter {}
 
+/// A stored value as a filter compares it: `String(value)`, absent as "".
 fn filter_str(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
-        Value::String(s) => s.clone(),
-        Value::Number(_) => py_str(value),
-        other => stable_json(other),
+    if value.is_null() {
+        String::new()
+    } else {
+        js_string(value)
+    }
+}
+
+/// Sort order for `?sort=`: blank first, then by `String(value)` in
+/// JavaScript's string order. The reference's comparator; blank-against-blank
+/// and equal text compare equal, so the sort is a total order and, being
+/// stable, keeps the store's order among them in either direction.
+fn sort_cmp(a: &Value, b: &Value) -> Ordering {
+    match (a.is_null(), b.is_null()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => js_cmp(&js_string(a), &js_string(b)),
+    }
+}
+
+/// A list query's `page` or `perPage` as the reference reads it: a JSON number
+/// as is, text through `Number()`, absent as None.
+fn query_number(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Null => None,
+        Value::Number(n) => Some(js_value_number(n)),
+        Value::String(s) => Some(js_number(s)),
+        _ => Some(f64::NAN),
     }
 }
 
@@ -1215,14 +1631,14 @@ fn filter_str(value: &Value) -> String {
 /// ignored: a store that accepts `filter` and returns unfiltered rows answers
 /// 200 with the wrong records, which turns every label lookup into a false
 /// multi-match. Hand-parsed so the stack needs no regex crate; parity with the
-/// oracle's `_FILTER_RE`.
+/// reference starter's `FILTER_CLAUSE` (where `\s` is JavaScript's white space).
 fn match_filter(expr: &str) -> Result<(String, String, String), UnsupportedFilter> {
     let unsupported = || UnsupportedFilter { expression: expr.to_string() };
     let b = expr.as_bytes();
     let mut i = 0usize;
     let skip_ws = |i: &mut usize| {
-        while *i < b.len() && (b[*i] as char).is_ascii_whitespace() {
-            *i += 1;
+        while let Some(c) = expr[*i..].chars().next().filter(|c| is_js_space(*c)) {
+            *i += c.len_utf8();
         }
     };
     skip_ws(&mut i);
@@ -1269,8 +1685,13 @@ fn match_filter(expr: &str) -> Result<(String, String, String), UnsupportedFilte
             }
             if ch == '\\' {
                 // Only the double-quoted form carries escapes; unescape exactly
-                // what the escaping side wrote (backslash-x -> x).
-                let escaped = expr[i + 1..].chars().next().ok_or_else(unsupported)?;
+                // what the escaping side wrote (backslash-x -> x). The x is any
+                // character but a line terminator, as the reference's `.` is.
+                let escaped = expr[i + 1..]
+                    .chars()
+                    .next()
+                    .filter(|c| !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+                    .ok_or_else(unsupported)?;
                 out.push(escaped);
                 i += 1 + escaped.len_utf8();
             } else {
@@ -1288,7 +1709,7 @@ fn match_filter(expr: &str) -> Result<(String, String, String), UnsupportedFilte
         let start = i;
         while i < b.len() {
             let ch = expr[i..].chars().next().unwrap();
-            if ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | '(' | ')') {
+            if is_js_space(ch) || matches!(ch, '"' | '\'' | '(' | ')') {
                 break;
             }
             i += ch.len_utf8();
@@ -1309,32 +1730,19 @@ fn match_filter(expr: &str) -> Result<(String, String, String), UnsupportedFilte
     Ok((field, op.to_string(), value))
 }
 
+/// A validated raw value in its stored form: text that reads as a number or a
+/// boolean becomes one (`Number(text)`, `text === "true"`), as the reference
+/// stores it. The guard already accepted the value. A number JSON cannot hold
+/// ("Infinity") is stored as nothing, which the read-back then reports.
 fn coerce(field: &Value, value: &Value) -> Value {
-    if value.is_null() || value.as_str() == Some("") {
+    if is_blank(value) {
         return value.clone();
     }
-    let ftype = get_str(field, "type");
-    if ftype == "number" {
-        if let Some(s) = value.as_str() {
-            // The oracle parses int-or-float on the "." heuristic; try integer
-            // first and fall back to float so "1e5" coerces instead of erroring.
-            if let Ok(i) = s.trim().parse::<i64>() {
-                return json!(i);
-            }
-            if let Ok(f) = s.trim().parse::<f64>() {
-                if let Some(n) = serde_json::Number::from_f64(f) {
-                    return Value::Number(n);
-                }
-            }
-            return value.clone();
-        }
+    match (get_str(field, "type"), value) {
+        ("number", Value::String(s)) => json_number(js_number(s)),
+        ("boolean", Value::String(s)) => Value::Bool(s == "true"),
+        _ => value.clone(),
     }
-    if ftype == "boolean" {
-        if let Some(s) = value.as_str() {
-            return Value::Bool(s == "true");
-        }
-    }
-    value.clone()
 }
 
 enum Backend {
@@ -1342,9 +1750,13 @@ enum Backend {
     /// always empty, so it always takes the seed.
     Memory {
         rows: BTreeMap<String, Vec<Value>>,
-        idem: HashMap<(String, String), String>,
-        /// adapter state: table -> key -> row (see `Store::row`)
-        state: BTreeMap<String, BTreeMap<String, Value>>,
+        /// (scope, key) -> (record id, when it was recorded)
+        idem: HashMap<(String, String), (String, i64)>,
+        /// adapter state: table -> key -> row, in insertion order (see
+        /// `Store::row`)
+        state: BTreeMap<String, Map<String, Value>>,
+        events: Vec<Value>,
+        audit: Vec<Value>,
     },
     /// The blueprint's live store: records, idempotency keys and adapter state
     /// in SQLite. One connection behind one mutex keeps this correct without a
@@ -1352,8 +1764,23 @@ enum Backend {
     Sqlite(Mutex<Connection>),
 }
 
+/// The connection, even after a panic elsewhere left its mutex poisoned: a
+/// panic is answered as one failed request (see `main.rs`), and SQLite's own
+/// transactions keep the file consistent, so the next request may proceed.
+fn lock(db: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    db.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A database that fails a statement cannot answer truthfully, so the request
+/// fails instead of reporting a write that never happened: a runner's call
+/// fails as `operation_failed`, any other as `adapter_error`, exactly where
+/// adapter-core's binding would throw.
+fn storage_failed<T>(e: rusqlite::Error) -> T {
+    panic!("the database failed: {e}")
+}
+
 /// Record store plus adapter-owned state (tasks, events, approvals,
-/// credentials, accounts).
+/// idempotency keys, the audit log, credentials, accounts).
 ///
 /// Records are JSON rows in one table keyed (entity, id): the schema stays
 /// declarative and additive (a new field simply appears in the JSON) while the
@@ -1361,13 +1788,15 @@ enum Backend {
 /// dataDir — which is what backup/restore/promote protect. WAL keeps a reader
 /// and a writer from blocking each other.
 ///
-/// Idempotency keys persist because a restart is exactly when a retried POST
-/// arrives — an in-memory table would return a duplicate record instead of the
-/// 409 the protocol promises. Credentials, accounts, sessions, invites and
-/// device codes persist too (the `adapter_state` table): a restart must sign
-/// nobody out and cut off no agent. They are adapter state, never records — no
-/// record route reaches them, and a runner's `Store` methods cannot. The
-/// task/event plane and approvals stay in memory: they are runtime queues.
+/// Everything else the adapter keeps is durable too, as adapter-core's file
+/// store keeps it: a restart is exactly when a retried write arrives, a saved
+/// event cursor is read, an approved destructive call is replayed, or a task's
+/// agent comes back with its credential. Idempotency keys (24 h), approvals
+/// (10 min), tasks and their dedup keys, the event log (newest 5000, `seq`
+/// counting on) and the audit log (newest 5000) live beside the records, as do
+/// credentials, accounts, sessions, invites and device codes (the
+/// `adapter_state` table). They are adapter state, never records — no record
+/// route reaches them, and a runner's `Store` methods cannot.
 ///
 /// Writes are durable when the call returns — there is no separate persist()
 /// step. A record read from this store is a COPY: mutate it, then
@@ -1379,15 +1808,11 @@ pub struct Store {
     /// deleted.
     pub wants_seed: bool,
     pub seed: Value,
-    tasks: Vec<Value>,
-    events: Vec<Value>,
-    approvals: HashSet<String>,
-    event_seq: u64,
+    /// The app's id, which every task and event names. Set by `Adapter::new`.
+    app: String,
     /// The event types this app may emit, set by `Adapter::new` from the app's
     /// declarations. Empty means none were declared.
     event_types: BTreeSet<String>,
-    /// occurrence key -> task id, so one occurrence makes one task
-    dedup: HashMap<String, String>,
     /// Who the operation being run acts for. The adapter sets it around a
     /// runner, so a task the runner queues records who asked for it (spec/v0_2
     /// auth.md §6.1) without the runner having to say — or being able to say
@@ -1398,15 +1823,17 @@ pub struct Store {
 impl Store {
     pub fn memory(seed: Value) -> Store {
         Store {
-            backend: Backend::Memory { rows: BTreeMap::new(), idem: HashMap::new(), state: BTreeMap::new() },
+            backend: Backend::Memory {
+                rows: BTreeMap::new(),
+                idem: HashMap::new(),
+                state: BTreeMap::new(),
+                events: Vec::new(),
+                audit: Vec::new(),
+            },
             wants_seed: true,
             seed,
-            tasks: Vec::new(),
-            events: Vec::new(),
-            approvals: HashSet::new(),
-            event_seq: 0,
+            app: String::new(),
             event_types: BTreeSet::new(),
-            dedup: HashMap::new(),
             caller: None,
         }
     }
@@ -1424,23 +1851,32 @@ impl Store {
                 entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL,
                 PRIMARY KEY (entity, id));
              CREATE TABLE IF NOT EXISTS idem (
-                entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL,
+                entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, at INTEGER NOT NULL,
                 PRIMARY KEY (entity, key));
              CREATE TABLE IF NOT EXISTS adapter_state (
                 tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL,
-                PRIMARY KEY (tbl, key));",
+                PRIMARY KEY (tbl, key));
+             CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS audit (n INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);",
         )
         .map_err(|e| format!("cannot create tables: {e}"))?;
+        // A database from before idempotency keys expired has no `at`: its keys
+        // are counted from now, so each still holds for a full day.
+        let dated = db
+            .prepare("SELECT 1 FROM pragma_table_info('idem') WHERE name = 'at'")
+            .and_then(|mut s| s.exists([]))
+            .map_err(|e| format!("cannot read the idem table: {e}"))?;
+        if !dated {
+            db.execute_batch("ALTER TABLE idem ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
+                .and_then(|_| db.execute("UPDATE idem SET at = ?1", [epoch_ms_now()]))
+                .map_err(|e| format!("cannot upgrade the idem table: {e}"))?;
+        }
         Ok(Store {
             backend: Backend::Sqlite(Mutex::new(db)),
             wants_seed: fresh,
             seed,
-            tasks: Vec::new(),
-            events: Vec::new(),
-            approvals: HashSet::new(),
-            event_seq: 0,
+            app: String::new(),
             event_types: BTreeSet::new(),
-            dedup: HashMap::new(),
             caller: None,
         })
     }
@@ -1453,19 +1889,12 @@ impl Store {
         match &self.backend {
             Backend::Memory { rows, .. } => rows.get(entity).cloned().unwrap_or_default(),
             Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let mut stmt = match db.prepare("SELECT data FROM records WHERE entity = ?1") {
-                    Ok(s) => s,
-                    Err(_) => return Vec::new(),
-                };
-                let rows = stmt.query_map([entity], |row| row.get::<_, String>(0));
-                match rows {
-                    Ok(iter) => iter
-                        .filter_map(Result::ok)
-                        .filter_map(|s| serde_json::from_str(&s).ok())
-                        .collect(),
-                    Err(_) => Vec::new(),
-                }
+                let db = lock(db);
+                let mut stmt = db.prepare("SELECT data FROM records WHERE entity = ?1").unwrap_or_else(storage_failed);
+                let rows = stmt.query_map([entity], |row| row.get::<_, String>(0)).unwrap_or_else(storage_failed);
+                rows.map(|row| row.unwrap_or_else(storage_failed))
+                    .filter_map(|s| serde_json::from_str(&s).ok())
+                    .collect()
             }
         }
     }
@@ -1474,52 +1903,47 @@ impl Store {
     /// value}` constraints the adapter sets (a member sees only the records it
     /// owns), applied before sorting and paging like any other constraint, so
     /// pages and totals count only what the caller may see.
+    ///
+    /// The reference binding's semantics exactly: `page` and `perPage` are
+    /// numbers (text is read with `Number()`), `perPage` defaults to every row
+    /// and `page` to 1, and the page is `items.slice((page-1)*perPage, …)` —
+    /// so 0 or an unreadable `perPage` is an empty page, not every row.
     pub fn list_records(&self, entity: &str, query: &Value) -> Result<Value, UnsupportedFilter> {
         let mut items = self.all_records(entity);
         if let Some(constraints) = query.get("where").and_then(Value::as_object) {
-            items.retain(|r| constraints.iter().all(|(field, value)| get(r, field) == value));
+            items.retain(|r| constraints.iter().all(|(field, value)| strictly_equal(get(r, field), value)));
         }
-        if let Some(expr) = query.get("filter").and_then(Value::as_str) {
-            if !expr.is_empty() {
-                let (field, op, value) = match_filter(expr)?;
-                items.retain(|r| {
-                    let current = filter_str(get(r, &field));
-                    match op.as_str() {
-                        "=" => current == value,
-                        "!=" => current != value,
-                        _ => current.contains(&value),
-                    }
-                });
-            }
+        if let Some(expr) = query.get("filter").and_then(Value::as_str).filter(|e| !e.is_empty()) {
+            let (field, op, value) = match_filter(expr)?;
+            items.retain(|r| {
+                let current = filter_str(get(r, &field));
+                match op.as_str() {
+                    "=" => current == value,
+                    "!=" => current != value,
+                    _ => current.contains(&value),
+                }
+            });
         }
-        if let Some(sort) = query.get("sort").and_then(Value::as_str) {
-            if !sort.is_empty() {
-                let desc = sort.starts_with('-');
-                let key = if desc { &sort[1..] } else { sort };
-                // The oracle sorts on (is-missing, str(value)) — missing values
-                // last ascending — with a stable sort.
-                items.sort_by(|a, b| {
-                    let ka = (get(a, key).is_null(), py_str(get(a, key)));
-                    let kb = (get(b, key).is_null(), py_str(get(b, key)));
-                    let ord = ka.cmp(&kb);
-                    if desc {
-                        ord.reverse()
-                    } else {
-                        ord
-                    }
-                });
-            }
+        if let Some(sort) = query.get("sort").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            let (desc, key) = match sort.strip_prefix('-') {
+                Some(key) => (true, key),
+                None => (false, sort),
+            };
+            items.sort_by(|a, b| {
+                let order = sort_cmp(get(a, key), get(b, key));
+                if desc {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
         }
-        let total = items.len() as i64;
-        let per_page = query_int(query.get("perPage")).unwrap_or(total);
-        let page = query_int(query.get("page")).unwrap_or(1);
-        let paged: Vec<Value> = if per_page > 0 {
-            let start = ((page - 1) * per_page).max(0) as usize;
-            items.into_iter().skip(start).take(per_page as usize).collect()
-        } else {
-            items
-        };
-        Ok(json!({ "items": paged, "page": page, "perPage": per_page, "totalItems": total }))
+        let total = items.len();
+        let per_page = query_number(query.get("perPage")).unwrap_or(total as f64);
+        let page = query_number(query.get("page")).unwrap_or(1.0);
+        let start = (page - 1.0) * per_page;
+        let paged = js_slice(&items, start, start + per_page);
+        Ok(json!({ "items": paged, "page": json_number(page), "perPage": json_number(per_page), "totalItems": total }))
     }
 
     pub fn get_record(&self, entity: &str, rec_id: &str) -> Option<Value> {
@@ -1528,16 +1952,13 @@ impl Store {
                 .get(entity)
                 .and_then(|list| list.iter().find(|r| get_str(r, "id") == rec_id))
                 .cloned(),
-            Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                db.query_row(
-                    "SELECT data FROM records WHERE entity = ?1 AND id = ?2",
-                    [entity, rec_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-            }
+            Backend::Sqlite(db) => lock(db)
+                .query_row("SELECT data FROM records WHERE entity = ?1 AND id = ?2", [entity, rec_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .unwrap_or_else(storage_failed)
+                .and_then(|s| serde_json::from_str(&s).ok()),
         }
     }
 
@@ -1552,14 +1973,13 @@ impl Store {
                 }
             }
             Backend::Sqlite(db) => {
-                let id = get_str(&rec, "id").to_string();
-                let data = stable_json(&rec);
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let _ = db.execute(
-                    "INSERT INTO records (entity, id, data) VALUES (?1, ?2, ?3)
-                     ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data",
-                    params![entity, id, data],
-                );
+                lock(db)
+                    .execute(
+                        "INSERT INTO records (entity, id, data) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data",
+                        params![entity, get_str(&rec, "id"), js_json(&rec)],
+                    )
+                    .unwrap_or_else(storage_failed);
             }
         }
     }
@@ -1575,32 +1995,31 @@ impl Store {
                 list.retain(|r| get_str(r, "id") != rec_id);
                 list.len() < before
             }
-            Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                db.execute("DELETE FROM records WHERE entity = ?1 AND id = ?2", [entity, rec_id])
-                    .map(|n| n > 0)
-                    .unwrap_or(false)
-            }
+            Backend::Sqlite(db) => lock(db)
+                .execute("DELETE FROM records WHERE entity = ?1 AND id = ?2", [entity, rec_id])
+                .map(|n| n > 0)
+                .unwrap_or_else(storage_failed),
         }
     }
 
     // adapter state -----------------------------------------------------------
-    // Keyed tables the auth layer owns: `users`, `sessions`, `invites`,
-    // `devices` and `grants`. Rows are keyed by id or by the SHA-256 of the
-    // secret that finds them; no secret is ever a key or a value. Private to
-    // the adapter: a runner holds this `Store` too, and must not reach them.
+    // Keyed tables only the adapter reads: `users`, `sessions`, `invites`,
+    // `devices` and `grants` (keyed by id or by the SHA-256 of the secret that
+    // finds them; no secret is ever a key or a value), and `tasks`, `dedup`,
+    // `approvals` and `meta`. Rows keep the order they were first written in.
+    // Private to the adapter: a runner holds this `Store` too, and must not
+    // reach them.
 
     fn row(&self, table: &str, key: &str) -> Option<Value> {
         match &self.backend {
             Backend::Memory { state, .. } => state.get(table).and_then(|t| t.get(key)).cloned(),
-            Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                db.query_row("SELECT data FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key], |row| {
+            Backend::Sqlite(db) => lock(db)
+                .query_row("SELECT data FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key], |row| {
                     row.get::<_, String>(0)
                 })
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-            }
+                .optional()
+                .unwrap_or_else(storage_failed)
+                .and_then(|s| serde_json::from_str(&s).ok()),
         }
     }
 
@@ -1610,12 +2029,13 @@ impl Store {
                 state.entry(table.to_string()).or_default().insert(key.to_string(), row.clone());
             }
             Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let _ = db.execute(
-                    "INSERT INTO adapter_state (tbl, key, data) VALUES (?1, ?2, ?3)
-                     ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
-                    params![table, key, stable_json(row)],
-                );
+                lock(db)
+                    .execute(
+                        "INSERT INTO adapter_state (tbl, key, data) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
+                        params![table, key, js_json(row)],
+                    )
+                    .unwrap_or_else(storage_failed);
             }
         }
     }
@@ -1624,12 +2044,13 @@ impl Store {
         match &mut self.backend {
             Backend::Memory { state, .. } => {
                 if let Some(t) = state.get_mut(table) {
-                    t.remove(key);
+                    t.shift_remove(key);
                 }
             }
             Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let _ = db.execute("DELETE FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key]);
+                lock(db)
+                    .execute("DELETE FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key])
+                    .unwrap_or_else(storage_failed);
             }
         }
     }
@@ -1641,18 +2062,16 @@ impl Store {
                 .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
             Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let Ok(mut stmt) = db.prepare("SELECT key, data FROM adapter_state WHERE tbl = ?1") else {
-                    return Vec::new();
-                };
-                let rows = stmt.query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)));
-                match rows {
-                    Ok(iter) => iter
-                        .filter_map(Result::ok)
-                        .filter_map(|(k, s)| serde_json::from_str(&s).ok().map(|v| (k, v)))
-                        .collect(),
-                    Err(_) => Vec::new(),
-                }
+                let db = lock(db);
+                let mut stmt = db
+                    .prepare("SELECT key, data FROM adapter_state WHERE tbl = ?1 ORDER BY rowid")
+                    .unwrap_or_else(storage_failed);
+                let rows = stmt
+                    .query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .unwrap_or_else(storage_failed);
+                rows.map(|row| row.unwrap_or_else(storage_failed))
+                    .filter_map(|(k, s)| serde_json::from_str(&s).ok().map(|v| (k, v)))
+                    .collect()
             }
         }
     }
@@ -1699,76 +2118,127 @@ impl Store {
     }
 
     // idempotency / approvals -------------------------------------------------
-    pub fn idem_get(&self, entity: &str, key: &str) -> Option<String> {
-        match &self.backend {
-            Backend::Memory { idem, .. } => idem.get(&(entity.to_string(), key.to_string())).cloned(),
-            Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                db.query_row(
-                    "SELECT rec_id FROM idem WHERE entity = ?1 AND key = ?2",
-                    [entity, key],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
+    // An idempotency key is scoped (`<entity>` for a create, `<entity>#<id>` for
+    // an update, `op:<name>` for an operation) and holds for 24 hours. An
+    // approval key holds for 10 minutes and is consumed by its one use.
+
+    fn idem_get(&mut self, scope: &str, key: &str) -> Option<String> {
+        let found: Option<(String, i64)> = match &self.backend {
+            Backend::Memory { idem, .. } => idem.get(&(scope.to_string(), key.to_string())).cloned(),
+            Backend::Sqlite(db) => lock(db)
+                .query_row("SELECT rec_id, at FROM idem WHERE entity = ?1 AND key = ?2", [scope, key], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()
+                .unwrap_or_else(storage_failed),
+        };
+        let (rec_id, at) = found?;
+        if epoch_ms_now() - at > IDEMPOTENCY_TTL_MS {
+            match &mut self.backend {
+                Backend::Memory { idem, .. } => {
+                    idem.remove(&(scope.to_string(), key.to_string()));
+                }
+                Backend::Sqlite(db) => {
+                    lock(db)
+                        .execute("DELETE FROM idem WHERE entity = ?1 AND key = ?2", [scope, key])
+                        .unwrap_or_else(storage_failed);
+                }
             }
+            return None;
         }
+        Some(rec_id)
     }
 
-    pub fn idem_put(&mut self, entity: &str, key: &str, rec_id: &str) {
+    fn idem_put(&mut self, scope: &str, key: &str, rec_id: &str) {
+        let at = epoch_ms_now();
         match &mut self.backend {
             Backend::Memory { idem, .. } => {
-                idem.insert((entity.to_string(), key.to_string()), rec_id.to_string());
+                idem.insert((scope.to_string(), key.to_string()), (rec_id.to_string(), at));
             }
             Backend::Sqlite(db) => {
-                let db = db.lock().expect("sqlite mutex poisoned");
-                let _ = db.execute(
-                    "INSERT INTO idem (entity, key, rec_id) VALUES (?1, ?2, ?3)
-                     ON CONFLICT (entity, key) DO UPDATE SET rec_id = excluded.rec_id",
-                    params![entity, key, rec_id],
-                );
+                lock(db)
+                    .execute(
+                        "INSERT INTO idem (entity, key, rec_id, at) VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT (entity, key) DO UPDATE SET rec_id = excluded.rec_id, at = excluded.at",
+                        params![scope, key, rec_id, at],
+                    )
+                    .unwrap_or_else(storage_failed);
             }
         }
     }
 
-    pub fn approval_issue(&mut self, key: &str) {
-        self.approvals.insert(key.to_string());
+    fn approval_issue(&mut self, key: &str) {
+        self.put_row("approvals", key, &json!({ "expiresAt": epoch_ms_now() + APPROVAL_TTL_MS }));
     }
 
-    pub fn approval_consume(&mut self, key: &str) -> bool {
-        self.approvals.remove(key)
+    /// Spend an approval key: true only for one issued, unspent and unexpired.
+    fn approval_consume(&mut self, key: &str) -> bool {
+        let Some(approval) = self.row("approvals", key) else { return false };
+        self.delete_row("approvals", key);
+        get(&approval, "expiresAt").as_i64().map_or(false, |expires| expires >= epoch_ms_now())
     }
 
-    // tasks / events ------------------------------------------------------------
-    pub fn append_event(&mut self, etype: &str, payload: &Value) -> Value {
-        self.event_seq += 1;
+    // events ----------------------------------------------------------------------
+
+    fn append_event(&mut self, etype: &str, payload: &Value) -> Value {
+        let seq = self.row("meta", "eventSeq").and_then(|s| s.as_i64()).unwrap_or(0) + 1;
+        self.put_row("meta", "eventSeq", &json!(seq));
         let ev = json!({
-            "id": format!("ev_{}", self.event_seq), "app": null, "type": etype,
-            "payload": payload, "createdAt": now_iso(), "seq": self.event_seq,
+            "seq": seq, "id": new_id("evt"), "app": self.app, "type": etype,
+            "payload": payload, "createdAt": now_iso(),
         });
-        self.events.push(ev.clone());
+        match &mut self.backend {
+            Backend::Memory { events, .. } => {
+                events.push(ev.clone());
+                let excess = events.len().saturating_sub(EVENT_RETENTION as usize);
+                events.drain(..excess);
+            }
+            Backend::Sqlite(db) => {
+                let db = lock(db);
+                db.execute("INSERT INTO events (seq, data) VALUES (?1, ?2)", params![seq, js_json(&ev)])
+                    .and_then(|_| db.execute("DELETE FROM events WHERE seq <= ?1", [seq - EVENT_RETENTION]))
+                    .unwrap_or_else(storage_failed);
+            }
+        }
         ev
     }
 
-    pub fn events_since(&self, cursor: Option<&str>) -> (Vec<Value>, String) {
-        let after: u64 = match cursor {
-            Some(c) if !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()) => c.parse().unwrap_or(0),
-            _ => 0,
+    /// Events after `cursor`, and the cursor to ask with next. The cursor is
+    /// read as the reference reads it (`Number(cursor) || 0`), so one that is
+    /// not a number reads from the beginning.
+    fn events_since(&self, cursor: Option<&str>) -> (Vec<Value>, String) {
+        let from = match cursor.filter(|c| !c.is_empty()).map(js_number) {
+            Some(n) if !n.is_nan() && n != 0.0 => n,
+            _ => 0.0,
         };
-        let fresh: Vec<Value> = self
-            .events
-            .iter()
-            .filter(|e| get(e, "seq").as_u64().unwrap_or(0) > after)
-            .cloned()
-            .collect();
+        // `seq > from` for a whole-number seq, whatever kind of number `from` is.
+        let after = if from >= i64::MAX as f64 { i64::MAX } else { from.floor().max(-1.0) as i64 };
+        let fresh: Vec<Value> = match &self.backend {
+            Backend::Memory { events, .. } => {
+                events.iter().filter(|e| get(e, "seq").as_i64().unwrap_or(0) > after).cloned().collect()
+            }
+            Backend::Sqlite(db) => {
+                let db = lock(db);
+                let mut stmt =
+                    db.prepare("SELECT data FROM events WHERE seq > ?1 ORDER BY seq").unwrap_or_else(storage_failed);
+                let rows = stmt.query_map([after], |row| row.get::<_, String>(0)).unwrap_or_else(storage_failed);
+                rows.map(|row| row.unwrap_or_else(storage_failed))
+                    .filter_map(|s| serde_json::from_str(&s).ok())
+                    .collect()
+            }
+        };
         let next = match fresh.last() {
-            Some(last) => get(last, "seq").as_u64().unwrap_or(0).to_string(),
-            None => cursor.unwrap_or("0").to_string(),
+            Some(last) => js_string(get(last, "seq")),
+            None => js_number_string(from),
         };
         (fresh, next)
     }
 
+    // tasks -----------------------------------------------------------------------
+
     /// Queue a task. `principal` is who asked for the work (spec/v0_2 auth.md
-    /// §6.1), null for work the app queues on its own.
+    /// §6.1), null for work the app queues on its own. An occurrence already
+    /// queued (`dedup_key`) returns its task, whatever its status.
     fn enqueue_task(
         &mut self,
         event_id: &str,
@@ -1777,23 +2247,25 @@ impl Store {
         principal: Option<&str>,
         dedup_key: Option<&str>,
     ) -> Value {
-        if let Some(existing) = dedup_key.and_then(|k| self.dedup.get(k)).and_then(|id| self.get_task(id)) {
+        let queued = dedup_key.and_then(|k| self.row("dedup", k)).and_then(|d| self.get_task(get_str(&d, "task")));
+        if let Some(existing) = queued {
             return existing;
         }
         // Random, never a counter: a task credential names its task, and
         // credentials outlive a restart that would reset a counter — a new
         // task must never revive an old task's credential.
         let id = new_id("tsk");
+        let now = now_iso();
         let task = json!({
-            "id": id, "app": null, "event": event_id,
+            "id": id, "app": self.app, "event": event_id,
             "status": "submitted",
             "request": { "capability": capability, "payload": payload, "principal": principal },
-            "claim": null, "progress": {}, "result": null, "reason": null, "ask": null,
-            "createdAt": now_iso(), "updatedAt": now_iso(), "deliveries": 1,
+            "claim": null, "progress": { "step": null, "percent": 0 }, "result": null, "reason": null,
+            "ask": null, "createdAt": now, "updatedAt": now, "dedupKey": dedup_key, "deliveries": 1,
         });
-        self.tasks.push(task.clone());
+        self.put_row("tasks", &id, &task);
         if let Some(key) = dedup_key {
-            self.dedup.insert(key.to_string(), id);
+            self.put_row("dedup", key, &json!({ "task": id }));
         }
         task
     }
@@ -1836,13 +2308,13 @@ impl Store {
                 // fresh per emit, so keying on it would deduplicate nothing. The
                 // occurrence is what the app asked for (type, capability,
                 // payload) and who asked — the same request from two people is
-                // two tasks, each run as the person who asked. serde_json's
-                // sorted map makes the serialization independent of key order.
+                // two tasks, each run as the person who asked. Canonical JSON
+                // (RFC 8785), so the key is adapter-core's for the same call.
                 let mut occurrence = json!({ "type": etype, "capability": cap, "payload": payload });
                 if let Some(p) = principal.filter(|p| !p.is_empty()) {
                     occurrence["principal"] = json!(p);
                 }
-                let key = format!("sha256:{}", hex_of(&Sha256::digest(stable_json(&occurrence).as_bytes())));
+                let key = format!("sha256:{}", hash_secret(&stable_json(&occurrence)));
                 let task = self.enqueue_task(get_str(&ev, "id"), cap, payload, principal, Some(key.as_str()));
                 Some(get_str(&task, "id").to_string())
             }
@@ -1855,18 +2327,18 @@ impl Store {
     /// for `TASK_TIMEOUT_MS` goes back to `submitted` so another agent can take
     /// it, and fails with `redelivery_exhausted` once it has been handed out
     /// `TASK_MAX_DELIVERIES` times. Never a silent drop.
-    pub fn sweep(&mut self) {
+    fn sweep(&mut self) {
         let now = epoch_ms_now();
-        for task in self.tasks.iter_mut() {
-            if get_str(task, "status") != "working" {
+        for (id, mut task) in self.rows("tasks") {
+            if get_str(&task, "status") != "working" {
                 continue;
             }
-            if let Some(updated) = iso_epoch_ms(get_str(task, "updatedAt")) {
+            if let Some(updated) = iso_epoch_ms(get_str(&task, "updatedAt")) {
                 if now - updated < TASK_TIMEOUT_MS {
                     continue;
                 }
             }
-            let deliveries = get(task, "deliveries").as_u64().unwrap_or(0);
+            let deliveries = get(&task, "deliveries").as_u64().unwrap_or(0);
             if deliveries >= TASK_MAX_DELIVERIES {
                 task["status"] = json!("failed");
                 task["reason"] = json!("redelivery_exhausted");
@@ -1875,29 +2347,87 @@ impl Store {
                 task["claim"] = Value::Null;
                 task["deliveries"] = json!(deliveries + 1);
             }
-            task["updatedAt"] = json!(now_iso());
+            task["updatedAt"] = json!(iso_of_ms(now));
+            self.put_row("tasks", &id, &task);
         }
     }
 
-    pub fn list_tasks(&self, status: Option<&str>) -> Vec<Value> {
-        self.tasks
-            .iter()
+    /// Every task, oldest first; only those in `status` when one is given.
+    fn list_tasks(&self, status: Option<&str>) -> Vec<Value> {
+        self.rows("tasks")
+            .into_iter()
+            .map(|(_, t)| t)
             .filter(|t| status.map_or(true, |s| get_str(t, "status") == s))
-            .cloned()
             .collect()
     }
 
-    pub fn get_task(&self, task_id: &str) -> Option<Value> {
-        self.tasks.iter().find(|t| get_str(t, "id") == task_id).cloned()
+    fn get_task(&self, task_id: &str) -> Option<Value> {
+        self.row("tasks", task_id)
     }
 
-    pub fn save_task(&mut self, mut task: Value) {
+    fn save_task(&mut self, mut task: Value) -> Value {
         task["updatedAt"] = json!(now_iso());
         let id = get_str(&task, "id").to_string();
-        match self.tasks.iter_mut().find(|t| get_str(t, "id") == id) {
-            Some(slot) => *slot = task,
-            None => self.tasks.push(task),
+        self.put_row("tasks", &id, &task);
+        task
+    }
+
+    // audit -----------------------------------------------------------------------
+
+    /// One audit row; the oldest fall off past the newest 5000. Not served over
+    /// HTTP: it is the operator's record of who did what.
+    fn append_audit(&mut self, entry: &Value) {
+        match &mut self.backend {
+            Backend::Memory { audit, .. } => {
+                audit.push(entry.clone());
+                let excess = audit.len().saturating_sub(AUDIT_RETENTION as usize);
+                audit.drain(..excess);
+            }
+            Backend::Sqlite(db) => {
+                let db = lock(db);
+                db.execute("INSERT INTO audit (data) VALUES (?1)", [js_json(entry)])
+                    .and_then(|_| {
+                        db.execute("DELETE FROM audit WHERE n <= ?1", [db.last_insert_rowid() - AUDIT_RETENTION])
+                    })
+                    .unwrap_or_else(storage_failed);
+            }
         }
+    }
+
+    /// The newest `n` audit rows, oldest first.
+    fn audit_tail(&self, n: usize) -> Vec<Value> {
+        match &self.backend {
+            Backend::Memory { audit, .. } => audit[audit.len().saturating_sub(n)..].to_vec(),
+            Backend::Sqlite(db) => {
+                let db = lock(db);
+                let mut stmt = db
+                    .prepare("SELECT data FROM (SELECT n, data FROM audit ORDER BY n DESC LIMIT ?1) ORDER BY n")
+                    .unwrap_or_else(storage_failed);
+                let rows = stmt.query_map([n as i64], |row| row.get::<_, String>(0)).unwrap_or_else(storage_failed);
+                rows.map(|row| row.unwrap_or_else(storage_failed))
+                    .filter_map(|s| serde_json::from_str(&s).ok())
+                    .collect()
+            }
+        }
+    }
+
+    // clock -----------------------------------------------------------------------
+
+    /// The server's offset from UTC right now, in minutes east — what
+    /// JavaScript's `-new Date().getTimezoneOffset()` reports. Read through
+    /// SQLite's `localtime`, which applies the C library's own zone rules, so
+    /// the stack needs no time-zone crate. Within one statement SQLite's 'now'
+    /// is a single instant.
+    fn local_offset_minutes(&self) -> i64 {
+        const OFFSET: &str =
+            "SELECT CAST(strftime('%s', 'now', 'localtime') AS INTEGER) - CAST(strftime('%s', 'now') AS INTEGER)";
+        let seconds: rusqlite::Result<i64> = match &self.backend {
+            Backend::Sqlite(db) => lock(db).query_row(OFFSET, [], |row| row.get(0)),
+            Backend::Memory { .. } => {
+                Connection::open_in_memory().and_then(|db| db.query_row(OFFSET, [], |row| row.get(0)))
+            }
+        };
+        seconds.map_or(0, |s| s.div_euclid(60))
     }
 }
 
@@ -1909,16 +2439,6 @@ struct CallerScope<'a>(&'a mut Store);
 impl Drop for CallerScope<'_> {
     fn drop(&mut self) {
         self.0.caller = None;
-    }
-}
-
-fn query_int(v: Option<&Value>) -> Option<i64> {
-    match v {
-        Some(Value::Number(n)) => n.as_i64(),
-        // Python truthiness: an empty string means "absent"; a non-numeric
-        // string would raise there — here it falls back to the default.
-        Some(Value::String(s)) if !s.is_empty() => s.parse().ok(),
-        _ => None,
     }
 }
 
@@ -1935,7 +2455,7 @@ fn query_int(v: Option<&Value>) -> Option<i64> {
 /// against one of them would be worse than no policy. Only entities that
 /// actually declare a `restrict` ref to this one are read, so an entity
 /// nothing points at costs nothing. A free function so the selftest can drive
-/// it against a fixture store, exactly as the oracle does.
+/// it against a fixture store.
 pub fn references_to(entity_defs: &Value, store: &Store, entity: &str, rec_id: &str) -> Vec<Value> {
     let mut blockers: Vec<Value> = Vec::new();
     let defs = match entity_defs.as_object() {
@@ -1959,7 +2479,7 @@ pub fn references_to(entity_defs: &Value, store: &Store, entity: &str, rec_id: &
             continue;
         }
 
-        // Field name -> example ids, in first-hit order (the oracle's dict).
+        // Field name -> example ids, in first-hit order.
         let mut found: Vec<(String, Vec<String>)> = Vec::new();
         let mut page: i64 = 1;
         loop {
@@ -1987,10 +2507,10 @@ pub fn references_to(entity_defs: &Value, store: &Store, entity: &str, rec_id: &
                     };
                     let ids = &mut found[pos].1;
                     if ids.len() < REFERENCE_SCAN_LIMIT {
-                        // The oracle renders str(row.get("id", "")): the id as
-                        // text, an absent id as the empty string.
-                        let id_text = match row.get("id") {
-                            Some(v) => py_str(v),
+                        // `String(row.id ?? "")`: the id as text, an absent
+                        // one as the empty string.
+                        let id_text = match row.get("id").filter(|v| !v.is_null()) {
+                            Some(v) => js_string(v),
                             None => String::new(),
                         };
                         ids.push(id_text);
@@ -2015,13 +2535,12 @@ pub fn references_to(entity_defs: &Value, store: &Store, entity: &str, rec_id: &
 
 // ----------------------------------------------------------------- adapter
 
-fn approval_key(name: &str, args: &Value) -> String {
-    // Canonical JSON with sorted keys — serde_json's default map sorts, and
-    // "args" < "op", so plain serialization is the canonical form.
-    let canonical = stable_json(&json!({ "op": name, "args": args }));
-    let digest = Sha256::digest(canonical.as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    format!("ak_{}", &hex[..32])
+/// The content-addressed key that approves one exact destructive call: the hex
+/// SHA-256 of the RFC 8785 serialization of `{"operation", "args"}` —
+/// adapter-core's `approvalKey`, so a key means the same call on every stack.
+/// Approving one call approves no argument variant.
+pub fn approval_key(name: &str, args: &Value) -> String {
+    hash_secret(&stable_json(&json!({ "operation": name, "args": args })))
 }
 
 /// What this caller may do, for rendering access on a describe level: the
@@ -2057,12 +2576,106 @@ struct Manager {
     role: String,
 }
 
-/// One operation runner: (args, ctx, store) -> JSON-able result or an error
-/// string (surfaced as a 500 operation_failed envelope). `ctx` is who is
-/// calling: `{credentialId, agentName, principal, role}`.
-pub type Runner = fn(&Value, &Value, &mut Store) -> Result<Value, String>;
-/// Runner resolution by operation name — `schema::operation_runner`.
-pub type RunnerLookup = fn(&str) -> Option<Runner>;
+/// One operation runner: (args, ctx, store) -> JSON-able result, or an error.
+/// `ctx` is who is calling: `{credentialId, agentName, principal, role}`.
+///
+/// The error is a `String` by default — a failure, answered 500
+/// `operation_failed` — or, for a runner declared `Runner<OperationError>`,
+/// an [`OperationError`], which can also refuse the call with a code of its
+/// own. Either kind of `schema.rs` is served (see [`OperationRunner`]).
+pub type Runner<E = String> = fn(&Value, &Value, &mut Store) -> Result<Value, E>;
+
+/// Why an operation did not succeed — adapter-core's `OperationError`.
+///
+/// `OperationError::new(code, message)` is a REFUSAL: the caller gets that
+/// code and message with status 400 (or [`status`](Self::status)) and any
+/// extra fields ([`with`](Self::with)), the way a guard refusal reads. Anything
+/// else converted into one (`?` on a `String` error) is a FAILURE: 500
+/// `operation_failed`, "Operation "<name>" threw: <message>".
+#[derive(Debug, Clone)]
+pub struct OperationError {
+    /// None for a failure rather than a refusal.
+    code: Option<String>,
+    message: String,
+    status: u16,
+    extra: Map<String, Value>,
+}
+
+impl OperationError {
+    /// Refuse the call with `code` (status 400 unless set).
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        OperationError { code: Some(code.to_string()), message: message.into(), status: 400, extra: Map::new() }
+    }
+
+    /// Answer with this HTTP status instead of 400.
+    pub fn status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Add a field to the refusal's envelope.
+    pub fn with(mut self, key: &str, value: Value) -> Self {
+        self.extra.insert(key.to_string(), value);
+        self
+    }
+
+    fn failure(message: String) -> Self {
+        OperationError { code: None, message, status: 500, extra: Map::new() }
+    }
+}
+
+impl From<String> for OperationError {
+    fn from(message: String) -> Self {
+        OperationError::failure(message)
+    }
+}
+
+impl From<&str> for OperationError {
+    fn from(message: &str) -> Self {
+        OperationError::failure(message.to_string())
+    }
+}
+
+impl fmt::Display for OperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OperationError {}
+
+/// A runner as the adapter holds it, whichever error type `schema.rs` chose:
+/// `main.rs` turns what `operation_runner` returns into one with `from`, so a
+/// schema written with `String` errors keeps compiling.
+#[derive(Clone, Copy)]
+pub enum OperationRunner {
+    Plain(Runner),
+    Typed(Runner<OperationError>),
+}
+
+impl From<Runner> for OperationRunner {
+    fn from(runner: Runner) -> Self {
+        OperationRunner::Plain(runner)
+    }
+}
+
+impl From<Runner<OperationError>> for OperationRunner {
+    fn from(runner: Runner<OperationError>) -> Self {
+        OperationRunner::Typed(runner)
+    }
+}
+
+impl OperationRunner {
+    fn run(self, args: &Value, ctx: &Value, store: &mut Store) -> Result<Value, OperationError> {
+        match self {
+            OperationRunner::Plain(runner) => runner(args, ctx, store).map_err(OperationError::failure),
+            OperationRunner::Typed(runner) => runner(args, ctx, store),
+        }
+    }
+}
+
+/// Runner resolution by operation name — `schema::operation_runner`, wrapped.
+pub type RunnerLookup = fn(&str) -> Option<OperationRunner>;
 /// What a principal may do (spec/v0_2/auth.md §3), as scopes (`*` is every
 /// scope), given `{id, name, role, active}`. Evaluated on every request.
 pub type PermissionsOf = fn(&Value) -> Vec<String>;
@@ -2156,6 +2769,12 @@ pub struct Adapter {
     /// Checked against when a login does not exist, so a missing account takes
     /// as long to refuse as a wrong password and the timing does not say which.
     dummy_hash: Option<String>,
+    /// `dataVersion` = `<boot_mark>.<data_writes>` (see `data_version`).
+    boot_mark: String,
+    data_writes: u64,
+    /// Open tabs, by the opaque per-tab id their update watcher sends, with
+    /// when each was last heard from. A count is all that is ever published.
+    viewers: HashMap<String, i64>,
 }
 
 /* ---------------------------------------------------------------- network
@@ -2252,14 +2871,12 @@ fn model_problems(modules: &Value, entity_defs: &Value, operations: &Value) -> V
             } else if !declared.contains(module) {
                 problems.push(format!("entity \"{name}\" names undeclared module \"{module}\""));
             }
-            if let Some(owned_by) = d.get("ownedBy").filter(|v| !v.is_null()) {
+            if let Some(declared) = d.get("ownedBy").filter(|v| !v.is_null()) {
                 // The adapter writes the owner and the guard keeps clients from
                 // doing so, which only holds for a declared, read-only string
                 // field.
-                let owned_by = owned_by.as_str().map_or_else(|| stable_json(owned_by), str::to_string);
-                let owner = get(d, "fields")
-                    .as_array()
-                    .and_then(|a| a.iter().find(|f| get(f, "name").as_str() == Some(owned_by.as_str())));
+                let owned_by = js_string(declared);
+                let owner = get(d, "fields").as_array().and_then(|a| a.iter().find(|f| get(f, "name") == declared));
                 match owner {
                     None => problems.push(format!(
                         "entity \"{name}\" is ownedBy \"{owned_by}\", which is not one of its fields"
@@ -2281,7 +2898,8 @@ fn model_problems(modules: &Value, entity_defs: &Value, operations: &Value) -> V
         } else if !declared.contains(module) {
             problems.push(format!("operation \"{op_name}\" names undeclared module \"{module}\""));
         }
-        if !get(o, "params").is_object() {
+        // Any object (a list included, as `typeof` says in the reference).
+        if !(get(o, "params").is_object() || get(o, "params").is_array()) {
             problems.push(format!(
                 "operation \"{op_name}\" declares no typed params (declare {{}} if it takes none)"
             ));
@@ -2336,6 +2954,7 @@ impl Adapter {
             .as_array()
             .map(|events| events.iter().map(|e| get_str(e, "type").to_string()).collect())
             .unwrap_or_default();
+        store.app = config.app_id.clone();
         // The hosts this app answers to are derived from its own origins, so an
         // app reached at its public URL answers there and nowhere new.
         let own_origins: Vec<String> = config.allowed_origins.iter().cloned().chain(config.public_url.clone()).collect();
@@ -2357,14 +2976,21 @@ impl Adapter {
             runner_lookup: config.runner_lookup,
             permissions_of: config.permissions_of,
             capabilities: config.capabilities,
-            credential_hint: config
-                .credential_hint
-                .unwrap_or_else(|| "Read the app's .agent-token file (mode 0600) in the project directory.".to_string()),
+            // App text forwarded into an agent's context is bounded first; the
+            // framework's own sentence is the fallback.
+            credential_hint: config.credential_hint.as_deref().and_then(bound_app_text).unwrap_or_else(|| {
+                "Read the app's .agent-token file (mode 0600) in the project directory.".to_string()
+            }),
             env: config.env,
             limiter: RateLimiter::new(),
             app_version: config.app_version,
             sign_in_failures: FailureLimiter::new(SIGN_IN_FAILURES, SIGN_IN_WINDOW_MS),
             dummy_hash: None,
+            // A restart counts as a data change: a server that came back up may
+            // have been restored under a page still holding rows from before.
+            boot_mark: base36(epoch_ms_now() as u64),
+            data_writes: 0,
+            viewers: HashMap::new(),
         };
 
         // A capability's agent may hold only scopes the app declares.
@@ -2373,7 +2999,7 @@ impl Adapter {
             for (capability, decl) in caps {
                 let unknown: Vec<String> = get(decl, "scopes")
                     .as_array()
-                    .map(|a| a.iter().map(py_str).filter(|s| s != "*" && !declared.contains(s)).collect())
+                    .map(|a| a.iter().map(js_string).filter(|s| s != "*" && !declared.contains(s)).collect())
                     .unwrap_or_default();
                 if !unknown.is_empty() {
                     problems.push(format!(
@@ -2506,16 +3132,63 @@ impl Adapter {
             "a2app": true, "protocol": PROTOCOL_VERSION, "adapterVersion": ADAPTER_VERSION,
             "app": { "id": self.app_id, "name": self.app_name },
             "schemaVersion": self.schema_version(),
-            "serverNow": now_iso(), "serverTzOffsetMinutes": 0,
+            // Moves on every record write, separately from appVersion and
+            // schemaVersion: a code change means the page must be replaced, a
+            // data change only that it must re-read.
+            "dataVersion": self.data_version(),
+            "serverNow": now_iso(), "serverTzOffsetMinutes": self.store.local_offset_minutes(),
             "authMode": self.auth_mode, "accountUrl": ACCOUNT_URL,
         });
         if let Some(env) = &self.env {
             doc["env"] = json!(env);
         }
-        if let Some(version) = &self.app_version {
-            doc["appVersion"] = json!(version());
+        // Published only when the app has one: a field that is sometimes empty
+        // would make a client's "did it change?" comparison lie.
+        if let Some(version) = self.app_version.as_ref().map(|v| v()).filter(|v| !v.is_empty()) {
+            doc["appVersion"] = json!(version);
         }
         doc
+    }
+
+    /// `<boot time, base 36>.<writes since>` — the marker that moves when
+    /// RECORDS change: a successful create, update or delete, or an operation
+    /// not declared read-only (the adapter cannot see whether it wrote, and a
+    /// needless refetch is cheaper than a stale tab). Never on a refused write.
+    fn data_version(&self) -> String {
+        format!("{}.{}", self.boot_mark, self.data_writes)
+    }
+
+    fn mark_data_changed(&mut self) {
+        self.data_writes += 1;
+    }
+
+    // -- viewers ------------------------------------------------------------
+    // "Is anyone looking at this app?" — for the CLI's `open --if-needed`. The
+    // update watcher's identity poll carries the tab's opaque id as a header;
+    // a closing tab says goodbye with `?viewer=<id>&leaving=1`. Only a count is
+    // ever published, never who is looking.
+
+    fn note_viewer(&mut self, headers: &HashMap<String, String>, q: &HashMap<String, String>) {
+        let Some(id) = headers.get("x-a2app-viewer").or_else(|| q.get("viewer")) else { return };
+        if id.is_empty() || js_len(id) > VIEWER_ID_MAX {
+            return;
+        }
+        if headers.contains_key("x-a2app-viewer-leaving") || q.contains_key("leaving") {
+            self.viewers.remove(id);
+            return;
+        }
+        self.viewers.insert(id.clone(), epoch_ms_now());
+        // A reloaded page gets a fresh id, so prune rather than grow forever.
+        if self.viewers.len() > VIEWER_CAP {
+            self.count_viewers();
+        }
+    }
+
+    /// Live viewers, pruning the expired as it goes.
+    fn count_viewers(&mut self) -> usize {
+        let cutoff = epoch_ms_now() - VIEWER_TTL_MS;
+        self.viewers.retain(|_, seen| *seen >= cutoff);
+        self.viewers.len()
     }
 
     // -- navigational describe (A2APP-SPEC 3) -------------------------------
@@ -2524,15 +3197,15 @@ impl Adapter {
 
     fn field_doc(f: &Value) -> Value {
         let mut field = Map::new();
-        field.insert("type".to_string(), json!(get_str(f, "type")));
+        field.insert("type".to_string(), get(f, "type").clone());
         if truthy(get(f, "required")) {
             field.insert("required".to_string(), json!(true));
         }
         if truthy(get(f, "readOnly")) {
             field.insert("readOnly".to_string(), json!(true));
         }
-        if !get(f, "max").is_null() {
-            field.insert("max".to_string(), get(f, "max").clone());
+        if let Some(max) = f.get("max") {
+            field.insert("max".to_string(), max.clone());
         }
         if truthy(get(f, "values")) {
             field.insert("values".to_string(), get(f, "values").clone());
@@ -2558,18 +3231,24 @@ impl Adapter {
             .unwrap_or_default()
     }
 
+    /// Whether a level fits the budget, measured as the reference measures it:
+    /// the length of its compact JSON in UTF-16 code units.
+    fn fits(level: &Value) -> bool {
+        js_len(&js_json(level)) <= DESCRIBE_BUDGET_CHARS
+    }
+
     /// Trim a list until the level fits, always reporting what was dropped.
-    /// Budget measured on the compact serialized form actually sent.
+    /// Entries go from the end, so the order an app declared decides what
+    /// survives.
     fn fit_list<F: Fn(&[Value], usize) -> Value>(build: F, items: &[Value]) -> Value {
-        let fits = |v: &Value| stable_json(v).chars().count() <= DESCRIBE_BUDGET_CHARS;
         let whole = build(items, 0);
-        if fits(&whole) {
+        if Self::fits(&whole) {
             return whole;
         }
         let (mut lo, mut hi) = (0usize, items.len());
         while lo < hi {
-            let mid = (lo + hi + 1) / 2; // ceil, as the oracle computes it
-            if fits(&build(&items[..mid], items.len() - mid)) {
+            let mid = (lo + hi + 1) / 2; // ceil, as the reference computes it
+            if Self::fits(&build(&items[..mid], items.len() - mid)) {
                 lo = mid;
             } else {
                 hi = mid - 1;
@@ -2578,6 +3257,7 @@ impl Adapter {
         build(&items[..lo], items.len() - lo)
     }
 
+    /// Entities of one module, in declaration order.
     fn entities_of(&self, module: &str) -> Vec<(String, Value)> {
         self.entity_defs
             .as_object()
@@ -2590,19 +3270,24 @@ impl Adapter {
             .unwrap_or_default()
     }
 
-    fn describe_root(&self, access: &Access) -> Value {
+    fn operation_list(&self) -> &[Value] {
+        self.operations.as_array().map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// The app's home screen: every module, how big it is, and whether this
+    /// caller can reach it. Over the budget, the summaries go first (every
+    /// module stays named); only then are rows dropped, counted, and
+    /// `describe?all=true` offered.
+    fn describe_root(&self, access: &Access, show_all: bool) -> Value {
         let mut modules = Vec::new();
         for m in self.modules.as_array().map(|a| a.as_slice()).unwrap_or_default() {
             let name = get_str(m, "name");
             let owned = self.entities_of(name);
-            let ops: Vec<&Value> = self
-                .operations
-                .as_array()
-                .map(|a| a.iter().filter(|o| get_str(o, "module") == name).collect())
-                .unwrap_or_default();
+            let ops: Vec<&Value> = self.operation_list().iter().filter(|o| get_str(o, "module") == name).collect();
             let readable = owned.iter().filter(|(n, _)| access.read(n)).count();
             let writable = owned.iter().filter(|(n, _)| access.write(n)).count();
             let runnable = ops.iter().filter(|o| access.run(get_str(o, "name"))).count();
+            // An ops-only module is reachable when any of its operations is.
             let reach = if owned.is_empty() {
                 if runnable == 0 {
                     "none"
@@ -2624,13 +3309,44 @@ impl Adapter {
             }
             modules.push(row);
         }
-        json!({
-            "level": "root",
-            "app": { "id": self.app_id, "name": self.app_name },
-            "modules": modules,
-            "conventions": Self::conventions(),
-            "next": ["describe/{module}", "describe?find={term}"],
-        })
+        let build = |rows: &[Value], truncated: usize, summaries: bool| -> Value {
+            let rows: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    if !summaries {
+                        if let Some(row) = r.as_object_mut() {
+                            row.shift_remove("summary");
+                        }
+                    }
+                    r
+                })
+                .collect();
+            let mut next = vec![json!("describe/{module}"), json!("describe?find={term}")];
+            if truncated > 0 {
+                next.push(json!("describe?all=true"));
+            }
+            let mut level = json!({
+                "level": "root",
+                "app": { "id": self.app_id, "name": self.app_name },
+                "modules": rows,
+                "conventions": Self::conventions(),
+                "next": next,
+            });
+            if truncated > 0 {
+                level["truncated"] = json!(truncated);
+            }
+            level
+        };
+        let whole = build(&modules, 0, true);
+        if show_all || Self::fits(&whole) {
+            return whole;
+        }
+        let bare = build(&modules, 0, false);
+        if Self::fits(&bare) {
+            return bare;
+        }
+        Self::fit_list(|rows, truncated| build(rows, truncated, false), &modules)
     }
 
     fn describe_module(&self, module: &Value, access: &Access, show_all: bool) -> Value {
@@ -2647,14 +3363,14 @@ impl Adapter {
             owned.push(row);
         }
         let mut ops = Vec::new();
-        for o in self.operations.as_array().map(|a| a.as_slice()).unwrap_or_default() {
-            if get_str(o, "module") != module_name || !get(o, "entity").is_null() {
+        for o in self.operation_list() {
+            if get_str(o, "module") != module_name || o.get("entity").is_some() || !access.run(get_str(o, "name")) {
                 continue;
             }
-            if !access.run(get_str(o, "name")) {
-                continue;
+            let mut row = json!({ "name": get(o, "name") });
+            if let Some(destructive) = o.get("destructive") {
+                row["destructive"] = destructive.clone();
             }
-            let mut row = json!({ "name": get_str(o, "name"), "destructive": truthy(get(o, "destructive")) });
             if truthy(get(o, "description")) {
                 row["summary"] = get(o, "description").clone();
             }
@@ -2695,21 +3411,27 @@ impl Adapter {
         }
     }
 
-    fn describe_entity(&self, module: &str, name: &str, d: &Value, access: &Access) -> Value {
+    /// The first level carrying schemas, for one entity. Fields are never
+    /// trimmed (a field absent from describe is read as write-only, which
+    /// would silently disable the read-back check); its operations are, and
+    /// the count dropped is reported.
+    fn describe_entity(&self, module: &str, name: &str, d: &Value, access: &Access, show_all: bool) -> Value {
         let mut fields = Map::new();
         for f in Self::readable_fields(d) {
             fields.insert(get_str(&f, "name").to_string(), Self::field_doc(&f));
         }
         let mut ops = Vec::new();
-        for o in self.operations.as_array().map(|a| a.as_slice()).unwrap_or_default() {
+        for o in self.operation_list() {
             if get(o, "entity").as_str() != Some(name) || !access.run(get_str(o, "name")) {
                 continue;
             }
-            let mut decl = json!({
-                "name": get_str(o, "name"),
-                "destructive": truthy(get(o, "destructive")),
-                "params": if get(o, "params").is_object() { get(o, "params").clone() } else { json!({}) },
-            });
+            let mut decl = json!({ "name": get(o, "name") });
+            if let Some(destructive) = o.get("destructive") {
+                decl["destructive"] = destructive.clone();
+            }
+            if let Some(params) = o.get("params") {
+                decl["params"] = params.clone();
+            }
             if truthy(get(o, "description")) {
                 decl["description"] = get(o, "description").clone();
             }
@@ -2722,37 +3444,80 @@ impl Adapter {
             decl["entity"] = json!(name);
             ops.push(decl);
         }
-        let mut level = json!({
-            "level": "entity",
-            "path": format!("{module}/{name}"),
-            "label": label_field_of(get(d, "fields")),
-            "records": format!("/api/collections/{name}/records"),
-            "fields": fields,
-            "operations": ops,
-            "next": [format!("describe/{module}/{name}/{{id}}"), format!("data {name} list")],
-        });
-        if truthy(get(d, "auth")) {
-            level["auth"] = json!(true);
+        let path = format!("{module}/{name}");
+        let build = |operations: &[Value], truncated: usize| -> Value {
+            let mut next = vec![json!(format!("describe/{path}/{{id}}")), json!(format!("data {name} list"))];
+            if truncated > 0 {
+                next.push(json!(format!("describe/{path}?all=true")));
+            }
+            let mut level = json!({
+                "level": "entity",
+                "path": path,
+                "label": label_field_of(get(d, "fields")),
+                "records": format!("/api/collections/{name}/records"),
+                "fields": fields,
+                "operations": operations,
+                "next": next,
+            });
+            if truthy(get(d, "auth")) {
+                level["auth"] = json!(true);
+            }
+            if truthy(get(d, "ownedBy")) {
+                level["ownedBy"] = get(d, "ownedBy").clone();
+            }
+            if truncated > 0 {
+                level["truncated"] = json!(truncated);
+            }
+            level
+        };
+        if show_all {
+            build(&ops, 0)
+        } else {
+            Self::fit_list(build, &ops)
         }
-        if truthy(get(d, "ownedBy")) {
-            level["ownedBy"] = get(d, "ownedBy").clone();
+    }
+
+    /// The parameter that takes THIS record, when the operation names one
+    /// unambiguously: exactly one required `ref` to this entity. It lets a
+    /// client fill the record's id in from the path without guessing; two
+    /// candidates (a `move` taking `from` and `to`) name none.
+    fn target_param_of(op: &Value, entity: &str) -> Option<String> {
+        let candidates: Vec<String> = js_object(get(op, "params"))
+            .into_iter()
+            .filter(|(_, p)| {
+                get(p, "type").as_str() == Some("ref")
+                    && get(p, "entity").as_str() == Some(entity)
+                    && get(p, "required") == &json!(true)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        (candidates.len() == 1).then(|| candidates[0].clone())
+    }
+
+    /// A label as a screen shows it: text as is, anything else as `String()`,
+    /// and nothing as null (never the text "null").
+    fn label_text(label: &Value) -> Value {
+        match label {
+            Value::Null | Value::String(_) => label.clone(),
+            other => json!(js_string(other)),
         }
-        level
     }
 
     fn describe_record(&self, module: &str, name: &str, d: &Value, record: &Value, access: &Access) -> Value {
         let fields = Value::Array(Self::readable_fields(d));
-        let label_field = label_field_of(get(d, "fields"));
-        let label = label_field.as_ref().map(|lf| get(record, lf).clone()).unwrap_or(Value::Null);
+        let label = label_field_of(get(d, "fields")).map_or(Value::Null, |lf| get(record, &lf).clone());
 
         let mut ops = Vec::new();
-        for o in self.operations.as_array().map(|a| a.as_slice()).unwrap_or_default() {
+        for o in self.operation_list() {
             if get(o, "entity").as_str() != Some(name) || !access.run(get_str(o, "name")) {
                 continue;
             }
-            let mut row = json!({ "name": get_str(o, "name"), "available": true });
+            let mut row = json!({ "name": get(o, "name"), "available": true });
             if truthy(get(o, "destructive")) {
                 row["destructive"] = json!(true);
+            }
+            if let Some(target) = Self::target_param_of(o, name) {
+                row["targetParam"] = json!(target);
             }
             let when = get(o, "appliesWhen");
             if truthy(when) && !evaluate_predicate(when, record, &fields) {
@@ -2766,45 +3531,40 @@ impl Adapter {
         // is derivable from the type vocabulary alone, with no query grammar.
         let mut relations = Vec::new();
         for f in fields.as_array().map(|a| a.as_slice()).unwrap_or_default() {
-            if get_str(f, "type") != "list<ref>" || !truthy(get(f, "entity")) {
+            if get_str(f, "type") != "list<ref>" || f.get("entity").is_none() {
                 continue;
             }
-            let mut row = json!({ "name": get_str(f, "name"), "entity": get_str(f, "entity") });
+            let mut row = json!({ "name": get(f, "name"), "entity": get(f, "entity") });
             if let Some(list) = get(record, get_str(f, "name")).as_array() {
                 row["count"] = json!(list.len());
             }
             relations.push(row);
         }
 
-        let rec_id = get_str(record, "id");
+        let rec_id = js_string(get(record, "id"));
         let path = format!("{module}/{name}/{rec_id}");
         let mut next: Vec<Value> = relations
             .iter()
-            .map(|r| json!(format!("describe/{path}/{}", get_str(r, "name"))))
+            .map(|r| json!(format!("describe/{path}/{}", js_string(get(r, "name")))))
             .collect();
         for o in &ops {
-            if truthy(get(o, "available")) {
-                next.push(json!(format!("{path} {}", get_str(o, "name"))));
+            if get(o, "available") == &json!(true) {
+                next.push(json!(format!("{path} {}", js_string(get(o, "name")))));
             }
         }
         next.push(json!(format!("data {name} get {rec_id}")));
 
-        let label_out = match &label {
-            Value::Null => Value::Null,
-            Value::String(_) => label.clone(),
-            other => json!(py_str(other)),
-        };
         let mut level = json!({
             "level": "record",
             "path": path,
-            "id": rec_id,
-            "label": label_out,
+            "id": get(record, "id"),
+            "label": Self::label_text(&label),
             "operations": ops,
-            "next": next,
         });
         if !relations.is_empty() {
             level["relations"] = json!(relations);
         }
+        level["next"] = json!(next);
         level
     }
 
@@ -2824,10 +3584,10 @@ impl Adapter {
                 }
             }
         }
-        for o in self.operations.as_array().map(|a| a.as_slice()).unwrap_or_default() {
+        for o in self.operation_list() {
             let op_name = get_str(o, "name");
             if access.run(op_name) && op_name.to_lowercase().contains(&needle) {
-                let path = match get(o, "entity").as_str() {
+                let path = match get(o, "entity").as_str().filter(|e| !e.is_empty()) {
                     Some(entity) => format!("{}/{entity}", get_str(o, "module")),
                     None => get_str(o, "module").to_string(),
                 };
@@ -3148,22 +3908,47 @@ impl Adapter {
         }
     }
 
+    /// Rate gate, keyed by the credential presented, else the page's origin,
+    /// else "anon". Over the limit answers 429 `rate_limited` before any work.
     fn rate_gate(&mut self, headers: &HashMap<String, String>, class: &str) -> Option<Reply> {
-        let caller = headers
-            .get("x-a2app-token")
-            .cloned()
-            .or_else(|| headers.get("origin").map(|o| format!("origin:{o}")))
-            .unwrap_or_else(|| "anon".to_string());
+        // A token is a secret and the audit log is kept, so a caller is keyed by
+        // the token's hash, never the token.
+        let token = headers.get("x-a2app-token").or_else(|| headers.get("x-lui-token"));
+        let caller = match (token.filter(|t| !t.is_empty()), headers.get("origin").filter(|o| !o.is_empty())) {
+            (Some(token), _) => format!("token:{}", hash_secret(token)),
+            (None, Some(origin)) => format!("origin:{origin}"),
+            (None, None) => "anon".to_string(),
+        };
         let decision = self.limiter.check(&caller, class);
         if decision.allowed {
             return None;
         }
+        // Refused before the credential is even looked at, but still traced, so
+        // a flood is visible afterwards.
+        let ctx = json!({ "credentialId": caller, "agentName": null, "principal": null });
+        self.audit(Some(&ctx), &format!("rate:{class}"), None, false, Some(ERR_RATE_LIMITED));
         Some(Self::err_with(
             429,
             ERR_RATE_LIMITED,
             &format!("Rate limit exceeded ({} per window). Slow down and retry.", decision.limit),
             &[("retryAfterSeconds", json!(decision.retry_after_seconds))],
         ))
+    }
+
+    /// One audit row: who (the call context; None when the caller was refused
+    /// before there was one), what (`data:<entity>`, `op:<name>`,
+    /// `task:<action>`, `rate:<class>`), which record, and how it ended.
+    fn audit(&mut self, ctx: Option<&Value>, target: &str, record_id: Option<&str>, ok: bool, code: Option<&str>) {
+        let field = |key: &str| ctx.map_or(Value::Null, |c| get(c, key).clone());
+        let mut entry = json!({
+            "at": now_iso(), "credentialId": field("credentialId"), "agentName": field("agentName"),
+            "principal": field("principal"), "target": target, "recordId": record_id,
+            "outcome": if ok { "ok" } else { "rejected" },
+        });
+        if let Some(code) = code.filter(|c| !c.is_empty()) {
+            entry["code"] = json!(code);
+        }
+        self.store.append_audit(&entry);
     }
 
     /// What this caller may do, for rendering access on a describe level.
@@ -3239,8 +4024,9 @@ impl Adapter {
             }
         }
 
+        let show_all = q.get("all").map(String::as_str) == Some("true");
         if segments.is_empty() {
-            return (200, self.describe_root(&access));
+            return (200, self.describe_root(&access, show_all));
         }
 
         let module_name = &segments[0];
@@ -3249,31 +4035,19 @@ impl Adapter {
             .as_array()
             .and_then(|a| a.iter().find(|m| get_str(m, "name") == module_name.as_str()))
             .cloned();
-        let module = match module {
-            Some(m) => m,
-            None => {
-                let names: Vec<&str> = self
-                    .modules
-                    .as_array()
-                    .map(|a| a.iter().map(|m| get_str(m, "name")).collect())
-                    .unwrap_or_default();
-                return Self::err_with(
-                    404,
-                    "unknown_module",
-                    &format!("No module \"{module_name}\"."),
-                    &[("modules", json!(names))],
-                );
-            }
+        let Some(module) = module else {
+            let names: Vec<Value> =
+                self.modules.as_array().map(|a| a.iter().map(|m| get(m, "name").clone()).collect()).unwrap_or_default();
+            let message = format!("No module \"{module_name}\".");
+            return Self::err_with(404, "unknown_module", &message, &[("modules", json!(names))]);
         };
         if segments.len() == 1 {
-            let show_all = q.get("all").map(String::as_str) == Some("true");
             return (200, self.describe_module(&module, &access, show_all));
         }
 
         let entity = &segments[1];
-        let d = match self.entity_defs.get(entity.as_str()) {
-            Some(d) => d.clone(),
-            None => return Self::err(404, "unknown_entity", &format!("No such entity \"{entity}\".")),
+        let Some(d) = self.entity_defs.get(entity.as_str()).cloned() else {
+            return Self::err(404, "unknown_entity", &format!("No such entity \"{entity}\"."));
         };
         if get_str(&d, "module") != module_name.as_str() {
             return Self::err(
@@ -3284,16 +4058,12 @@ impl Adapter {
         }
         if segments.len() == 2 {
             if !access.read(entity) {
-                return Self::err_with(
-                    403,
-                    ERR_INSUFFICIENT_SCOPE,
-                    &format!("This credential does not hold data:{entity}:read."),
-                    &[("required", json!(format!("data:{entity}:read")))],
-                );
+                return Self::insufficient(&format!("data:{entity}:read"));
             }
-            return (200, self.describe_entity(module_name, entity, &d, &access));
+            return (200, self.describe_entity(module_name, entity, &d, &access, show_all));
         }
 
+        // From here the level reads stored records — authorize and meter as a read.
         if let Some(limited) = self.rate_gate(headers, "data") {
             return limited;
         }
@@ -3303,65 +4073,56 @@ impl Adapter {
         };
 
         let record_id = &segments[2];
-        let record = match self.store.get_record(entity, record_id).filter(|r| self.visible(&d, &ctx, r)) {
-            Some(r) => r,
-            None => return Self::err(404, "record_not_found", &format!("No {entity} record \"{record_id}\".")),
+        let Some(record) = self.store.get_record(entity, record_id).filter(|r| self.visible(&d, &ctx, r)) else {
+            return Self::err(404, "record_not_found", &format!("No {entity} record \"{record_id}\"."));
         };
         if segments.len() == 3 {
             return (200, self.describe_record(module_name, entity, &d, &record, &access));
         }
 
         let relation = &segments[3];
-        let field = get(&d, "fields").as_array().and_then(|a| {
-            a.iter()
-                .find(|f| {
-                    get_str(f, "name") == relation.as_str()
-                        && get_str(f, "type") == "list<ref>"
-                        && truthy(get(f, "entity"))
-                        && !truthy(get(f, "writeOnly"))
-                })
-                .cloned()
+        let fields = get(&d, "fields").as_array().cloned().unwrap_or_default();
+        let field = fields.iter().find(|f| {
+            get_str(f, "name") == relation.as_str()
+                && get_str(f, "type") == "list<ref>"
+                && truthy(get(f, "entity"))
+                && !truthy(get(f, "writeOnly"))
         });
-        let field = match field {
-            Some(f) => f,
-            None => return Self::err(404, "unknown_relation", &format!("\"{relation}\" is not a sub-resource of {entity}.")),
-        };
-        let target = get_str(&field, "entity").to_string();
-        if !access.read(&target) {
+        let Some(field) = field else {
+            let relations: Vec<Value> = fields
+                .iter()
+                .filter(|f| get_str(f, "type") == "list<ref>" && !truthy(get(f, "writeOnly")))
+                .map(|f| get(f, "name").clone())
+                .collect();
             return Self::err_with(
-                403,
-                ERR_INSUFFICIENT_SCOPE,
-                &format!("This credential does not hold data:{target}:read."),
-                &[("required", json!(format!("data:{target}:read")))],
+                404,
+                "unknown_relation",
+                &format!("\"{relation}\" is not a sub-resource of {entity}."),
+                &[("relations", json!(relations))],
             );
+        };
+        let target = js_string(get(field, "entity"));
+        if !access.read(&target) {
+            return Self::insufficient(&format!("data:{target}:read"));
         }
-        let target_label = self
-            .entity_defs
-            .get(&target)
-            .and_then(|td| label_field_of(get(td, "fields")));
+        let target_label = self.entity_defs.get(&target).and_then(|td| label_field_of(get(td, "fields")));
         let mut items = Vec::new();
         for rid in get(&record, relation).as_array().map(|a| a.as_slice()).unwrap_or_default() {
-            let rid_str = py_str(rid);
-            let referenced = self.store.get_record(&target, &rid_str);
-            let label = match (&referenced, &target_label) {
-                (Some(rec), Some(lf)) => get(rec, lf).clone(),
+            let rid = js_string(rid);
+            // A dangling reference is reported as the id it is, not dropped.
+            let label = match (self.store.get_record(&target, &rid), &target_label) {
+                (Some(rec), Some(lf)) => get(&rec, lf).clone(),
                 _ => Value::Null,
             };
-            let label_out = match &label {
-                Value::Null => Value::Null,
-                Value::String(_) => label.clone(),
-                other => json!(py_str(other)),
-            };
-            items.push(json!({ "id": rid_str, "label": label_out }));
+            items.push(json!({ "id": rid, "label": Self::label_text(&label) }));
         }
 
         let path = format!("{module_name}/{entity}/{record_id}/{relation}");
-        let next0 = format!("data {target} get {{id}}");
-        let next1 = format!("describe/{module_name}/{entity}/{record_id}");
+        let next = json!([format!("data {target} get {{id}}"), format!("describe/{module_name}/{entity}/{record_id}")]);
         let build = |rows: &[Value], truncated: usize| -> Value {
             let mut level = json!({
                 "level": "relation", "path": path.clone(), "entity": target.clone(), "items": rows,
-                "next": [next0.clone(), next1.clone()],
+                "next": next.clone(),
             });
             if truncated > 0 {
                 level["truncated"] = json!(truncated);
@@ -3371,6 +4132,15 @@ impl Adapter {
         (200, Self::fit_list(build, &items))
     }
 
+    fn insufficient(scope: &str) -> Reply {
+        Self::err_with(
+            403,
+            ERR_INSUFFICIENT_SCOPE,
+            &format!("This credential does not hold {scope}."),
+            &[("required", json!(scope))],
+        )
+    }
+
     fn is_allowed_host(&self, raw: &str) -> bool {
         if self.allowed_hosts.contains(&raw.to_ascii_lowercase()) {
             return true;
@@ -3378,6 +4148,11 @@ impl Adapter {
         hostname_of(raw).map_or(false, |name| is_loopback_name(&name) || self.allowed_hosts.contains(&name))
     }
 
+    /// One request. Answers every path in the adapter's namespaces (a miss
+    /// there is its own 404) and the identity alias; returns None for any
+    /// other path, which is the View's. The Host check comes first and covers
+    /// every path — the View's included, which is why `main.rs` asks here
+    /// before serving a file.
     pub fn dispatch(
         &mut self,
         method: &str,
@@ -3385,7 +4160,7 @@ impl Adapter {
         headers: &HashMap<String, String>,
         body: Option<&Value>,
         query: &HashMap<String, String>,
-    ) -> Answer {
+    ) -> Option<Answer> {
         let headers: HashMap<String, String> =
             headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
         let method = method.to_uppercase();
@@ -3395,12 +4170,16 @@ impl Adapter {
             let qs = path[idx + 1..].to_string();
             path.truncate(idx);
             for (k, v) in parse_qs(&qs) {
-                q.insert(k, v); // last value wins, as the oracle's parse does
+                q.insert(k, v); // last value wins, as URLSearchParams read into an object does
             }
         }
         let trimmed = path.trim_end_matches('/');
         let path = if trimmed.is_empty() { "/" } else { trimmed };
-        let answer = |(status, json): Reply| Answer { status, json, headers: Vec::new() };
+        // What every handler reads: the body, or {} when there is none.
+        let body = match body {
+            None | Some(Value::Null) => json!({}),
+            Some(b) => b.clone(),
+        };
 
         // Before any route, including the unauthenticated identity document,
         // which is otherwise a free fingerprint of the app for a rebound page:
@@ -3408,14 +4187,90 @@ impl Adapter {
         // re-resolves to 127.0.0.1, but its Host header still says evil.com.
         if let Some(host) = headers.get("host") {
             if !self.is_allowed_host(host) {
-                return answer(Self::err(
+                return Some(Answer::of(Self::err(
                     403,
                     "forbidden_host",
                     &format!("Refused: this app answers only on its own host, not \"{host}\"."),
-                ));
+                )));
             }
         }
+        self.route(&method, path, &headers, &body, &q)
+    }
 
+    /// `decodeURIComponent` on one path segment, or the reference's answer to
+    /// a malformed escape: its URIError, which surfaces as 500 `adapter_error`.
+    fn decode_segment(segment: &str) -> Result<String, Reply> {
+        decode_uri_component(segment).ok_or_else(|| Self::err(500, "adapter_error", "URI malformed"))
+    }
+
+    /// Every route, after the Host check, in adapter-core's order.
+    fn route(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: &Value,
+        q: &HashMap<String, String>,
+    ) -> Option<Answer> {
+        let reply = |r: Reply| Some(Answer::of(r));
+        if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
+            // The update watcher polls identity anyway, so its "I am still
+            // here" rides along rather than doubling every tab's requests.
+            self.note_viewer(headers, q);
+            return reply((200, self.identity()));
+        }
+        // How many people have this app open: a count only, and behind a
+        // credential — not a fact to hand to anyone who asks.
+        if path == "/api/_a2app/viewers" {
+            if let Err(refused) = self.authorize(headers, None, false) {
+                return reply(refused);
+            }
+            let viewers = self.count_viewers();
+            return reply((200, json!({ "a2app": true, "viewers": viewers, "ttlMs": VIEWER_TTL_MS })));
+        }
+        // Describe is navigational: the bare path is the root level, and each
+        // extra segment moves one level inward (A2APP-SPEC 3). Segments are
+        // decoded, since an id or a name may hold an escaped character.
+        if path == "/api/_a2app/describe" {
+            return reply(self.handle_describe(headers, &[], q));
+        }
+        if let Some(rest) = path.strip_prefix("/api/_a2app/describe/") {
+            let segments = match rest.split('/').map(Self::decode_segment).collect::<Result<Vec<_>, _>>() {
+                Ok(segments) => segments,
+                Err(malformed) => return reply(malformed),
+            };
+            if segments.len() > 4 {
+                return reply(Self::err(
+                    404,
+                    "usage",
+                    "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.",
+                ));
+            }
+            if segments.iter().any(String::is_empty) {
+                return reply(Self::err(404, "usage", "describe path has an empty segment."));
+            }
+            return reply(self.handle_describe(headers, &segments, q));
+        }
+        if path == "/api/_a2app/whoami" {
+            return reply(self.whoami(headers));
+        }
+        if let Some(rest) = path.strip_prefix("/api/_a2app/auth/") {
+            // Unauthenticated by design (an agent starts here with nothing), so
+            // it is metered like an operation before anything is looked up.
+            if let Some(limited) = self.rate_gate(headers, "ops") {
+                return reply(limited);
+            }
+            if let Some(answered) = self.handle_device(method, rest, headers, body) {
+                return reply(answered);
+            }
+        }
+        if path == "/api/_a2app/credentials" || path.starts_with("/api/_a2app/credentials/") {
+            let id = match path.strip_prefix("/api/_a2app/credentials/").map(Self::decode_segment).transpose() {
+                Ok(id) => id,
+                Err(malformed) => return reply(malformed),
+            };
+            return reply(self.handle_credentials(method, id.as_deref(), headers, body));
+        }
         // Accounts, sessions and invites (multi-user only) — the routes that
         // set a cookie.
         let account_route = ["/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"]
@@ -3423,156 +4278,145 @@ impl Adapter {
             .any(|p| path == *p || path.starts_with(&format!("{p}/")));
         if account_route {
             if !self.multi_user() {
-                return answer(Self::err(404, "not_multi_user", "This app has no accounts: its authMode is none."));
+                return reply(Self::err(404, "not_multi_user", "This app has no accounts: its authMode is none."));
             }
-            let body = body.cloned().unwrap_or_else(|| json!({}));
-            let (reply, cookie) = self.handle_accounts(&method, path, &headers, &body);
-            let mut out = answer(reply);
+            let (answered, cookie) = self.handle_accounts(method, path, headers, body);
+            let mut out = Answer::of(answered);
             if let Some(cookie) = cookie {
                 out.headers.push(("Set-Cookie".to_string(), cookie));
             }
-            return out;
-        }
-        answer(self.route(&method, path, &headers, body, &q))
-    }
-
-    /// Every route but the account routes, after the Host check.
-    fn route(
-        &mut self,
-        method: &str,
-        path: &str,
-        headers: &HashMap<String, String>,
-        body: Option<&Value>,
-        q: &HashMap<String, String>,
-    ) -> Reply {
-        if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
-            return (200, self.identity());
-        }
-        // Describe is navigational: the bare path is the root level, and each
-        // extra segment moves one level inward (A2APP-SPEC 3).
-        if path == "/api/_a2app/describe" {
-            return self.handle_describe(headers, &[], q);
-        }
-        if let Some(rest) = path.strip_prefix("/api/_a2app/describe/") {
-            let segments: Vec<String> = rest.split('/').map(percent_decode).collect();
-            if segments.len() > 4 {
-                return Self::err(404, "usage", "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.");
-            }
-            if segments.iter().any(String::is_empty) {
-                return Self::err(404, "usage", "describe path has an empty segment.");
-            }
-            return self.handle_describe(headers, &segments, q);
-        }
-        if path == "/api/_a2app/whoami" {
-            // whoami answers whoever this app will actually serve, which is
-            // what `authorize` decides — so it asks the same question. The 401
-            // that remains is the honest one: on a multi-user app `authorize`
-            // really would refuse.
-            let caller = match self.resolve(headers, false) {
-                Ok(caller) => caller,
-                Err(reply) => return reply,
-            };
-            // The reach the request was given: a credential's scopes
-            // intersected with what its person may do now, or a person's own.
-            // An anonymous read was never scope-checked, so it reports the
-            // reach describe renders for it — one source, so the two agree.
-            let scopes = match caller.held {
-                Some(held) => held,
-                None => self.anonymous_reach(),
-            };
-            let principal = get_str(&caller.ctx, "principal");
-            let principal_name = self.principal_info(principal).map_or(Value::Null, |p| get(&p, "name").clone());
-            return (
-                200,
-                json!({
-                    "a2app": true,
-                    "credentialId": get(&caller.ctx, "credentialId"),
-                    "agentName": get(&caller.ctx, "agentName"),
-                    "principal": principal,
-                    "principalName": principal_name,
-                    "role": get(&caller.ctx, "role"),
-                    "expiresAt": caller.grant.as_ref().map_or(Value::Null, |g| get(g, "expiresAt").clone()),
-                    "scopes": scopes.into_iter().collect::<Vec<_>>(),
-                }),
-            );
-        }
-        if let Some(rest) = path.strip_prefix("/api/_a2app/auth/") {
-            // Unauthenticated by design (an agent starts here with nothing), so
-            // it is metered like an operation before anything is looked up.
-            if let Some(limited) = self.rate_gate(headers, "ops") {
-                return limited;
-            }
-            let body = body.cloned().unwrap_or_else(|| json!({}));
-            if let Some(reply) = self.handle_device(method, rest, headers, &body) {
-                return reply;
-            }
-        }
-        if path == "/api/_a2app/credentials" || path.starts_with("/api/_a2app/credentials/") {
-            let id = path.strip_prefix("/api/_a2app/credentials/").map(percent_decode);
-            let body = body.cloned().unwrap_or_else(|| json!({}));
-            return self.handle_credentials(method, id.as_deref(), headers, &body);
+            return Some(out);
         }
         if path == "/api/_a2app/context" {
-            if let Err(reply) = self.authorize(headers, None, false) {
-                return reply;
+            if let Err(refused) = self.authorize(headers, None, false) {
+                return reply(refused);
             }
-            return (200, json!({ "a2app": true, "view": null, "selected": [] }));
+            return reply((200, json!({ "a2app": true, "view": null, "selected": [] })));
         }
         if path == "/api/_a2app/events" {
-            return self.handle_events(headers, q);
+            return reply(self.handle_events(headers, q));
         }
         if path == "/api/_a2app/tasks" || path.starts_with("/api/_a2app/tasks/") {
             let rest: Vec<String> = match path.strip_prefix("/api/_a2app/tasks/") {
                 Some(r) => r.split('/').map(str::to_string).collect(),
                 None => Vec::new(),
             };
-            return self.handle_tasks(method, headers, &rest, body, q);
+            return reply(self.handle_tasks(method, headers, &rest, body, q));
         }
 
+        // Records: /api/collections/{entity}/records[/{id}]
         if let Some(rest) = path.strip_prefix("/api/collections/") {
             let parts: Vec<&str> = rest.split('/').collect();
-            if parts.len() >= 2 && !parts[0].is_empty() && parts[1] == "records" {
-                if parts.len() == 2 {
-                    return self.handle_records(method, headers, parts[0], None, body, q);
-                }
-                if parts.len() == 3 && !parts[2].is_empty() {
-                    return self.handle_records(method, headers, parts[0], Some(parts[2]), body, q);
-                }
+            let shaped = matches!(parts.len(), 2 | 3) && parts[1] == "records" && parts.iter().all(|p| !p.is_empty());
+            if shaped {
+                let decoded = Self::decode_segment(parts[0]).and_then(|entity| {
+                    let id = parts.get(2).map(|id| Self::decode_segment(id)).transpose()?;
+                    Ok((entity, id))
+                });
+                return reply(match decoded {
+                    Ok((entity, id)) => self.handle_records(method, headers, &entity, id.as_deref(), body, q),
+                    Err(malformed) => malformed,
+                });
             }
         }
 
+        // Operations: /api/ops/{name}
         if let Some(name) = path.strip_prefix("/api/ops/") {
             if !name.is_empty() && !name.contains('/') {
                 if method != "POST" {
-                    return Self::err(405, "usage", "Operations are POST-only.");
+                    return reply(Self::err(405, "usage", "Operations are POST-only."));
                 }
-                let args = body.cloned().unwrap_or_else(|| json!({}));
-                return self.handle_operation(headers, name, &args);
+                return reply(match Self::decode_segment(name) {
+                    Ok(name) => self.handle_operation(headers, &name, body),
+                    Err(malformed) => malformed,
+                });
             }
         }
 
-        Self::err(404, "not_found", "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them.")
+        // A miss in the adapter's own namespaces is the adapter's to answer;
+        // anything else is the View's.
+        if ADAPTER_NAMESPACES.iter().any(|ns| path == *ns || path.starts_with(&format!("{ns}/"))) {
+            return reply(Self::err(404, "not_found", UNKNOWN_ROUTE_MESSAGE));
+        }
+        None
+    }
+
+    /// whoami answers whoever this app will actually serve, which is what
+    /// `authorize` decides — so it asks the same question. The 401 that remains
+    /// is the honest one: on a multi-user app `authorize` really would refuse.
+    fn whoami(&mut self, headers: &HashMap<String, String>) -> Reply {
+        let caller = match self.resolve(headers, false) {
+            Ok(caller) => caller,
+            Err(reply) => return reply,
+        };
+        // The reach the request was given: a credential's scopes intersected
+        // with what its person may do now, or a person's own. An anonymous read
+        // was never scope-checked, so it reports the reach describe renders for
+        // it — one source, so the two agree.
+        let scopes = match caller.held {
+            Some(held) => held,
+            None => self.anonymous_reach(),
+        };
+        let principal = get_str(&caller.ctx, "principal");
+        let principal_name = self.principal_info(principal).map_or(Value::Null, |p| get(&p, "name").clone());
+        let mut scopes: Vec<String> = scopes.into_iter().collect();
+        js_sort(&mut scopes);
+        (
+            200,
+            json!({
+                "a2app": true,
+                "credentialId": get(&caller.ctx, "credentialId"),
+                "agentName": get(&caller.ctx, "agentName"),
+                "principal": principal,
+                "principalName": principal_name,
+                "role": get(&caller.ctx, "role"),
+                "expiresAt": caller.grant.as_ref().map_or(Value::Null, |g| get(g, "expiresAt").clone()),
+                "scopes": scopes,
+            }),
+        )
+    }
+
+    /// A guard refusal: the first violation up top, every one listed.
+    fn guard_envelope(violations: &[Value], server_now: &str) -> Reply {
+        let first = &violations[0];
+        (
+            400,
+            json!({
+                "a2app": true, "ok": false, "code": get(first, "code"), "field": get(first, "field"),
+                "expected": get(first, "expected"), "got": get(first, "got"),
+                "message": describe_violation(first, Some(server_now)),
+                "violations": violations,
+            }),
+        )
     }
 
     // -- records ------------------------------------------------------------
+
+    /// Whether `ctx` sees only its own records here and `rec_id` is not one of
+    /// them: another member's record answers exactly as a missing one does.
+    fn hidden(&self, d: &Value, ctx: &Value, entity: &str, rec_id: &str) -> bool {
+        self.owned_only(d, ctx).is_some()
+            && !self.store.get_record(entity, rec_id).map_or(false, |r| self.visible(d, ctx, &r))
+    }
+
     fn handle_records(
         &mut self,
         method: &str,
         headers: &HashMap<String, String>,
         entity: &str,
         rec_id: Option<&str>,
-        body: Option<&Value>,
+        body: &Value,
         query: &HashMap<String, String>,
     ) -> Reply {
         if let Some(limited) = self.rate_gate(headers, "data") {
             return limited;
         }
-        let d = match self.entity_defs.get(entity) {
-            Some(d) => d.clone(),
-            None => return Self::err(404, "unknown_entity", &format!("No such entity \"{entity}\".")),
+        let Some(d) = self.entity_defs.get(entity).cloned() else {
+            return Self::err(404, "unknown_entity", &format!("No such entity \"{entity}\"."));
         };
         let fields = get(&d, "fields").clone();
         let server_now = now_iso();
+        let not_found = |id: &str| Self::err(404, "record_not_found", &format!("No {entity} record \"{id}\"."));
 
         if method == "GET" {
             let ctx = match self.authorize(headers, Some(&format!("data:{entity}:read")), false) {
@@ -3582,42 +4426,44 @@ impl Adapter {
             if let Some(rec_id) = rec_id {
                 return match self.store.get_record(entity, rec_id).filter(|r| self.visible(&d, &ctx, r)) {
                     Some(rec) => (200, rec),
-                    None => Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\".")),
+                    None => not_found(rec_id),
                 };
             }
             // `where` is the adapter's alone: a member sees only the records it
             // owns, constrained before paging so the counts are theirs too.
-            let mut query_value: Map<String, Value> =
-                query.iter().filter(|(k, _)| k.as_str() != "where").map(|(k, v)| (k.clone(), json!(v))).collect();
+            let mut list_query = Map::new();
             if let Some(field) = self.owned_only(&d, &ctx) {
-                query_value.insert("where".to_string(), json!({ field: get(&ctx, "principal") }));
+                list_query.insert("where".to_string(), json!({ field: get(&ctx, "principal") }));
             }
-            return match self.store.list_records(entity, &Value::Object(query_value)) {
+            for key in ["filter", "sort", "perPage", "page"] {
+                if let Some(value) = query.get(key) {
+                    list_query.insert(key.to_string(), json!(value));
+                }
+            }
+            return match self.store.list_records(entity, &Value::Object(list_query)) {
                 Ok(listed) => (200, listed),
                 // Refuse, never ignore: unfiltered rows under a filter would be
                 // a 200 with the wrong records (see the grammar's comment).
-                Err(e) => Self::err(400, "invalid_filter", &e.to_string()),
+                Err(e) => Self::err_with(400, ERR_INVALID_FILTER, &e.to_string(), &[("got", json!(e.expression))]),
             };
         }
 
+        let target = format!("data:{entity}");
         let ctx = match self.authorize(headers, Some(&format!("data:{entity}:write")), true) {
             Ok(ctx) => ctx,
-            Err(reply) => return reply,
-        };
-        let body = body.cloned().unwrap_or_else(|| json!({}));
-        // Another member's record answers exactly as a missing one does.
-        let foreign = |adapter: &Self, rec_id: &str| {
-            adapter.owned_only(&d, &ctx).is_some()
-                && !adapter.store.get_record(entity, rec_id).map_or(false, |r| adapter.visible(&d, &ctx, &r))
+            Err(reply) => {
+                let code = get_str(&reply.1, "code").to_string();
+                self.audit(None, &target, rec_id, false, Some(&code));
+                return reply;
+            }
         };
 
         if method == "DELETE" {
-            let rec_id = match rec_id {
-                Some(id) => id,
-                None => return Self::err(400, "usage", "DELETE requires a record id."),
+            let Some(rec_id) = rec_id else {
+                return Self::err(400, "usage", "DELETE requires a record id.");
             };
-            if foreign(self, rec_id) {
-                return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\"."));
+            if self.hidden(&d, &ctx, entity, rec_id) {
+                return not_found(rec_id);
             }
 
             // The app's referential rules bind THIS door too.
@@ -3631,10 +4477,7 @@ impl Adapter {
             // place both doors pass through.
             let blockers = references_to(&self.entity_defs, &self.store, entity, rec_id);
             if !blockers.is_empty() {
-                let total: usize = blockers
-                    .iter()
-                    .map(|b| get(b, "ids").as_array().map_or(0, Vec::len))
-                    .sum();
+                let total: usize = blockers.iter().map(|b| get(b, "ids").as_array().map_or(0, Vec::len)).sum();
                 let where_list: Vec<String> = blockers
                     .iter()
                     .map(|b| format!("{}.{}", get_str(b, "entity"), get_str(b, "field")))
@@ -3644,6 +4487,7 @@ impl Adapter {
                 } else {
                     format!("{total} records still reference")
                 };
+                self.audit(Some(&ctx), &target, Some(rec_id), false, Some(ERR_RECORD_REFERENCED));
                 return Self::err_with(
                     409,
                     ERR_RECORD_REFERENCED,
@@ -3662,9 +4506,12 @@ impl Adapter {
                 );
             }
 
-            if !self.store.delete_record(entity, rec_id) {
-                return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\"."));
+            let deleted = self.store.delete_record(entity, rec_id);
+            self.audit(Some(&ctx), &target, Some(rec_id), deleted, None);
+            if !deleted {
+                return not_found(rec_id);
             }
+            self.mark_data_changed();
             return (200, json!({ "a2app": true, "ok": true, "deleted": rec_id }));
         }
 
@@ -3672,96 +4519,82 @@ impl Adapter {
             return Self::err(405, "usage", &format!("{method} not allowed on records."));
         }
 
-        let idem = headers.get("idempotency-key").cloned();
-        if let Some(key) = &idem {
-            if method == "POST" {
-                if let Some(prior) = self.store.idem_get(entity, key) {
-                    return Self::err_with(
-                        409,
-                        ERR_DUPLICATE_REQUEST,
-                        "This idempotency key already produced a record.",
-                        &[("id", json!(prior))],
-                    );
-                }
-            }
-        }
-
-        let allow = match get(&d, "writeAllow").as_array() {
-            Some(list) => {
-                let mut m = Map::new();
-                for k in list {
-                    if let Some(k) = k.as_str() {
-                        m.insert(k.to_string(), json!(true));
-                    }
-                }
-                Some(Value::Object(m))
-            }
-            None => None,
+        // Idempotency: a replayed key is a 409 naming the record, on a create
+        // (keyed by entity) and on an update (keyed by the row), checked before
+        // anything is written and recorded only once the write is read back.
+        let idem_key = headers
+            .get("idempotency-key")
+            .filter(|k| !k.is_empty() && (method == "POST" || rec_id.is_some()))
+            .cloned();
+        let idem_scope = match (method, rec_id) {
+            ("PATCH", Some(id)) => format!("{entity}#{id}"),
+            _ => entity.to_string(),
         };
-        let violations = validate(&fields, &body, allow.as_ref());
-        if !violations.is_empty() {
-            let first = &violations[0];
-            return (
-                400,
-                json!({
-                    "a2app": true, "ok": false, "code": get(first, "code"), "field": get(first, "field"),
-                    "expected": get(first, "expected"), "got": get(first, "got"),
-                    "message": describe_violation(first, Some(&server_now)),
-                    "violations": violations,
-                }),
-            );
+        if let Some(key) = &idem_key {
+            if let Some(prior) = self.store.idem_get(&idem_scope, key) {
+                return Self::err_with(
+                    409,
+                    ERR_DUPLICATE_REQUEST,
+                    "This idempotency key was already applied.",
+                    &[("id", json!(prior))],
+                );
+            }
         }
 
-        // Backend write. The owner field is the adapter's to set: the guard has
-        // already refused a client that tried, because it is read-only.
-        let stored: Value;
-        if method == "POST" {
-            let create = match get(&d, "ownedBy").as_str().filter(|f| !f.is_empty()) {
-                Some(field) => {
-                    let mut owned = body.as_object().cloned().unwrap_or_default();
-                    owned.insert(field.to_string(), get(&ctx, "principal").clone());
-                    Value::Object(owned)
-                }
-                None => body.clone(),
-            };
-            stored = self.materialize(entity, &create);
-            self.store.put_record(entity, stored.clone());
-        } else {
-            let rec_id = match rec_id {
-                Some(id) => id,
-                None => return Self::err(400, "usage", "PATCH requires a record id."),
-            };
-            if foreign(self, rec_id) {
-                return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\"."));
+        // Guard the RAW body before any backend coercion. Required-field
+        // presence is enforced on CREATE only — a PATCH is a partial write.
+        let allow = get(&d, "writeAllow").as_array().map(|list| {
+            Value::Object(list.iter().filter_map(Value::as_str).map(|k| (k.to_string(), json!(true))).collect())
+        });
+        let violations = validate(&fields, body, allow.as_ref(), method == "POST");
+        if !violations.is_empty() {
+            self.audit(Some(&ctx), &target, rec_id, false, violations[0].get("code").and_then(Value::as_str));
+            return Self::guard_envelope(&violations, &server_now);
+        }
+
+        // Backend write, over the body as the reference sees it. The owner field
+        // is the adapter's to set: the guard has already refused a client that
+        // tried, because it is read-only.
+        let writing = js_object(body);
+        let stored = if method == "POST" {
+            let mut create = writing;
+            if let Some(field) = get(&d, "ownedBy").as_str().filter(|f| !f.is_empty()) {
+                create.insert(field.to_string(), get(&ctx, "principal").clone());
             }
-            let mut existing = match self.store.get_record(entity, rec_id) {
-                Some(rec) => rec,
-                None => return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\".")),
+            let rec = self.materialize(entity, &Value::Object(create));
+            self.store.put_record(entity, rec.clone());
+            rec
+        } else {
+            let Some(rec_id) = rec_id else {
+                return Self::err(400, "usage", "PATCH requires a record id.");
+            };
+            if self.hidden(&d, &ctx, entity, rec_id) {
+                return not_found(rec_id);
+            }
+            let Some(mut existing) = self.store.get_record(entity, rec_id) else {
+                return not_found(rec_id);
             };
             for f in fields.as_array().map(|a| a.as_slice()).unwrap_or_default() {
                 let name = get_str(f, "name");
-                if truthy(get(f, "readOnly")) || body.get(name).is_none() {
-                    continue;
-                }
-                let v = get(&body, name);
-                if v.is_null() || v.as_str() == Some("") {
+                let Some(v) = writing.get(name).filter(|_| !truthy(get(f, "readOnly"))) else { continue };
+                if is_blank(v) {
                     if let Some(obj) = existing.as_object_mut() {
-                        obj.remove(name);
+                        obj.shift_remove(name);
                     }
                 } else {
                     existing[name] = coerce(f, v);
                 }
             }
             self.store.put_record(entity, existing.clone());
-            stored = existing;
-        }
+            existing
+        };
 
-        let lost = divergences(&fields, &body, |n| get(&stored, n).clone());
+        // Read-back: did every non-blank requested value land?
+        let lost = divergences(&fields, body, |n| get(&stored, n).clone());
         if !lost.is_empty() {
-            let short: Vec<Value> = lost
-                .iter()
-                .map(|l| json!({ "code": ERR_NOT_STORED, "field": get(l, "field") }))
-                .collect();
+            self.audit(Some(&ctx), &target, stored.get("id").and_then(Value::as_str), false, Some(ERR_NOT_STORED));
+            let short: Vec<Value> =
+                lost.iter().map(|l| json!({ "code": ERR_NOT_STORED, "field": get(l, "field") })).collect();
             return (
                 422,
                 json!({
@@ -3773,33 +4606,77 @@ impl Adapter {
             );
         }
 
-        if let Some(key) = &idem {
-            if method == "POST" {
-                let id = get_str(&stored, "id").to_string();
-                self.store.idem_put(entity, key, &id);
-            }
+        let stored_id = js_string(get(&stored, "id"));
+        if let Some(key) = &idem_key {
+            self.store.idem_put(&idem_scope, key, &stored_id);
         }
+        self.audit(Some(&ctx), &target, Some(&stored_id), true, None);
+        self.mark_data_changed();
         (200, stored)
     }
 
     // -- operations ---------------------------------------------------------
+
+    /// A declared operation's parameters, in the shape the record guard
+    /// validates: an operation IS a write, so its arguments are held to the
+    /// same rules — an undeclared, ill-typed or missing required argument is
+    /// refused before anything runs.
+    fn param_fields(decl: &Value) -> Value {
+        let fields = js_object(get(decl, "params")).into_iter().map(|(name, p)| {
+            let mut field = json!({ "name": name });
+            for key in ["type", "required", "max", "values", "entity"] {
+                if let Some(v) = p.get(key) {
+                    field[key] = v.clone();
+                }
+            }
+            field
+        });
+        Value::Array(fields.collect())
+    }
+
     fn handle_operation(&mut self, headers: &HashMap<String, String>, name: &str, args: &Value) -> Reply {
         if let Some(limited) = self.rate_gate(headers, "ops") {
             return limited;
         }
-        let decl = match self.op_decl(name) {
-            Some(d) => d,
-            None => return Self::err(404, "unknown_operation", &format!("No declared operation \"{name}\".")),
+        let Some(decl) = self.op_decl(name) else {
+            return Self::err(404, "unknown_operation", &format!("No declared operation \"{name}\"."));
         };
         let ctx = match self.authorize(headers, Some(&format!("op:{name}")), !truthy(get(&decl, "readOnly"))) {
             Ok(ctx) => ctx,
             Err(reply) => return reply,
         };
+        let target = format!("op:{name}");
 
+        // Guard the RAW args before anything acts on them, and before an
+        // approval key is minted: a person must never be asked to approve a
+        // call that cannot run. Every argument is supplied fresh on each call,
+        // so a declared `required` is always enforced.
+        let violations = validate(&Self::param_fields(&decl), args, None, true);
+        if !violations.is_empty() {
+            self.audit(Some(&ctx), &target, None, false, violations[0].get("code").and_then(Value::as_str));
+            return Self::guard_envelope(&violations, &now_iso());
+        }
+
+        // Idempotency: a key already spent on this operation is a 409. Checked
+        // before approval; recorded only after a success, so a first call that
+        // asked for approval or failed leaves the retry free to run.
+        let idem_key = headers.get("idempotency-key").filter(|k| !k.is_empty()).cloned();
+        if let Some(key) = &idem_key {
+            if self.store.idem_get(&target, key).is_some() {
+                return Self::err_with(
+                    409,
+                    ERR_DUPLICATE_REQUEST,
+                    "This idempotency key already ran this operation.",
+                    &[("operation", json!(name))],
+                );
+            }
+        }
+
+        // Approval: a destructive op needs the key for this exact call.
         if truthy(get(&decl, "destructive")) {
             let key = approval_key(name, args);
             let provided = headers.get("x-a2app-approval").or_else(|| headers.get("x-lui-approval"));
-            match provided {
+            match provided.filter(|p| !p.is_empty()) {
                 None => {
                     self.store.approval_issue(&key);
                     return Self::err_with(
@@ -3822,21 +4699,52 @@ impl Adapter {
             }
         }
 
-        let runner = match (self.runner_lookup)(name) {
-            Some(r) => r,
-            None => {
-                return Self::err(
-                    501,
-                    "not_implemented",
-                    &format!("This app declares \"{name}\" but implements no operation runner."),
-                )
-            }
+        let Some(runner) = (self.runner_lookup)(name) else {
+            return Self::err(
+                501,
+                "not_implemented",
+                &format!("This app declares \"{name}\" but implements no operation runner."),
+            );
         };
-        // A task the runner queues records its caller as who asked.
-        let outcome = runner(args, &ctx, self.store.acting_for(get_str(&ctx, "principal")).0);
+        // A task the runner queues records its caller as who asked. A runner
+        // that panics fails its own call, never the process.
+        let outcome = {
+            let scope = self.store.acting_for(get_str(&ctx, "principal"));
+            catch_unwind(AssertUnwindSafe(|| runner.run(args, &ctx, &mut *scope.0)))
+        };
+        let failed =
+            |message: &str| Self::err(500, "operation_failed", &format!("Operation \"{name}\" threw: {message}"));
         match outcome {
-            Ok(result) => (200, json!({ "a2app": true, "ok": true, "operation": name, "result": result })),
-            Err(e) => Self::err(500, "operation_failed", &format!("Operation \"{name}\" threw: {e}")),
+            Ok(Ok(result)) => {
+                if let Some(key) = &idem_key {
+                    self.store.idem_put(&target, key, name);
+                }
+                // A read-only operation promises no side effects; anything else
+                // is assumed to have touched data.
+                if get(&decl, "readOnly") != &json!(true) {
+                    self.mark_data_changed();
+                }
+                self.audit(Some(&ctx), &target, None, true, None);
+                (200, json!({ "a2app": true, "ok": true, "operation": name, "result": result }))
+            }
+            Ok(Err(e)) => match &e.code {
+                Some(code) => {
+                    self.audit(Some(&ctx), &target, None, false, Some(code));
+                    let mut refusal = Self::err(e.status, code, &e.message);
+                    for (key, value) in e.extra {
+                        refusal.1[key.as_str()] = value;
+                    }
+                    refusal
+                }
+                None => {
+                    self.audit(Some(&ctx), &target, None, false, Some("operation_failed"));
+                    failed(&e.message)
+                }
+            },
+            Err(panic) => {
+                self.audit(Some(&ctx), &target, None, false, Some("operation_failed"));
+                failed(&panic_message(panic.as_ref()))
+            }
         }
     }
 
@@ -3866,7 +4774,7 @@ impl Adapter {
         method: &str,
         headers: &HashMap<String, String>,
         rest: &[String],
-        body: Option<&Value>,
+        body: &Value,
         query: &HashMap<String, String>,
     ) -> Reply {
         if let Some(limited) = self.rate_gate(headers, "data") {
@@ -3880,7 +4788,7 @@ impl Adapter {
         self.store.sweep();
 
         if rest.is_empty() && method == "GET" {
-            let status = query.get("status").map(String::as_str);
+            let status = query.get("status").map(String::as_str).filter(|s| !s.is_empty());
             let tasks: Vec<Value> = self.store.list_tasks(status).iter().map(Self::task_wire).collect();
             return (200, json!({ "a2app": true, "tasks": tasks, "pollAfterMs": 2000 }));
         }
@@ -3889,9 +4797,8 @@ impl Adapter {
             _ => return Self::err(400, "usage", "Task id required."),
         };
         let action = rest.get(1).map(String::as_str);
-        let mut task = match self.store.get_task(&task_id) {
-            Some(t) => t,
-            None => return Self::err(404, ERR_TASK_NOT_FOUND, &format!("No task \"{task_id}\".")),
+        let Some(mut task) = self.store.get_task(&task_id) else {
+            return Self::err(404, ERR_TASK_NOT_FOUND, &format!("No task \"{task_id}\"."));
         };
         if action.is_none() && method == "GET" {
             return (200, Self::task_wire(&task));
@@ -3899,93 +4806,112 @@ impl Adapter {
         if method != "POST" {
             return Self::err(405, "usage", &format!("{method} not allowed here."));
         }
-        let body = body.cloned().unwrap_or_else(|| json!({}));
+        let status = get_str(&task, "status").to_string();
+        let in_progress = matches!(status.as_str(), "working" | "input-required");
 
         match action {
             Some("claim") => {
-                if get_str(&task, "status") != "submitted" {
-                    return Self::err(
-                        409,
-                        ERR_TASK_NOT_CLAIMABLE,
-                        &format!("Task {task_id} is {}, not claimable.", get_str(&task, "status")),
-                    );
+                if status != "submitted" {
+                    self.audit(Some(&ctx), "task:claim", Some(&task_id), false, Some(ERR_TASK_NOT_CLAIMABLE));
+                    let message = format!("Task {task_id} is {status}, not claimable.");
+                    return Self::err(409, ERR_TASK_NOT_CLAIMABLE, &message);
+                }
+                // An explicit agent in the body must name the caller's own
+                // credential; naming another is a claim as someone else, refused
+                // rather than silently recorded as the true caller.
+                if let Some(requested) = body.get("agent").and_then(Value::as_str).filter(|a| !a.is_empty()) {
+                    let credential_id = get_str(&ctx, "credentialId");
+                    if requested != credential_id && get(&ctx, "agentName").as_str() != Some(requested) {
+                        self.audit(Some(&ctx), "task:claim", Some(&task_id), false, Some("principal_mismatch"));
+                        return Self::err_with(
+                            403,
+                            "principal_mismatch",
+                            &format!(
+                                "Cannot claim task {task_id} as \"{requested}\": the credential presented is {credential_id}."
+                            ),
+                            &[("requested", json!(requested)), ("actual", json!(credential_id))],
+                        );
+                    }
                 }
                 task["status"] = json!("working");
                 task["claim"] = json!({
                     "credentialId": get(&ctx, "credentialId"), "principal": get(&ctx, "principal"),
                     "claimedAt": now_iso(),
                 });
-                self.store.save_task(task.clone());
-                (200, Self::task_wire(&self.store.get_task(&task_id).unwrap_or(task)))
+                let task = self.store.save_task(task);
+                self.audit(Some(&ctx), "task:claim", Some(&task_id), true, None);
+                (200, Self::task_wire(&task))
             }
             Some("progress") => {
-                if get_str(&task, "status") == "canceled" {
+                if status == "canceled" {
                     return Self::err(409, ERR_TASK_CANCELED, &format!("Task {task_id} was canceled."));
                 }
-                if !matches!(get_str(&task, "status"), "working" | "input-required") {
-                    return Self::err(
-                        409,
-                        ERR_TASK_NOT_CLAIMABLE,
-                        &format!("Task {task_id} is {}.", get_str(&task, "status")),
-                    );
+                if !in_progress {
+                    return Self::err(409, ERR_TASK_NOT_CLAIMABLE, &format!("Task {task_id} is {status}."));
                 }
-                if let Some(step) = body.get("step").and_then(Value::as_str) {
-                    task["progress"]["step"] = json!(step);
+                if let Some(step) = body.get("step").filter(|s| s.is_string()) {
+                    task["progress"]["step"] = step.clone();
                 }
                 if let Some(percent) = body.get("percent").filter(|p| p.is_number()) {
                     task["progress"]["percent"] = percent.clone();
                 }
-                if body.get("ask").map_or(false, |a| !a.is_null()) {
-                    task["ask"] = body["ask"].clone();
+                // `ask` present at all — null included — puts the task to the
+                // person; its absence resumes one that was waiting.
+                if let Some(ask) = body.get("ask") {
+                    task["ask"] = ask.clone();
                     task["status"] = json!("input-required");
-                } else if get_str(&task, "status") == "input-required" {
+                } else if status == "input-required" {
                     task["status"] = json!("working");
                 }
-                self.store.save_task(task.clone());
-                (200, Self::task_wire(&self.store.get_task(&task_id).unwrap_or(task)))
+                let task = self.store.save_task(task);
+                self.audit(Some(&ctx), "task:progress", Some(&task_id), true, None);
+                (200, Self::task_wire(&task))
             }
             Some("complete") => {
-                if get_str(&task, "status") == "canceled" {
+                if status == "canceled" {
                     return Self::err(409, ERR_TASK_CANCELED, &format!("Task {task_id} was canceled."));
                 }
                 // A terminal write belongs to a live claim. Once the sweeper has
                 // returned a task to the queue, a late completion from the run
                 // that abandoned it must not close work someone else may now be
                 // doing.
-                if !matches!(get_str(&task, "status"), "working" | "input-required") {
+                if !in_progress {
                     return Self::err(
                         409,
                         ERR_TASK_NOT_CLAIMABLE,
-                        &format!("Task {task_id} is {}, not in progress.", get_str(&task, "status")),
+                        &format!("Task {task_id} is {status}, not in progress."),
                     );
                 }
                 match body.get("status").and_then(Value::as_str) {
                     Some("completed") => {
                         task["status"] = json!("completed");
-                        task["result"] = match body.get("result") {
-                            Some(r) if truthy(r) => r.clone(),
-                            _ => json!({}),
-                        };
+                        let result = body.get("result").filter(|r| !r.is_null()).cloned();
+                        task["result"] = result.unwrap_or_else(|| json!({}));
                     }
                     Some("failed") => {
                         task["status"] = json!("failed");
-                        task["reason"] = match body.get("reason").and_then(Value::as_str) {
-                            Some(r) => json!(r),
-                            None => json!("unspecified"),
-                        };
+                        task["reason"] = json!(body.get("reason").and_then(Value::as_str).unwrap_or("unspecified"));
                     }
                     _ => return Self::err(400, "usage", "complete requires status \"completed\" or \"failed\"."),
                 }
-                self.store.save_task(task.clone());
-                (200, Self::task_wire(&self.store.get_task(&task_id).unwrap_or(task)))
+                let task = self.store.save_task(task);
+                let failed = (get_str(&task, "status") == "failed").then_some("failed");
+                self.audit(Some(&ctx), "task:complete", Some(&task_id), true, failed);
+                (200, Self::task_wire(&task))
             }
             Some("cancel") => {
+                // Terminal is terminal: relabelling finished work as canceled
+                // would rewrite the recorded outcome.
+                if TERMINAL_TASK.contains(&status.as_str()) {
+                    return Self::err(409, ERR_TASK_NOT_CLAIMABLE, &format!("Task {task_id} already reached {status}."));
+                }
                 task["status"] = json!("canceled");
-                self.store.save_task(task.clone());
-                (200, Self::task_wire(&self.store.get_task(&task_id).unwrap_or(task)))
+                let task = self.store.save_task(task);
+                self.audit(Some(&ctx), "task:cancel", Some(&task_id), true, None);
+                (200, Self::task_wire(&task))
             }
-            Some("credential") => self.issue_task_credential(headers, &task, &body),
-            other => Self::err(404, "usage", &format!("Unknown task action \"{}\".", other.unwrap_or("None"))),
+            Some("credential") => self.issue_task_credential(headers, &ctx, &task, body),
+            other => Self::err(404, "usage", &format!("Unknown task action \"{}\".", other.unwrap_or("undefined"))),
         }
     }
 
@@ -4005,7 +4931,13 @@ impl Adapter {
     /// `POST /api/_a2app/tasks/{id}/credential` (spec §6.2): what the bridge
     /// runs the task's harness with — the person who queued it, the
     /// capability's scopes, and no life past the task.
-    fn issue_task_credential(&mut self, headers: &HashMap<String, String>, task: &Value, body: &Value) -> Reply {
+    fn issue_task_credential(
+        &mut self,
+        headers: &HashMap<String, String>,
+        ctx: &Value,
+        task: &Value,
+        body: &Value,
+    ) -> Reply {
         let manager = match self.manager_of(headers, true) {
             Ok(m) => m,
             Err(reply) => return reply,
@@ -4027,11 +4959,12 @@ impl Adapter {
         };
         let capability = get_str(get(task, "request"), "capability");
         let scopes: Vec<String> = match get(get(&self.capabilities, capability), "scopes").as_array() {
-            Some(list) => list.iter().map(py_str).collect(),
+            Some(list) => list.iter().map(js_string).collect(),
             None => vec!["*".to_string()],
         };
         let (token, grant) =
             self.mint_credential(&principal, agent_name.as_deref(), scopes, TASK_CREDENTIAL_SECONDS, Some(task_id));
+        self.audit(Some(ctx), "task:credential", Some(task_id), true, None);
         (201, json!({ "a2app": true, "token": token, "credential": Self::credential_wire(&grant, get(&info, "name")) }))
     }
 
@@ -4209,6 +5142,13 @@ impl Adapter {
     // themselves; the credential issued acts for them, with the scopes they
     // approved. No password or session ever reaches the agent. Codes live 10
     // minutes, are single use, and the device code is stored only as its hash.
+    //
+    // Approving is not enough on its own: anyone can start a request and send
+    // the person its link. So approval issues a one-time confirmation code, and
+    // the credential goes only to the poll that presents it. An agent on the
+    // person's own computer receives it on a loopback port (RFC 8252) when the
+    // account page returns the browser there; an agent elsewhere is given it by
+    // the person.
 
     /// Route one request under /api/_a2app/auth/ (`rest` is what follows it),
     /// or None when it names no device route.
@@ -4233,7 +5173,10 @@ impl Adapter {
                 Self::err(405, "usage", "Poll with POST.")
             });
         }
-        let code = percent_decode(rest.strip_prefix("device/")?);
+        let code = match Self::decode_segment(rest.strip_prefix("device/")?) {
+            Ok(code) => code,
+            Err(malformed) => return Some(malformed),
+        };
         Some(match method {
             "GET" => self.device_review(headers, &code),
             "POST" => self.device_decide(headers, &code, body),
@@ -4286,6 +5229,28 @@ impl Adapter {
             }
             Some(_) => return Self::err(400, "usage", &format!("agentName is 1–{AGENT_NAME_MAX} characters.")),
         };
+        // Where the agent waits on 127.0.0.1, when it runs on the person's own
+        // computer: a whole number in the unprivileged range.
+        let loopback_port = match body.get("loopbackPort") {
+            None | Some(Value::Null) => Value::Null,
+            Some(Value::Number(n))
+                if js_value_number(n).fract() == 0.0
+                    && (LOOPBACK_PORT_MIN..=LOOPBACK_PORT_MAX).contains(&js_value_number(n)) =>
+            {
+                json_number(js_value_number(n))
+            }
+            Some(_) => {
+                return Self::err(
+                    400,
+                    "usage",
+                    &format!(
+                        "loopbackPort is the port, {} to {}, where the agent waits on 127.0.0.1.",
+                        js_number_string(LOOPBACK_PORT_MIN),
+                        js_number_string(LOOPBACK_PORT_MAX)
+                    ),
+                )
+            }
+        };
         let taken: HashSet<String> =
             self.live_devices().iter().map(|(_, row)| get_str(row, "userCode").to_string()).collect();
         let mut user_code = new_user_code();
@@ -4303,6 +5268,7 @@ impl Adapter {
                 "expiresAt": iso_of_ms(now + DEVICE_CODE_TTL_SECONDS * 1000),
                 "interval": DEVICE_POLL_INTERVAL_SECONDS, "lastPolledAt": null, "status": "pending",
                 "approvedBy": null, "approvedScopes": null,
+                "loopbackPort": loopback_port, "confirmationHash": null, "confirmAttempts": 0,
             }),
         );
         let approve = format!("{}{ACCOUNT_URL}#approve", self.public_origin(headers));
@@ -4327,12 +5293,50 @@ impl Adapter {
             self.store.delete_row("devices", &key);
             return Self::err(400, "expired_token", "This sign-in request expired or was already used. Start again.");
         };
+        let interval = get(&row, "interval").as_i64().unwrap_or(DEVICE_POLL_INTERVAL_SECONDS);
         match get_str(&row, "status") {
             "denied" => {
                 self.store.delete_row("devices", &key);
                 return Self::err(400, "access_denied", "The person declined this agent's request.");
             }
-            "approved" if get(&row, "approvedBy").is_string() && get(&row, "approvedScopes").is_array() => {
+            "approved"
+                if get(&row, "approvedBy").is_string()
+                    && get(&row, "approvedScopes").is_array()
+                    && get(&row, "confirmationHash").is_string() =>
+            {
+                // Answered at once, whatever the interval: wrong guesses are
+                // bounded by DEVICE_CONFIRM_ATTEMPTS instead.
+                let confirmation = body.get("confirmation").and_then(Value::as_str).map(normalize_user_code);
+                let Some(confirmation) = confirmation.filter(|c| !c.is_empty()) else {
+                    return Self::err_with(
+                        400,
+                        "confirmation_required",
+                        "Approved. Present the confirmation code the approval produced.",
+                        &[("interval", json!(interval))],
+                    );
+                };
+                let expected = get_str(&row, "confirmationHash").as_bytes();
+                if !bool::from(hash_secret(&confirmation).as_bytes().ct_eq(expected)) {
+                    let attempts = get(&row, "confirmAttempts").as_i64().unwrap_or(0) + 1;
+                    if attempts >= DEVICE_CONFIRM_ATTEMPTS {
+                        self.store.delete_row("devices", &key);
+                        return Self::err(
+                            400,
+                            "access_denied",
+                            "Too many wrong confirmation codes: this request is void. Start again.",
+                        );
+                    }
+                    row["confirmAttempts"] = json!(attempts);
+                    self.store.put_row("devices", &key, &row);
+                    return Self::err(
+                        400,
+                        "confirmation_invalid",
+                        &format!(
+                            "That is not this request's confirmation code ({} tries left).",
+                            DEVICE_CONFIRM_ATTEMPTS - attempts
+                        ),
+                    );
+                }
                 // Single use: the row goes before the credential is handed out.
                 self.store.delete_row("devices", &key);
                 let principal = get_str(&row, "approvedBy").to_string();
@@ -4341,7 +5345,7 @@ impl Adapter {
                 };
                 let scopes: Vec<String> = get(&row, "approvedScopes")
                     .as_array()
-                    .map(|a| a.iter().map(py_str).collect())
+                    .map(|a| a.iter().map(js_string).collect())
                     .unwrap_or_default();
                 let expires_in = get(&row, "expiresInSeconds").as_i64().unwrap_or(DEFAULT_EXPIRES_SECONDS);
                 let agent_name = get(&row, "agentName").as_str().map(str::to_string);
@@ -4351,7 +5355,6 @@ impl Adapter {
             }
             _ => {}
         }
-        let interval = get(&row, "interval").as_i64().unwrap_or(DEVICE_POLL_INTERVAL_SECONDS);
         if let Some(last) = get(&row, "lastPolledAt").as_i64() {
             if now - last < interval * 1000 {
                 let slower = interval + DEVICE_SLOW_DOWN_STEP_SECONDS;
@@ -4383,12 +5386,16 @@ impl Adapter {
         let Some((_, row)) = self.device_by_user_code(user_code) else {
             return Self::device_code_invalid();
         };
+        // When it was asked for, and whether the agent waits on this computer:
+        // the person should approve only a request their own agent just showed
+        // them.
         (
             200,
             json!({
                 "a2app": true, "userCode": get(&row, "userCode"), "agentName": get(&row, "agentName"),
                 "scopes": get(&row, "scopes"), "expiresIn": get(&row, "expiresInSeconds"),
-                "expiresAt": get(&row, "expiresAt"),
+                "expiresAt": get(&row, "expiresAt"), "requestedAt": get(&row, "createdAt"),
+                "loopback": !get(&row, "loopbackPort").is_null(),
             }),
         )
     }
@@ -4431,11 +5438,26 @@ impl Adapter {
             }
             scopes = json!(parsed);
         }
+        // Approval hands nothing over by itself: the credential goes to the poll
+        // that presents this code, which is stored only as its hash.
+        let confirmation = new_user_code();
         row["status"] = json!("approved");
         row["approvedBy"] = json!(manager.principal);
         row["approvedScopes"] = scopes;
+        row["confirmationHash"] = json!(hash_secret(&confirmation));
         self.store.put_row("devices", &key, &row);
-        (200, json!({ "a2app": true, "ok": true, "status": "approved" }))
+        let redirect = match get(&row, "loopbackPort") {
+            Value::Null => Value::Null,
+            port => json!(format!(
+                "http://127.0.0.1:{}{LOOPBACK_CALLBACK}?confirmation={}",
+                js_string(port),
+                encode_uri_component(&confirmation)
+            )),
+        };
+        (
+            200,
+            json!({ "a2app": true, "ok": true, "status": "approved", "confirmation": confirmation, "redirect": redirect }),
+        )
     }
 
     // -- accounts, sessions, invites (spec/v0_2/auth.md §4; multi-user only) --
@@ -4486,11 +5508,17 @@ impl Adapter {
         let reply = if path == "/api/_a2app/invites" {
             self.create_invite(method, headers, body)
         } else if let Some(code) = path.strip_prefix("/api/_a2app/invites/") {
-            return self.handle_invite(method, &percent_decode(code), body);
+            return match Self::decode_segment(code) {
+                Ok(code) => self.handle_invite(method, &code, body),
+                Err(malformed) => (malformed, None),
+            };
         } else if path == "/api/_a2app/users" {
             self.handle_users(method, headers, body, None)
         } else if let Some(id) = path.strip_prefix("/api/_a2app/users/") {
-            self.handle_users(method, headers, body, Some(&percent_decode(id)))
+            match Self::decode_segment(id) {
+                Ok(id) => self.handle_users(method, headers, body, Some(&id)),
+                Err(malformed) => malformed,
+            }
         } else {
             Self::err(404, "not_found", "No such route.")
         };
@@ -4752,52 +5780,11 @@ impl Adapter {
 
 // ------------------------------------------------------------ URL helpers
 
-/// Percent-decode one path segment or query token (the oracle's `unquote`).
-/// Malformed escapes pass through untouched, as Python's do.
-pub fn percent_decode(s: &str) -> String {
-    fn hex(c: u8) -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
-        }
-    }
-    let b = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
-                out.push(hi * 16 + lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Parse a query string into pairs — keys and values percent-decoded, `+`
-/// meaning space, later duplicates winning (the oracle keeps the LAST value).
+/// Parse a query string as `URLSearchParams` does (form encoding: `+` is a
+/// space, escapes decoded, bad bytes replaced), into pairs. Read into a map,
+/// a later duplicate wins, as it does in the reference.
 pub fn parse_qs(qs: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for pair in qs.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (k, v) = match pair.split_once('=') {
-            Some((k, v)) => (k, v),
-            None => (pair, ""),
-        };
-        out.push((
-            percent_decode(&k.replace('+', " ")),
-            percent_decode(&v.replace('+', " ")),
-        ));
-    }
-    out
+    url::form_urlencoded::parse(qs.as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
 }
 
 // ---------------------------------------------------------------- self-test
@@ -4828,7 +5815,7 @@ pub fn selftest() -> i32 {
 
     // 1. Guard: every violation, by code, sorted.
     let bad = json!({ "nope": 1, "created": "x", "status": "nonsense", "due": "31-12-2026" });
-    let mut codes: Vec<String> = validate(&fields, &bad, None)
+    let mut codes: Vec<String> = validate(&fields, &bad, None, false)
         .iter()
         .map(|v| get_str(v, "code").to_string())
         .collect();
@@ -4842,7 +5829,7 @@ pub fn selftest() -> i32 {
     check(
         &mut failures,
         "a good body yields no violations",
-        &json!(validate(&fields, &json!({ "title": "ok", "status": "todo" }), None)),
+        &json!(validate(&fields, &json!({ "title": "ok", "status": "todo" }), None, true)),
         &json!([]),
     );
     check(&mut failures, "label field resolution", &json!(label_field_of(&fields)), &json!("title"));
@@ -5074,7 +6061,7 @@ pub fn selftest() -> i32 {
     // Host and network policy: the app answers only to loopback and its own
     // origins (the public URL among them), and refuses to listen where the
     // agent token would cross a network in clear.
-    fn no_runner(_: &str) -> Option<Runner> {
+    fn no_runner(_: &str) -> Option<OperationRunner> {
         None
     }
     match Adapter::new(AdapterConfig {
@@ -5111,7 +6098,12 @@ pub fn selftest() -> i32 {
             let headers: HashMap<String, String> =
                 [("Host".to_string(), "evil.example.com".to_string())].into_iter().collect();
             let answer = hosted.dispatch("GET", "/api/_a2app", &headers, None, &HashMap::new());
-            check(&mut failures, "dispatch refuses a foreign host before identity", &json!(answer.status), &json!(403));
+            check(
+                &mut failures,
+                "dispatch refuses a foreign host before identity",
+                &json!(answer.map(|a| a.status)),
+                &json!(403),
+            );
             check(
                 &mut failures,
                 "the public origin is the app's own",
@@ -5356,7 +6348,9 @@ pub fn selftest() -> i32 {
     fn ask(app: &mut Adapter, method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Value {
         let headers: HashMap<String, String> =
             token.map(|t| ("X-A2App-Token".to_string(), t.to_string())).into_iter().collect();
-        let answer = app.dispatch(method, path, &headers, body.as_ref(), &HashMap::new());
+        let Some(answer) = app.dispatch(method, path, &headers, body.as_ref(), &HashMap::new()) else {
+            return json!({ "_status": "not the adapter's" });
+        };
         let mut out = answer.json;
         out["_status"] = json!(answer.status);
         out
@@ -5587,6 +6581,531 @@ pub fn selftest() -> i32 {
         &json!(""),
     );
 
+    // 16. JavaScript's reading and writing of numbers, which the reference's
+    //     guard, coercion, cursors and messages all go through.
+    let read = |s: &str| json_number(js_number(s));
+    check(
+        &mut failures,
+        "Number(text) as JavaScript reads it",
+        &json!([read(""), read(" 12 "), read("1e3"), read("0x1A"), read(".5"), read("5."), read("\u{feff}7"), read("-0")]),
+        &json!([0, 12, 1000, 26, 0.5, 5, 7, 0]),
+    );
+    check(
+        &mut failures,
+        "…and what it refuses (NaN)",
+        &json!(["inf", "NaN", "1_0", "+-1", "0x", "1e", "e5", "Infinity "].iter().map(|s| js_number(s).is_nan()).collect::<Vec<_>>()),
+        &json!([true, true, true, true, true, true, true, false]),
+    );
+    check(
+        &mut failures,
+        "a number written as JavaScript writes it",
+        &json!([1.0, 0.1, 1e21, 1.5e-7, 123_456_789_012_345_680_000.0, -0.0, 9_007_199_254_740_992.0, -2.5e-7]
+            .iter()
+            .map(|n| js_number_string(*n))
+            .collect::<Vec<_>>()),
+        &json!(["1", "0.1", "1e+21", "1.5e-7", "123456789012345680000", "0", "9007199254740992", "-2.5e-7"]),
+    );
+
+    // 17. The record guard, against vectors @a2app/rules itself produced:
+    //     missing_required, text max (UTF-16 length), booleans are not numbers,
+    //     list<enum> wants a list, enum values compared as text, body order
+    //     (index-like keys first, as JavaScript orders them).
+    let guarded = json!([
+        { "name": "title", "type": "string", "required": true, "max": 5 },
+        { "name": "n", "type": "number" },
+        { "name": "b", "type": "boolean" },
+        { "name": "tags", "type": "list<enum>", "values": ["a", "b"] },
+        { "name": "kind", "type": "enum", "values": [1, "x"] },
+        { "name": "when", "type": "datetime" },
+        { "name": "made", "type": "string", "readOnly": true },
+    ]);
+    let writable = "one of: title, n, b, tags, kind, when";
+    let v = |code: &str, field: &str, expected: &str, got: Value| {
+        json!({ "code": code, "field": field, "expected": expected, "got": got })
+    };
+    for (label, body, create, expected) in [
+        ("a create without a required field", json!({}), true, json!([v("missing_required", "title", "a non-blank value (required field)", Value::Null)])),
+        ("a required field blanked", json!({ "title": "" }), false, json!([v("missing_required", "title", "a non-blank value (required field)", json!(""))])),
+        ("text past its max", json!({ "title": "toolong" }), false, json!([v("invalid_string", "title", "text of at most 5 characters", json!("toolong"))])),
+        ("max counts characters, not bytes", json!({ "title": "ééééé" }), false, json!([])),
+        (
+            "violations in body order",
+            json!({ "z": 1, "title": 5 }),
+            false,
+            json!([v("unknown_field", "z", writable, json!(1)), v("invalid_string", "title", "text", json!(5))]),
+        ),
+        (
+            "index-like keys first, ascending",
+            json!({ "10": 1, "2": 2, "title": "ok" }),
+            false,
+            json!([v("unknown_field", "2", writable, json!(2)), v("unknown_field", "10", writable, json!(1))]),
+        ),
+        (
+            "a boolean is not a number",
+            json!({ "n": true, "b": "yes" }),
+            false,
+            json!([v("invalid_number", "n", "a number", json!(true)), v("invalid_boolean", "b", "true or false", json!("yes"))]),
+        ),
+        ("number and boolean text", json!({ "n": "1e3", "b": "true" }), false, json!([])),
+        ("blank text is not a number", json!({ "n": " " }), false, json!([v("invalid_number", "n", "a number", json!(" "))])),
+        ("Infinity and hex read as numbers", json!({ "n": "Infinity", "kind": "x" }), false, json!([])),
+        ("inf does not", json!({ "n": "inf" }), false, json!([v("invalid_number", "n", "a number", json!("inf"))])),
+        ("a list wants a list", json!({ "tags": "a" }), false, json!([v("invalid_enum", "tags", "an array of: a | b", json!("a"))])),
+        ("…of declared values", json!({ "tags": ["a", "c"] }), false, json!([v("invalid_enum", "tags", "each of: a | b", json!(["a", "c"]))])),
+        ("enum values compare as text", json!({ "kind": "1" }), false, json!([])),
+        ("…so true is not 1", json!({ "kind": true }), false, json!([v("invalid_enum", "kind", "one of: 1 | x", json!(true))])),
+        ("a date that is not in the calendar", json!({ "when": "2026-02-29" }), false, json!([v("invalid_date", "when", "an ISO 8601 date", json!("2026-02-29"))])),
+        ("JavaScript white space before the zone", json!({ "when": "2024-02-29 10:00\u{a0}Z" }), false, json!([])),
+        ("a read-only field", json!({ "made": "x" }), false, json!([v("read_only_field", "made", "not writable (server-managed)", json!("x"))])),
+        ("a body that is a list is walked by index", json!([1]), false, json!([v("unknown_field", "0", writable, json!(1))])),
+    ] {
+        check(&mut failures, &format!("guard: {label}"), &json!(validate(&guarded, &body, None, create)), &expected);
+    }
+    check(
+        &mut failures,
+        "guard: nothing writable says so",
+        &json!(validate(&json!([{ "name": "id", "type": "string", "readOnly": true }]), &json!({ "x": 1 }), None, false)),
+        &json!([v("unknown_field", "x", "nothing — no writable fields are declared", json!(1))]),
+    );
+    let first = validate(&guarded, &json!({ "n": 1.0, "title": [1.5, { "a": 2 }] }), None, false);
+    check(
+        &mut failures,
+        "a refusal's message writes the value as JSON.stringify does",
+        &json!(first.first().map(|f| describe_violation(f, Some("2026-10-29T00:00:00.000Z")))),
+        &json!("Rejected by a2app (invalid_string): field \"title\" expects text; got [1.5,{\"a\":2}]. Server time is 2026-10-29T00:00:00.000Z."),
+    );
+    check(
+        &mut failures,
+        "read-back exempts a write-only field",
+        &json!(divergences(&json!([{ "name": "pw", "type": "string", "writeOnly": true }]), &json!({ "pw": "x" }), |_| Value::Null)),
+        &json!([]),
+    );
+
+    // 18. The fingerprint and approval keys, against the reference's values:
+    //     a numeric enum value and a fractional max move the hash, and an
+    //     approval key is the sha256 of the RFC 8785 call.
+    let ops = json!([
+        { "name": "op", "module": "core", "destructive": true, "params": { "x": { "type": "number", "max": 2.5 } }, "appliesWhen": {} },
+        { "name": "two", "module": "core", "entity": "tasks", "params": {} },
+    ]);
+    check(
+        &mut failures,
+        "schemaVersion is adapter-core's for the same model",
+        &json!(schema_fingerprint(&json!({ "tasks": { "fields": guarded, "module": "core" } }), Some(&ops))),
+        &json!("sv_a73d0ed4"),
+    );
+    check(
+        &mut failures,
+        "approval keys are adapter-core's",
+        &json!([
+            approval_key("clear-done", &json!({})),
+            approval_key("move", &json!({ "to": [1.5, "x", null], "from": { "b": true, "a": 1e21 }, "é": "\n" })),
+        ]),
+        &json!([
+            "7d745c845ebc004f343ea667d5b6e711ae3a8b842858cb0e79e4d3026519c00c",
+            "68bb55b6be59b5333da220c9cf95ff930ffc1a3ec7b7abd07225d7e5b4d045d2"
+        ]),
+    );
+    let pfields = json!([{ "name": "status", "type": "enum", "values": ["a", "b"] }, { "name": "n", "type": "number" }]);
+    let precord = json!({ "status": "a", "n": "1.0" });
+    check(
+        &mut failures,
+        "blocked reasons are adapter-core's",
+        &json!([
+            explain_predicate(&json!({ "not": { "field": "status", "in": ["a"] } }), &precord, &pfields),
+            explain_predicate(&json!({ "not": { "all": [{ "field": "status", "eq": "a" }] } }), &precord, &pfields),
+            explain_predicate(&json!({ "field": "n", "eq": 2 }), &precord, &pfields),
+            explain_predicate(&json!({ "field": "n", "in": [1, 2.5] }), &precord, &pfields),
+        ]),
+        &json!([
+            "the condition on status is not met",
+            "the condition on the record is not met",
+            "n is 1, not 2",
+            "the condition holds"
+        ]),
+    );
+
+    // 19. Device sign-in (spec §7): approving hands nothing over by itself.
+    //     The credential goes only to the poll that presents the one-time
+    //     confirmation code; five wrong codes void the request; an agent on
+    //     the person's computer is sent the code on its loopback port.
+    match Adapter::new(AdapterConfig {
+        app_id: "selftest".into(),
+        app_name: None,
+        entities: json!({ "tasks": { "module": "core", "fields": [{ "name": "title", "type": "string" }] } }),
+        operations: json!([]),
+        store: Store::memory(json!({})),
+        token: "admin-token".into(),
+        permissions_of: None,
+        capabilities: json!({}),
+        modules: json!([{ "name": "core" }]),
+        allowed_origins: vec!["http://127.0.0.1:9931".into()],
+        public_url: None,
+        runner_lookup: no_runner,
+        events: json!([]),
+        auth_mode: "multi-user".into(),
+        credential_hint: None,
+        env: None,
+        app_version: None,
+    }) {
+        Err(e) => failures.push(format!("could not build an adapter for device sign-in: {e}")),
+        Ok(mut app) => {
+            let start = |app: &mut Adapter, body: Value| ask(app, "POST", "/api/_a2app/auth/device", None, Some(body));
+            let poll = |app: &mut Adapter, device: &Value, confirmation: Option<&str>| {
+                let mut body = json!({ "deviceCode": device["deviceCode"] });
+                if let Some(c) = confirmation {
+                    body["confirmation"] = json!(c);
+                }
+                ask(app, "POST", "/api/_a2app/auth/token", None, Some(body))
+            };
+            let local = start(&mut app, json!({ "agentName": "here", "loopbackPort": 53682, "scopes": ["data:tasks:read"] }));
+            let device_path = format!("/api/_a2app/auth/device/{}", local["userCode"].as_str().unwrap_or(""));
+            let review = ask(&mut app, "GET", &device_path, Some("admin-token"), None);
+            check(
+                &mut failures,
+                "the review says when it was asked for and that the agent waits on this computer",
+                &json!([review["requestedAt"].is_string(), review["loopback"]]),
+                &json!([true, true]),
+            );
+            check(
+                &mut failures,
+                "polling before approval waits",
+                &code_of(&poll(&mut app, &local, None)),
+                &json!("authorization_pending"),
+            );
+            let approved = ask(&mut app, "POST", &device_path, Some("admin-token"), Some(json!({ "approve": true })));
+            let confirmation = approved["confirmation"].as_str().unwrap_or("").to_string();
+            check(
+                &mut failures,
+                "approving issues a confirmation code and sends the browser to the agent's port",
+                &json!([
+                    confirmation.len() == 9 && normalize_user_code(&confirmation) == confirmation,
+                    approved["redirect"],
+                ]),
+                &json!([true, format!("http://127.0.0.1:53682/a2app/callback?confirmation={confirmation}")]),
+            );
+            check(
+                &mut failures,
+                "approval alone hands nothing over, whatever the interval",
+                &json!([code_of(&poll(&mut app, &local, None)), code_of(&poll(&mut app, &local, Some("BBBB-BBBB")))]),
+                &json!(["confirmation_required", "confirmation_invalid"]),
+            );
+            let typed = confirmation.to_lowercase().replace('-', "");
+            let issued = poll(&mut app, &local, Some(&typed));
+            check(
+                &mut failures,
+                "the right code, in any case and without the dash, gets the credential once",
+                &json!([issued["credential"]["principal"], issued["credential"]["scopes"], code_of(&poll(&mut app, &local, Some(&typed)))]),
+                &json!(["owner", ["data:tasks:read"], "expired_token"]),
+            );
+            let remote = start(&mut app, json!({}));
+            let remote_path = format!("/api/_a2app/auth/device/{}", remote["userCode"].as_str().unwrap_or(""));
+            let sent = ask(&mut app, "POST", &remote_path, Some("admin-token"), Some(json!({ "approve": true })));
+            let wrong: Vec<Value> = (0..5).map(|_| code_of(&poll(&mut app, &remote, Some("BBBB-BBBB")))).collect();
+            check(
+                &mut failures,
+                "an agent elsewhere is sent nowhere, and five wrong codes void the request",
+                &json!([sent["redirect"], wrong, code_of(&poll(&mut app, &remote, sent["confirmation"].as_str()))]),
+                &json!([
+                    null,
+                    ["confirmation_invalid", "confirmation_invalid", "confirmation_invalid", "confirmation_invalid", "access_denied"],
+                    "expired_token"
+                ]),
+            );
+            check(
+                &mut failures,
+                "a loopback port is a whole number from 1024 to 65535",
+                &json!([
+                    code_of(&start(&mut app, json!({ "loopbackPort": 80 }))),
+                    code_of(&start(&mut app, json!({ "loopbackPort": 5000.5 }))),
+                    code_of(&start(&mut app, json!({ "loopbackPort": "5000" }))),
+                    start(&mut app, json!({ "loopbackPort": 65535 }))["_status"],
+                ]),
+                &json!(["usage", "usage", "usage", 200]),
+            );
+        }
+    }
+
+    // 20. Operations: arguments guarded like a record write, typed refusals
+    //     answered with the runner's own status and code, a failure or a panic
+    //     answered 500 operation_failed — the process carries on — idempotency
+    //     keys spent once, and dataVersion moved only by a change.
+    fn refusing(_: &Value, _: &Value, _: &mut Store) -> Result<Value, OperationError> {
+        Err(OperationError::new("over_budget", "That would go over budget.").status(402).with("limit", json!(3)))
+    }
+    fn failing(_: &Value, _: &Value, _: &mut Store) -> Result<Value, String> {
+        Err("the ledger is closed".to_string())
+    }
+    fn panicking(_: &Value, _: &Value, _: &mut Store) -> Result<Value, OperationError> {
+        panic!("a runner bug")
+    }
+    fn counting(_: &Value, _: &Value, store: &mut Store) -> Result<Value, String> {
+        let listed = store.list_records("tasks", &json!({})).map_err(|e| e.to_string())?;
+        Ok(json!({ "count": listed["totalItems"] }))
+    }
+    fn runners(name: &str) -> Option<OperationRunner> {
+        match name {
+            "refuse" => Some(OperationRunner::from(refusing as Runner<OperationError>)),
+            "fail" => Some(OperationRunner::from(failing as Runner)),
+            "panic" => Some(OperationRunner::from(panicking as Runner<OperationError>)),
+            "count" | "wipe" => Some(OperationRunner::from(counting as Runner)),
+            _ => None,
+        }
+    }
+    let op = |name: &str, extra: Value| {
+        let mut decl = json!({ "name": name, "module": "core", "destructive": false, "params": {} });
+        for (k, val) in extra.as_object().cloned().unwrap_or_default() {
+            decl[k.as_str()] = val;
+        }
+        decl
+    };
+    match Adapter::new(AdapterConfig {
+        app_id: "selftest".into(),
+        app_name: None,
+        entities: json!({ "tasks": { "module": "core", "fields": [{ "name": "title", "type": "string", "required": true }] } }),
+        operations: json!([
+            op("refuse", json!({})),
+            op("fail", json!({})),
+            op("panic", json!({})),
+            op("count", json!({ "readOnly": true, "params": { "task": { "type": "ref", "entity": "tasks", "required": true }, "n": { "type": "number" } } })),
+            op("wipe", json!({ "destructive": true })),
+        ]),
+        store: Store::memory(json!({})),
+        token: "admin-token".into(),
+        permissions_of: None,
+        capabilities: json!({}),
+        modules: json!([{ "name": "core" }]),
+        allowed_origins: vec![],
+        public_url: None,
+        runner_lookup: runners,
+        events: json!([]),
+        auth_mode: "none".into(),
+        credential_hint: None,
+        env: None,
+        app_version: None,
+    }) {
+        Err(e) => failures.push(format!("could not build an adapter for operations: {e}")),
+        Ok(mut app) => {
+            let run = |app: &mut Adapter, name: &str, body: Value| {
+                ask(app, "POST", &format!("/api/ops/{name}"), Some("admin-token"), Some(body))
+            };
+            check(
+                &mut failures,
+                "an operation's arguments are guarded",
+                &json!([
+                    code_of(&run(&mut app, "count", json!({}))),
+                    code_of(&run(&mut app, "count", json!({ "task": "t", "extra": 1 }))),
+                    code_of(&run(&mut app, "count", json!({ "task": "t", "n": "many" }))),
+                    run(&mut app, "count", json!({ "task": "t", "n": "2" }))["_status"],
+                ]),
+                &json!(["missing_required", "unknown_field", "invalid_number", 200]),
+            );
+            let refused = run(&mut app, "refuse", json!({}));
+            check(
+                &mut failures,
+                "a typed refusal keeps its status, code, message and fields",
+                &json!([refused["_status"], refused["code"], refused["message"], refused["limit"]]),
+                &json!([402, "over_budget", "That would go over budget.", 3]),
+            );
+            let quiet = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let panicked = run(&mut app, "panic", json!({}));
+            std::panic::set_hook(quiet);
+            check(
+                &mut failures,
+                "a failing or panicking runner is a 500 operation_failed, and the app carries on",
+                &json!([
+                    run(&mut app, "fail", json!({}))["message"],
+                    panicked["_status"],
+                    panicked["message"],
+                    run(&mut app, "count", json!({ "task": "t" }))["_status"],
+                ]),
+                &json!(["Operation \"fail\" threw: the ledger is closed", 500, "Operation \"panic\" threw: a runner bug", 200]),
+            );
+            let keyed = |app: &mut Adapter, key: &str| {
+                let headers: HashMap<String, String> =
+                    [("x-a2app-token", "admin-token"), ("idempotency-key", key)].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                let body = json!({ "task": "t" });
+                app.dispatch("POST", "/api/ops/count", &headers, Some(&body), &HashMap::new()).map(|a| a.status)
+            };
+            check(
+                &mut failures,
+                "an operation's idempotency key is spent once; an empty one is no key",
+                &json!([keyed(&mut app, "k"), keyed(&mut app, "k"), keyed(&mut app, ""), keyed(&mut app, "")]),
+                &json!([200, 409, 200, 200]),
+            );
+            let before = app.data_version();
+            run(&mut app, "count", json!({ "task": "t" }));
+            ask(&mut app, "POST", "/api/collections/tasks/records", Some("admin-token"), Some(json!({})));
+            let unmoved = app.data_version();
+            ask(&mut app, "POST", "/api/collections/tasks/records", Some("admin-token"), Some(json!({ "title": "x" })));
+            check(
+                &mut failures,
+                "dataVersion moves on a write, not on a read-only operation or a refused write",
+                &json!([before == unmoved, unmoved != app.data_version()]),
+                &json!([true, true]),
+            );
+            check(
+                &mut failures,
+                "a body that is not an object is walked as the reference walks it",
+                &json!([
+                    code_of(&ask(&mut app, "POST", "/api/collections/tasks/records", Some("admin-token"), Some(json!([])))),
+                    code_of(&ask(&mut app, "POST", "/api/collections/tasks/records", Some("admin-token"), Some(json!(["x"])))),
+                ]),
+                &json!(["missing_required", "unknown_field"]),
+            );
+            let wipe = run(&mut app, "wipe", json!({}));
+            check(
+                &mut failures,
+                "a destructive call asks for approval with the reference's key",
+                &json!([wipe["_status"], wipe["approvalKey"]]),
+                &json!([428, approval_key("wipe", &json!({}))]),
+            );
+            // Rate limits: keyed by the token's hash, which is all the audit
+            // log ever records of it.
+            let limited: Vec<Value> = (0..RATE_LIMIT_OPS + 1).map(|_| run(&mut app, "count", json!({ "task": "t" }))["_status"].clone()).collect();
+            let last = app.store.audit_tail(1);
+            check(
+                &mut failures,
+                "past the ops limit a caller is told when to come back, and the audit keeps the token's hash",
+                &json!([
+                    limited.last(),
+                    last.first().map(|e| e["target"].clone()),
+                    last.first().map(|e| e["credentialId"] == json!(format!("token:{}", hash_secret("admin-token")))),
+                    stable_json(&json!(app.store.audit_tail(10_000))).contains("admin-token"),
+                ]),
+                &json!([429, "rate:ops", true, false]),
+            );
+        }
+    }
+
+    // 21. Viewers: an identity poll's heartbeat counts a tab, a goodbye
+    //     uncounts it, and the count is all that is published.
+    match Adapter::new(AdapterConfig {
+        app_id: "selftest".into(),
+        app_name: None,
+        entities: json!({}),
+        operations: json!([]),
+        store: Store::memory(json!({})),
+        token: "admin-token".into(),
+        permissions_of: None,
+        capabilities: json!({}),
+        modules: json!([{ "name": "core" }]),
+        allowed_origins: vec![],
+        public_url: None,
+        runner_lookup: no_runner,
+        events: json!([]),
+        auth_mode: "none".into(),
+        credential_hint: None,
+        env: None,
+        app_version: None,
+    }) {
+        Err(e) => failures.push(format!("could not build an adapter for viewers: {e}")),
+        Ok(mut app) => {
+            let poll = |app: &mut Adapter, headers: &[(&str, &str)], query: &str| {
+                let headers: HashMap<String, String> = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+                app.dispatch("GET", &format!("/api/_a2app{query}"), &headers, None, &HashMap::new());
+            };
+            poll(&mut app, &[("x-a2app-viewer", "tab-1")], "");
+            poll(&mut app, &[("x-a2app-viewer", "tab-2")], "");
+            poll(&mut app, &[("x-a2app-viewer", &"x".repeat(65))], "");
+            let two = ask(&mut app, "GET", "/api/_a2app/viewers", Some("admin-token"), None);
+            poll(&mut app, &[], "?viewer=tab-2&leaving=1");
+            check(
+                &mut failures,
+                "viewers are counted by heartbeat and uncounted by goodbye",
+                &json!([two["viewers"], two["ttlMs"], ask(&mut app, "GET", "/api/_a2app/viewers", Some("admin-token"), None)["viewers"]]),
+                &json!([2, 60_000, 1]),
+            );
+        }
+    }
+
+    // 22. Persistence: tasks, their dedup keys, the event log and its cursor,
+    //     approvals and idempotency keys outlive a restart, with their TTLs;
+    //     the event log keeps the newest 5000 and `seq` counts on.
+    let tmp = std::env::temp_dir().join(format!("a2app-selftest-{}", random_hex(8)));
+    let db_path = tmp.join("data").join("db.sqlite");
+    let restart_run = (|| -> Result<(), String> {
+        let (task_id, cursor) = {
+            let mut first = Store::sqlite(&db_path, json!({}))?;
+            first.app = "selftest".into();
+            let fired = first.trigger_as("work.asked", &json!({ "n": 1 }), Some("work"), Some("usr_mia"))?;
+            first.approval_issue("approved-call");
+            first.idem_put("op:wipe", "key-1", "wipe");
+            first.append_audit(&json!({ "target": "op:wipe", "outcome": "ok" }));
+            let (_, cursor) = first.events_since(None);
+            (fired["taskId"].as_str().unwrap_or("").to_string(), cursor)
+        };
+        let mut second = Store::sqlite(&db_path, json!({}))?;
+        second.app = "selftest".into();
+        let task = second.get_task(&task_id).unwrap_or_default();
+        let again = second.trigger_as("work.asked", &json!({ "n": 1 }), Some("work"), Some("usr_mia"))?;
+        let other = second.trigger_as("work.asked", &json!({ "n": 2 }), Some("work"), None)?;
+        let (newer, _) = second.events_since(Some(&cursor));
+        check(
+            &mut failures,
+            "a task survives a restart, with its app, principal and fresh progress",
+            &json!([task["app"], task["request"]["principal"], task["progress"], task["status"]]),
+            &json!(["selftest", "usr_mia", { "step": null, "percent": 0 }, "submitted"]),
+        );
+        check(
+            &mut failures,
+            "the same occurrence is still the same task; a new one gets a fresh id",
+            &json!([again["taskId"] == json!(task_id), other["taskId"] != json!(task_id), other["taskId"].as_str().map_or(false, |t| t.starts_with("tsk_"))]),
+            &json!([true, true, true]),
+        );
+        check(
+            &mut failures,
+            "a cursor saved before a restart returns only newer events",
+            &json!([newer.len(), newer.iter().all(|e| e["id"].as_str().map_or(false, |i| i.starts_with("evt_")))]),
+            &json!([2, true]),
+        );
+        check(
+            &mut failures,
+            "approvals, idempotency keys and the audit log survive a restart",
+            &json!([second.approval_consume("approved-call"), second.approval_consume("approved-call"), second.idem_get("op:wipe", "key-1"), second.audit_tail(1).len()]),
+            &json!([true, false, "wipe", 1]),
+        );
+        if let Backend::Sqlite(db) = &second.backend {
+            lock(db).execute("UPDATE idem SET at = 0", []).map_err(|e| e.to_string())?;
+        }
+        second.put_row("approvals", "stale-call", &json!({ "expiresAt": epoch_ms_now() - 1 }));
+        check(
+            &mut failures,
+            "an idempotency key lapses after a day, an approval after ten minutes",
+            &json!([second.idem_get("op:wipe", "key-1"), second.approval_consume("stale-call")]),
+            &json!([null, false]),
+        );
+        drop(second);
+        // A database from before keys expired: its keys count from the upgrade.
+        let legacy = tmp.join("legacy.sqlite");
+        let old = Connection::open(&legacy).map_err(|e| e.to_string())?;
+        old.execute_batch(
+            "CREATE TABLE idem (entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, PRIMARY KEY (entity, key));
+             INSERT INTO idem VALUES ('tasks', 'old-key', 'rec_1');",
+        )
+        .map_err(|e| e.to_string())?;
+        drop(old);
+        let mut upgraded = Store::sqlite(&legacy, json!({}))?;
+        check(&mut failures, "an older database's keys still hold", &json!(upgraded.idem_get("tasks", "old-key")), &json!("rec_1"));
+        Ok(())
+    })();
+    if let Err(e) = restart_run {
+        failures.push(format!("restart persistence errored: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mut ring = Store::memory(json!({}));
+    for n in 0..EVENT_RETENTION + 3 {
+        ring.append_event("tick", &json!({ "n": n }));
+    }
+    let (kept, next) = ring.events_since(Some("abc"));
+    check(
+        &mut failures,
+        "the event log keeps the newest 5000, seq counting on; a junk cursor reads from the start",
+        &json!([kept.len(), kept.first().map(|e| e["seq"].clone()), next, ring.events_since(Some("5003")).1, ring.events_since(Some("1.5")).0.len()]),
+        &json!([5000, 4, "5003", "5003", 5000]),
+    );
+
     if !failures.is_empty() {
         println!("a2app_adapter selftest FAILED:\n  - {}", failures.join("\n  - "));
         return 1;
@@ -5595,7 +7114,9 @@ pub fn selftest() -> i32 {
         "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, \
          host and network policy, secrets, passwords, user codes, cookies, sign-in limits, grant requests, \
          the ceiling, record ownership, credential refusals, ownedBy and capability declarations, \
-         the runner's caller)"
+         the runner's caller, JavaScript numbers, the reference's guard vectors, fingerprint, approval keys \
+         and blocked reasons, device sign-in confirmation and loopback, operation guard, typed errors, \
+         runner panics, idempotency, dataVersion, rate-limit audit, viewers, restart persistence, the event ring)"
     );
     0
 }

@@ -143,15 +143,23 @@ pub fn seed() -> Value {
 }
 
 // Operation runners: (args, ctx, store) -> Ok(JSON result) or Err(message).
-// The adapter calls the runner for a declared operation; a destructive op is
-// gated by approval first. `ctx` is who is calling: `{ credentialId,
-// agentName, principal, role }`. `store` is the live SQLite-backed store — read
-// with `store.get_record` / `store.list_records`, write with `store.put_record`
-// / `store.delete_record`. Writes are durable when the call returns. A record
+// The adapter calls the runner for a declared operation once its arguments
+// have passed the same guard as a record write; a destructive op is gated by
+// approval first. An Err — or a panic — answers 500 operation_failed. `ctx` is
+// who is calling: `{ credentialId, agentName, principal, role }`. `store` is
+// the live SQLite-backed store — read with `store.get_record` /
+// `store.list_records`, write with `store.put_record` /
+// `store.delete_record`. Writes are durable when the call returns. A record
 // read from the store is a COPY: mutate it, then `put_record` it back, or the
 // change never happened. `store.trigger(type, payload, capability)` emits a
 // declared event (see `request-triage` below); a task it queues is done by an
 // agent acting as the caller.
+//
+// To refuse a call with a code of your own, runners return `Result<Value,
+// OperationError>` and `operation_runner` returns
+// `Option<Runner<OperationError>>`; then
+// `Err(OperationError::new("over_budget", "why").status(402))` answers 402
+// with that code (400 when no status is set).
 pub fn operation_runner(name: &str) -> Option<Runner> {
     match name {
         "clear-done" => Some(run_clear_done),

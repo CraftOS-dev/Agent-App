@@ -24,21 +24,24 @@
 //! tiny_http is synchronous; the request loop below is single-threaded, which
 //! is deliberate and acceptable for this starter — one owner, one agent, a
 //! handful of open tabs. An app that outgrows it moves the loop onto a thread
-//! pool without touching the adapter.
+//! pool without touching the adapter. A panic while answering — a runner's or
+//! the adapter's — fails that one request (500), never the process.
 
 mod a2app_adapter;
 mod schema;
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, App, Store};
+use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, App, OperationRunner, Store};
 // The defaults for the app's optional hooks (see `App`): unused when schema.rs
 // defines them all.
 #[allow(unused_imports)]
@@ -50,6 +53,12 @@ use a2app_adapter::AppDefaults;
 // make the app buffer an arbitrary amount of memory. Same cap and envelope as
 // the other blueprints' transports.
 const MAX_REQUEST_BODY_BYTES: u64 = 5 * 1024 * 1024;
+
+thread_local! {
+    /// True while a request is being answered: a panic then is caught and
+    /// answered as that request's 500, so it is not the process crashing.
+    static ANSWERING: Cell<bool> = const { Cell::new(false) };
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -209,6 +218,11 @@ fn content_type_of(path: &Path) -> &'static str {
         "ico" => "image/x-icon",
         "png" => "image/png",
         "jpg" => "image/jpeg",
+        "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "woff" => "font/woff",
         "woff2" => "font/woff2",
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
@@ -279,28 +293,40 @@ fn files_under(root: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// `appVersion`: "av_" + the first 16 hex of a sha256 over the version salt
-/// (manifest.appVersion) and then, for every served file in sorted relative-
-/// path order, path + NUL + content + NUL — plus the schema source file, which
-/// shapes what the app tells an agent without being served itself. Content,
-/// not mtime: a re-copy of identical bytes must NOT look like a new version.
-/// It moves for exactly the changes `schemaVersion` is blind to — a new
-/// component, a CSS tweak, reworded copy.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `appVersion`, as adapter-core's static view computes it: "av_" + the first
+/// 16 hex of a sha256 over the version salt (manifest.appVersion), a NUL, and
+/// the hex fingerprint of the tree — for every file under each root in sorted
+/// relative-path order, path + NUL + content + NUL. The roots are the served
+/// View, the aliased system files (the update watcher, the account page) and
+/// the schema source, which shapes what the app tells an agent without being
+/// served itself. Content, not mtime: a re-copy of identical bytes must NOT
+/// look like a new version. It moves for exactly the changes `schemaVersion`
+/// is blind to — a new component, a CSS tweak, reworded copy.
 fn app_version(roots: &[PathBuf], salt: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(b"\0");
+    let mut tree = Sha256::new();
     for root in roots {
         for (rel, file) in files_under(root) {
-            hasher.update(rel.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(fs::read(&file).unwrap_or_default());
-            hasher.update(b"\0");
+            tree.update(rel.as_bytes());
+            tree.update(b"\0");
+            tree.update(fs::read(&file).unwrap_or_default());
+            tree.update(b"\0");
         }
     }
-    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    format!("av_{}", &hex[..16])
+    let digest = Sha256::new()
+        .chain_update(salt.as_bytes())
+        .chain_update(b"\0")
+        .chain_update(hex_of(&tree.finalize()).as_bytes())
+        .finalize();
+    format!("av_{}", &hex_of(&digest)[..16])
 }
+
+/// How long a computed `appVersion` is reused before the tree is hashed
+/// again: every open tab polls identity, and this bounds what that costs.
+const APP_VERSION_TTL: Duration = Duration::from_secs(1);
 
 /// RFC 1123 date for Last-Modified, from unix seconds. Day 0 of the epoch was
 /// a Thursday.
@@ -350,33 +376,46 @@ fn matches_etag(header: &str, etag: &str) -> bool {
     })
 }
 
-/// The file a static request names, or None when there is none to serve.
-/// Containment is by construction: the decoded path is rebuilt from vetted
-/// segments (no "..", no empty segment, no backslash or drive colon that
-/// Windows would treat as an escape), so the join can never leave `root`.
-fn resolve_static(root: &Path, raw_path: &str) -> Option<PathBuf> {
-    let decoded = a2app_adapter::percent_decode(raw_path);
-    if decoded.contains('\0') || decoded.contains('\\') {
+/// The file a static request names, or None when there is none to serve — for
+/// every hostile shape (a bad escape, a NUL, a path out of `root`, a
+/// directory), one honest 404. The decoded path is resolved under `root` the
+/// way the platform's own path rules would (`..` steps out, and on Windows `\`
+/// separates too), then must still lie inside it: containment is checked on
+/// the result, by component, so a sibling named like `root` is outside.
+fn resolve_static(root: &Path, pathname: &str) -> Option<PathBuf> {
+    let decoded = a2app_adapter::decode_uri_component(pathname)?;
+    let rel = if decoded.is_empty() || decoded == "/" { "/index.html".to_string() } else { decoded };
+    if rel.contains('\0') {
         return None;
     }
-    let rel = decoded.trim_start_matches('/');
-    let mut file = root.to_path_buf();
-    if rel.is_empty() {
-        file.push("index.html");
-    } else {
-        for segment in rel.split('/') {
-            if segment.is_empty() || segment == ".." || segment.contains(':') {
-                return None;
+    let root = std::path::absolute(root).ok()?;
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let mut file = root.clone();
+    for segment in rel.split(separators) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                file.pop();
             }
-            file.push(segment);
+            name => file.push(name),
         }
     }
     // A directory is not a file: serving one would read EISDIR and turn a
     // simple miss into a 500.
-    if file.is_file() {
-        Some(file)
-    } else {
-        None
+    (file != root && file.starts_with(&root) && file.is_file()).then_some(file)
+}
+
+/// The request target read as the reference reads it — a URL against
+/// `http://localhost`: the path with dot segments resolved and escapes kept
+/// (the router decodes each segment itself), and the query string.
+fn split_target(raw: &str) -> (String, String) {
+    let parsed = url::Url::parse("http://localhost/").and_then(|base| base.join(raw));
+    match parsed {
+        Ok(u) => (u.path().to_string(), u.query().unwrap_or("").to_string()),
+        Err(_) => match raw.split_once('?') {
+            Some((p, q)) => (p.to_string(), q.to_string()),
+            None => (raw.to_string(), String::new()),
+        },
     }
 }
 
@@ -416,6 +455,10 @@ fn serve() -> Result<(), String> {
     // the launch contract's supervisor is what restarts the process, not the
     // process.
     std::panic::set_hook(Box::new(|info| {
+        // A panic while answering is that request's 500, not a crash.
+        if ANSWERING.with(Cell::get) {
+            return;
+        }
         let line = json!({
             "ts": a2app_adapter::now_iso(), "level": "error", "evt": "crash",
             "message": info.to_string(),
@@ -483,14 +526,27 @@ fn serve() -> Result<(), String> {
         format!("http://127.0.0.1:{port}"),
     ];
 
-    // appVersion is re-derived per identity request, so it stays true for a
-    // server whose files changed under it — the same "derive, do not declare"
-    // rule schemaVersion follows. The schema source is folded in: an
+    // appVersion is re-derived (at most once a second) for identity, so it
+    // stays true for a server whose files changed under it — the same "derive,
+    // do not declare" rule schemaVersion follows. The aliased system files are
+    // code the tab runs too, and the schema source is folded in: an
     // operation's description is not in schemaVersion either, yet it changes
     // what the app tells an agent.
-    let version_roots = vec![served_dir.clone(), update_js.clone(), PathBuf::from("src/schema.rs")];
+    let version_roots =
+        vec![served_dir.clone(), update_js.clone(), account_html.clone(), PathBuf::from("src/schema.rs")];
     let version_salt = manifest.get("appVersion").and_then(Value::as_str).unwrap_or("").to_string();
-    let version_fn: Box<dyn Fn() -> String> = Box::new(move || app_version(&version_roots, &version_salt));
+    let computed: RefCell<Option<(Instant, String)>> = RefCell::new(None);
+    let version_fn: Box<dyn Fn() -> String> = Box::new(move || {
+        let mut cached = computed.borrow_mut();
+        match cached.as_ref() {
+            Some((at, value)) if at.elapsed() < APP_VERSION_TTL => value.clone(),
+            _ => {
+                let value = app_version(&version_roots, &version_salt);
+                *cached = Some((Instant::now(), value.clone()));
+                value
+            }
+        }
+    });
 
     let store = Store::sqlite(&data_dir.join("db.sqlite"), schema::seed())?;
     let mut adapter = Adapter::new(AdapterConfig {
@@ -513,7 +569,9 @@ fn serve() -> Result<(), String> {
         modules: manifest.get("modules").cloned().unwrap_or_else(|| json!([])),
         allowed_origins,
         public_url: public_url.clone(),
-        runner_lookup: schema::operation_runner,
+        // Runners may fail with a String or refuse with an OperationError;
+        // either kind of schema.rs is served.
+        runner_lookup: |name| schema::operation_runner(name).map(OperationRunner::from),
         // The event types this app may emit. A runner's `store.trigger` refuses
         // a type that is not declared here, so the set of things the app can
         // ever ask an agent to react to is fixed by its author in schema.rs.
@@ -550,18 +608,15 @@ fn serve() -> Result<(), String> {
         let id = next_request_id;
         let started = Instant::now();
         let method = request.method().as_str().to_uppercase();
-        let url = request.url().to_string();
-        let (path, query_string) = match url.split_once('?') {
-            Some((p, q)) => (p.to_string(), q.to_string()),
-            None => (url.clone(), String::new()),
-        };
+        let logged = request.url().split('?').next().unwrap_or("").to_string();
+        let (path, query_string) = split_target(request.url());
         let aliases = StaticAliases { update_js: &update_js, account_html: &account_html };
         let status = handle_request(&mut adapter, request, &method, &path, &query_string, &served_dir, &aliases);
         log_line(
             if status >= 500 { "error" } else { "info" },
             "http",
             json!({
-                "id": id, "method": method, "path": path, "status": status,
+                "id": id, "method": method, "path": logged, "status": status,
                 "ms": started.elapsed().as_millis() as u64,
             }),
         );
@@ -578,11 +633,13 @@ struct StaticAliases<'a> {
     account_html: &'a Path,
 }
 
-/// Route ownership, in order: (1) the A2App adapter answers every path it owns
-/// (identity, describe, records, operations, tasks/events, accounts and
-/// credentials); (2) anything else falls through to the static View, with
-/// `/_a2app/update.js` and `/_a2app/account` aliased to the project-root
-/// watcher and account page. Returns the status responded with, for the log.
+/// Route ownership, in order: (1) the A2App adapter sees every request first —
+/// it refuses a foreign Host on any path, the View's included, and answers
+/// every path it owns (identity, describe, records, operations, tasks/events,
+/// accounts and credentials); (2) anything else falls through to the static
+/// View, with `/_a2app/update.js` and `/_a2app/account` aliased to the
+/// project-root watcher and account page. Returns the status responded with,
+/// for the log.
 fn handle_request(
     adapter: &mut Adapter,
     mut request: tiny_http::Request,
@@ -592,50 +649,61 @@ fn handle_request(
     served_dir: &Path,
     aliases: &StaticAliases,
 ) -> u16 {
-    let is_api = path == "/.well-known/a2app.json" || path.starts_with("/api/");
-    if is_api {
-        // Read the body under the cap, counting bytes as they arrive rather
-        // than trusting Content-Length, so a client that lies gains nothing.
-        let mut body: Option<Value> = None;
-        if matches!(method, "POST" | "PATCH" | "PUT") {
-            let mut buf: Vec<u8> = Vec::new();
-            {
-                let reader = request.as_reader();
-                let mut limited = reader.take(MAX_REQUEST_BODY_BYTES + 1);
-                if limited.read_to_end(&mut buf).is_err() {
-                    buf.clear();
-                }
+    // Read the body under the cap, counting bytes as they arrive rather than
+    // trusting Content-Length, so a client that lies gains nothing.
+    let mut body: Option<Value> = None;
+    if method != "GET" && method != "HEAD" {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let reader = request.as_reader();
+            let mut limited = reader.take(MAX_REQUEST_BODY_BYTES + 1);
+            if limited.read_to_end(&mut buf).is_err() {
+                buf.clear();
             }
-            if buf.len() as u64 > MAX_REQUEST_BODY_BYTES {
-                return respond_json(
-                    request,
-                    413,
-                    &json!({
-                        "a2app": true, "ok": false, "code": "payload_too_large",
-                        "message": format!("Request body exceeds the {MAX_REQUEST_BODY_BYTES}-byte limit."),
-                        "limitBytes": MAX_REQUEST_BODY_BYTES,
-                    }),
-                );
-            }
-            let raw = String::from_utf8_lossy(&buf).into_owned();
-            body = Some(if raw.trim().is_empty() {
-                json!({})
-            } else {
-                // Hand the guard something it can reject by its own rules,
-                // rather than 500-ing on a body that is not JSON. Same
-                // envelope as the other blueprints' parsers.
-                serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "__unparsed__": raw }))
-            });
         }
+        if buf.len() as u64 > MAX_REQUEST_BODY_BYTES {
+            // (adapter-core also sends `Connection: close` here; tiny_http owns
+            // that header and does not let a response set it.)
+            return respond_json(
+                request,
+                413,
+                &json!({
+                    "a2app": true, "ok": false, "code": "payload_too_large",
+                    "message": format!("Request body exceeds the {MAX_REQUEST_BODY_BYTES}-byte limit."),
+                    "limitBytes": MAX_REQUEST_BODY_BYTES,
+                }),
+            );
+        }
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        if matches!(method, "POST" | "PATCH" | "PUT") && !raw.trim().is_empty() {
+            // Hand the guard something it can reject by its own rules, rather
+            // than 500-ing on a body that is not JSON. Same envelope as the
+            // other blueprints' parsers.
+            body = Some(serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "__unparsed__": raw })));
+        }
+    }
 
-        let headers: HashMap<String, String> = request
-            .headers()
-            .iter()
-            .map(|h| (h.field.as_str().as_str().to_lowercase(), h.value.as_str().to_string()))
-            .collect();
-        let query: HashMap<String, String> = parse_qs(query_string).into_iter().collect();
-        let answer = adapter.dispatch(method, path, &headers, body.as_ref(), &query);
-        return respond_json_with(request, answer.status, &answer.json, &answer.headers);
+    let headers: HashMap<String, String> = request
+        .headers()
+        .iter()
+        .map(|h| (h.field.as_str().as_str().to_lowercase(), h.value.as_str().to_string()))
+        .collect();
+    let query: HashMap<String, String> = parse_qs(query_string).into_iter().collect();
+    ANSWERING.with(|a| a.set(true));
+    let dispatched = catch_unwind(AssertUnwindSafe(|| adapter.dispatch(method, path, &headers, body.as_ref(), &query)));
+    ANSWERING.with(|a| a.set(false));
+    match dispatched {
+        Ok(Some(answer)) => return respond_json_with(request, answer.status, &answer.json, &answer.headers),
+        Ok(None) => {}
+        // An adapter bug never takes the app down: it is answered as one.
+        Err(panic) => {
+            let message = a2app_adapter::panic_message(panic.as_ref());
+            return respond_json(
+                request,
+                500,
+                &json!({ "a2app": true, "ok": false, "code": "adapter_error", "message": message }),
+            );
+        }
     }
 
     // ---------------------------------------------------------- static View

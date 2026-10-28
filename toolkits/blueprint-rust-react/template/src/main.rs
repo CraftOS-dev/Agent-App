@@ -38,7 +38,11 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, Store};
+use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, App, Store};
+// The defaults for the app's optional hooks (see `App`): unused when schema.rs
+// defines them all.
+#[allow(unused_imports)]
+use a2app_adapter::AppDefaults;
 
 // A protocol write is tiny; anything larger is a mistake or an attack. The
 // body is read before the origin, credential and rate checks — the path does
@@ -379,9 +383,19 @@ fn resolve_static(root: &Path, raw_path: &str) -> Option<PathBuf> {
 /* ------------------------------------------------------------- responses */
 
 fn respond_json(request: tiny_http::Request, status: u16, payload: &Value) -> u16 {
-    let response = tiny_http::Response::from_string(payload.to_string())
+    respond_json_with(request, status, payload, &[])
+}
+
+/// A JSON reply plus the headers the adapter set (a session's Set-Cookie).
+fn respond_json_with(request: tiny_http::Request, status: u16, payload: &Value, extra: &[(String, String)]) -> u16 {
+    let mut response = tiny_http::Response::from_string(payload.to_string())
         .with_status_code(status)
         .with_header(header("Content-Type", "application/json"));
+    for (field, value) in extra {
+        if let Ok(h) = tiny_http::Header::from_bytes(field.as_bytes(), value.as_bytes()) {
+            response = response.with_header(h);
+        }
+    }
     let _ = request.respond(response);
     status
 }
@@ -452,9 +466,11 @@ fn serve() -> Result<(), String> {
         dist_dir
     };
 
-    // The update watcher lives at the project root, not inside the View build:
-    // it is system-owned, and the View is the agent's to rewrite entirely.
+    // The update watcher and the account page live at the project root, not
+    // inside the View build: they are system-owned, and the View is the
+    // agent's to rewrite entirely.
     let update_js = PathBuf::from("a2app-update.js");
+    let account_html = PathBuf::from("a2app-account.html");
 
     // Where to listen, and the address people and agents use (A2APP_HOST,
     // A2APP_PUBLIC_URL). A combination that would send the agent token across
@@ -483,7 +499,15 @@ fn serve() -> Result<(), String> {
         entities: schema::entities(),
         operations: schema::operations(),
         store,
+        // The app's own .agent-token is its admin credential (spec/v0_2/auth.md
+        // §2.3), stored only as its hash.
         token,
+        // What each person may do (spec/v0_2/auth.md §3); every agent acting
+        // for them is limited to the same. Both hooks are optional in schema.rs
+        // (see `App` in the adapter): one left out takes the default.
+        permissions_of: Some(|principal: &Value| App.permissions_of(principal)),
+        // What each capability's agent may do (spec/v0_2/auth.md §6.2).
+        capabilities: App.capabilities(),
         // Modules are declared in the manifest and are what describe's root
         // level lists; every entity and operation names one.
         modules: manifest.get("modules").cloned().unwrap_or_else(|| json!([])),
@@ -531,7 +555,8 @@ fn serve() -> Result<(), String> {
             Some((p, q)) => (p.to_string(), q.to_string()),
             None => (url.clone(), String::new()),
         };
-        let status = handle_request(&mut adapter, request, &method, &path, &query_string, &served_dir, &update_js);
+        let aliases = StaticAliases { update_js: &update_js, account_html: &account_html };
+        let status = handle_request(&mut adapter, request, &method, &path, &query_string, &served_dir, &aliases);
         log_line(
             if status >= 500 { "error" } else { "info" },
             "http",
@@ -544,10 +569,20 @@ fn serve() -> Result<(), String> {
     Ok(())
 }
 
+/// The system-owned files served from the project root, outside the built View.
+struct StaticAliases<'a> {
+    /// `/_a2app/update.js`: the update watcher.
+    update_js: &'a Path,
+    /// `/_a2app/account`: the framework's account page — sign in, invites,
+    /// people, connected agents. The same file in every blueprint.
+    account_html: &'a Path,
+}
+
 /// Route ownership, in order: (1) the A2App adapter answers every path it owns
-/// (identity, describe, records, operations, tasks/events); (2) anything else
-/// falls through to the static View, with `/_a2app/update.js` aliased to the
-/// project-root watcher. Returns the status responded with, for the log.
+/// (identity, describe, records, operations, tasks/events, accounts and
+/// credentials); (2) anything else falls through to the static View, with
+/// `/_a2app/update.js` and `/_a2app/account` aliased to the project-root
+/// watcher and account page. Returns the status responded with, for the log.
 fn handle_request(
     adapter: &mut Adapter,
     mut request: tiny_http::Request,
@@ -555,7 +590,7 @@ fn handle_request(
     path: &str,
     query_string: &str,
     served_dir: &Path,
-    update_js: &Path,
+    aliases: &StaticAliases,
 ) -> u16 {
     let is_api = path == "/.well-known/a2app.json" || path.starts_with("/api/");
     if is_api {
@@ -599,21 +634,22 @@ fn handle_request(
             .map(|h| (h.field.as_str().as_str().to_lowercase(), h.value.as_str().to_string()))
             .collect();
         let query: HashMap<String, String> = parse_qs(query_string).into_iter().collect();
-        let (status, payload) = adapter.dispatch(method, path, &headers, body.as_ref(), &query);
-        return respond_json(request, status, &payload);
+        let answer = adapter.dispatch(method, path, &headers, body.as_ref(), &query);
+        return respond_json_with(request, answer.status, &answer.json, &answer.headers);
     }
 
     // ---------------------------------------------------------- static View
-    // Alias before path resolution: the watcher is served from the project
-    // root, outside the built tree, so it survives any View rewrite.
-    let file = if path == "/_a2app/update.js" {
-        if update_js.is_file() {
-            Some(update_js.to_path_buf())
-        } else {
-            None
-        }
-    } else {
-        resolve_static(served_dir, path)
+    // Alias before path resolution: the watcher and the account page are
+    // served from the project root, outside the built tree, so they survive
+    // any View rewrite.
+    let alias = match path {
+        "/_a2app/update.js" => Some(aliases.update_js),
+        "/_a2app/account" => Some(aliases.account_html),
+        _ => None,
+    };
+    let file = match alias {
+        Some(file) => Some(file.to_path_buf()).filter(|f| f.is_file()),
+        None => resolve_static(served_dir, path),
     };
     // Path before method: 405 is only for a file that exists.
     let file = match file {

@@ -18,3 +18,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 # Parses A2APP_PUBLIC_URL and Host header values (see network_policy).
 url = "2"
+# Accounts and credentials (spec/v0_2/auth.md): every secret from the OS CSPRNG,
+# passwords as PBKDF2-HMAC-SHA256, hashes compared in constant time, and the
+# base64 that tokens and stored password hashes are written in.
+getrandom = "0.2"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+subtle = "2"
+base64 = "0.22"

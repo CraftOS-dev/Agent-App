@@ -26,7 +26,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `src/schema.rs` | **YOURS** | the data model + operations: `entities()`, `operations()`, `events()`, `seed()` (declarative `json!` values) and `operation_runner` (the implementations). Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
+| `src/schema.rs` | **YOURS** | the data model + operations: `entities()`, `operations()`, `events()`, `seed()` (declarative `json!` values), `operation_runner` (the implementations), and the optional hooks on `App` — `capabilities` and `permissions_of`. Edit this to evolve the app; `describe`/`schemaVersion` derive from it. |
 | `operations.json` | **YOURS** | the operation declarations `describe` and approval read (name, module, typed params, entity, appliesWhen, flags). Byte-mirror of `operations()` in `src/schema.rs`. |
 | `index.html` | **YOURS** | the Vite entry: links `tokens.css`/`ui.css`, mounts `#root`, loads `view/main.jsx`. |
 | `view/main.jsx` | **YOURS** | React root: StrictMode + ToastProvider + App; imports `updater.js` to start the update watcher. |
@@ -43,11 +43,12 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `data/`, `dist/`, `target/`, credentials, and framework state. Extend for your own artifacts. |
 | `package.json` | build | the View's dependencies (react, vite) + scripts (`build` = vite build, `dev:ui` = vite dev server). Referenced by the pipeline. |
-| `Cargo.toml` | build | the server's dependencies (tiny_http, serde_json, rusqlite, sha2). Referenced by the pipeline. |
+| `Cargo.toml` | build | the server's dependencies (tiny_http, serde_json, rusqlite, sha2, and getrandom/pbkdf2/subtle/base64 for accounts and credentials). Referenced by the pipeline. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
 | `src/main.rs` | SYSTEM (hash-locked) | the tiny_http server: arg dispatch (`--selftest`/`--check-ops`/`--promote-check`), HTTP ↔ the adapter's `dispatch()`, the built View (`dist/`) with cache validators, `/_a2app/update.js`, structured logs. Never edit. |
 | `src/a2app_adapter.rs` | SYSTEM (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `dist/` | build output | the compiled View (`npm run build`). Git-ignored; served by the Rust server. Never edit by hand. |
 | `target/` | build output | cargo's build artifacts. Git-ignored. |
 | `data/` | runtime | the live SQLite database (git-ignored, created on first boot). Never edit by hand; never commit. |
@@ -247,6 +248,13 @@ queued and no agent is handed it. An undeclared type is an `Err`. The starter's
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
   data.
+- **The agent acts as whoever asked.** The task records the runner's caller
+  (the adapter passes it to `store.trigger` for you), and the bridge runs the
+  agent with a credential for that person: it sees and changes only what they
+  could, and dies when the task ends. Say what the work needs in
+  `App::capabilities` in `src/schema.rs` — `json!({ "triage": { "scopes":
+  ["data:tasks:read", "data:tasks:write"] } })` — and the credential holds no
+  more; a capability left out gets `*`, still within that person's reach.
 - There is **no declarative trigger manifest**, and none is coming — what the
   agent does is the agent's decision, which is what keeps a compromised app from
   steering it. Do not invent a manifest format.
@@ -259,11 +267,45 @@ or a harness polling `a2app <dir> tasks next --wait`.
 
 **Show the queued work in the View.** Keep the returned `taskId` on the record
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
-only while it is unfinished. That read needs no credential only on a
-single-user app. On a multi-user app it answers 401, so show what the agent
-writes to the record instead. Render queued → working (`progress.step`) → done or
-failed (`reason`, plus a way to ask again). The creator skill lists the states.
-A button that goes quiet after it queues work looks broken.
+only while it is unfinished. The View needs no credential for this read: on a
+single-user app it is trusted, and on a multi-user app the person's session
+makes it. A 404 means the task has been pruned, so drop the indicator. Don't
+retry it. Render queued → working (`progress.step`) → done or failed
+(`reason`, plus a way to ask again). The creator skill lists the states. A
+button that goes quiet after it queues work looks broken.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself — they are never records — and the
+View needs no auth code of its own:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`. A
+  request from the View with no session answers `401 sign_in_required`, and
+  `view/api.js` sends the person there; it sends them back afterwards.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Whose records.** `"ownedBy": "<field>"` on an entity names a `readOnly`
+  string field the adapter fills with the creator's principal. A member then
+  lists, reads, changes and deletes only its own records (anyone else's answer
+  404); an owner sees all. The starter's `tasks` is owned by `owner`.
+- **Runners** get the caller as `ctx` (`ctx["principal"]`, `ctx["role"]`, …)
+  and must hold themselves to the same rule for records they touch — the
+  starter's `mine` helper in `src/schema.rs` is the pattern.
+- **What each person may do.** Add `pub fn permissions_of(&self, principal:
+  &Value) -> Vec<String>` to the `impl App` block in `src/schema.rs` to return
+  the scopes a person may use (`data:<entity>:read|write`, `op:<name>`, `*`);
+  every agent acting for them is limited to the same, on every request. The
+  starter leaves it out, so everyone may use everything (their records stay
+  their own).
+- **Hooks are optional.** `capabilities` and `permissions_of` are methods on
+  `App`; one you leave out takes the adapter's default (`{}` and `*`), so an app
+  written before accounts existed builds unchanged.
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's and nothing is filtered.
 
 ## Reaching the app from another machine
 

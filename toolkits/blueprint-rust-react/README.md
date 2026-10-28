@@ -7,8 +7,9 @@ Layout:
 | Path | Ownership | Role |
 |---|---|---|
 | `src/main.rs` | system-owned (hash-locked) | the tiny_http server: arg dispatch (`--selftest`/`--check-ops`/`--promote-check`), mounts the adapter, serves the built View (`dist/`) with cache validators |
-| `src/a2app_adapter.rs` | system-owned (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store; records land in `data/db.sqlite` |
+| `src/a2app_adapter.rs` | system-owned (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store; records, accounts and credentials (hashed) land in `data/db.sqlite` |
 | `a2app-update.js` | system-owned (hash-locked) | the View's update watcher, served at `/_a2app/update.js` |
+| `a2app-account.html` | system-owned (hash-locked) | the framework's account page, served at `/_a2app/account`: sign in, invites, people, the agents acting for you (the same file in every blueprint) |
 | `src/schema.rs` | agent-owned | the data model + operations — edit this to evolve the app; `describe`/`schemaVersion` derive from it |
 | `index.html`, `view/`, `vite.config.js` | agent-owned | the human View: a React app compiled by `vite build` into `dist/` |
 | `public/` | agent-owned | assets copied through the build verbatim — the kit token sheet (`tokens.css`) and component styles (`ui.css`) |

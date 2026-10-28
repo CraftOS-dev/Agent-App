@@ -8,6 +8,13 @@
 //! see `Store::sqlite`), so the live database is a real on-disk file inside the
 //! toolkit's declared lifecycle dataDir.
 //!
+//! Protocol 0.2 (spec/v0_2/auth.md) adds who a request acts for: delegated
+//! agent credentials stored only as hashes and always expiring, the user
+//! ceiling (a credential never does more than its person may do now), and on
+//! `authMode: multi-user` accounts, sessions, invites, record ownership and
+//! device-code sign-in. Parity oracle: adapters/adapter-core/src (auth.ts,
+//! accounts.ts, credentials.ts, device.ts, server.ts).
+//!
 //! The pure validation rules below MUST match `@a2app/rules` (behavioral
 //! oracle: the python-fastapi blueprint's `a2app_adapter.py`) so a Rust app and
 //! a Node app reject identical payloads identically — verified by the
@@ -29,16 +36,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64URL};
+use base64::Engine;
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 pub const RULES_VERSION: &str = "0.1.0";
-pub const PROTOCOL_VERSION: &str = "0.1";
+pub const PROTOCOL_VERSION: &str = "0.2";
 pub const ADAPTER_VERSION: &str = "0.1.0";
 
 // Error codes — identical strings to ERROR_CODES in the python oracle and
@@ -91,11 +100,65 @@ pub const TASK_TIMEOUT_MS: i64 = 60_000;
 // Redelivery is bounded: a task handed out this many times without finishing
 // fails with `redelivery_exhausted` instead of cycling forever.
 pub const TASK_MAX_DELIVERIES: u64 = 5;
+/// A task in one of these states is over: its credential is dead, and none is
+/// issued for it.
+const TERMINAL_TASK: [&str; 3] = ["completed", "failed", "canceled"];
 
 pub const DESCRIBE_BUDGET_CHARS: usize = 2000;
 
+// --- principals, credentials, accounts (spec/v0_2/auth.md); the values are
+// adapter-core's.
+
+/// The account page every starter serves (`a2app-account.html`): sign in,
+/// accept an invite, people, the agents acting for you, device approval.
+pub const ACCOUNT_URL: &str = "/_a2app/account";
+/// The app's administrator: the admin credential's principal, and the only
+/// principal of an `authMode: none` app.
+pub const OWNER: &str = "owner";
+/// The admin credential's id: the app's own `.agent-token`.
+const ADMIN_CREDENTIAL_ID: &str = "cred_local";
+/// Said to an agent whose credential stopped working (revoked, expired, or its
+/// person deactivated): a new one is the person's to give. A fact, never an
+/// instruction — it lands in an agent's context.
+const RENEW_HINT: &str = "Ask the person this agent acts for to approve it again (a2app <app> login), \
+                          or the app's owner for a new credential.";
+
+/// An issued credential's lifetime: 30 days unless asked, 60 s to 365 days.
+pub const DEFAULT_EXPIRES_SECONDS: i64 = 30 * 24 * 60 * 60;
+pub const MIN_EXPIRES_SECONDS: i64 = 60;
+pub const MAX_EXPIRES_SECONDS: i64 = 365 * 24 * 60 * 60;
+/// A task credential's lifetime (spec §6.2); its task ending kills it sooner.
+pub const TASK_CREDENTIAL_SECONDS: i64 = 60 * 60;
+/// How long a revoked or expired credential is remembered, so its token is told
+/// why it stopped rather than that it is unknown.
+const GRANT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// `lastUsedAt` is written at most this often, so use is not a write per request.
+const LAST_USED_RESOLUTION_MS: i64 = 60_000;
+
+const SESSION_TTL_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+const INVITE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const SIGN_IN_FAILURES: u32 = 10;
+const SIGN_IN_WINDOW_MS: i64 = 15 * 60 * 1000;
+const LOGIN_MAX: usize = 254;
+const NAME_MAX: usize = 100;
+const AGENT_NAME_MAX: usize = 100;
+
+/// Device-code sign-in (spec §7): codes live 10 minutes; agents poll every 5 s,
+/// and 5 s more each time they poll too soon.
+const DEVICE_CODE_TTL_SECONDS: i64 = 600;
+const DEVICE_POLL_INTERVAL_SECONDS: i64 = 5;
+const DEVICE_SLOW_DOWN_STEP_SECONDS: i64 = 5;
+
 /// One protocol reply: HTTP status plus the JSON payload.
 pub type Reply = (u16, Value);
+
+/// What [`Adapter::dispatch`] answers: a reply plus the headers it sets beyond
+/// Content-Type — today only a session's `Set-Cookie`.
+pub struct Answer {
+    pub status: u16,
+    pub json: Value,
+    pub headers: Vec<(String, String)>,
+}
 
 // ------------------------------------------------------------ small helpers
 
@@ -791,9 +854,13 @@ pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// ISO 8601 UTC with milliseconds, "…Z" — what the oracle's `_now_iso` emits.
 pub fn now_iso() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs() as i64;
-    let millis = d.subsec_millis();
+    iso_of_ms(epoch_ms_now())
+}
+
+/// Epoch milliseconds as ISO 8601 UTC with milliseconds (JS `toISOString`).
+fn iso_of_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let millis = ms.rem_euclid(1000);
     let (y, m, day) = civil_from_days(secs.div_euclid(86_400));
     let tod = secs.rem_euclid(86_400);
     format!(
@@ -833,41 +900,285 @@ fn iso_epoch_ms(s: &str) -> Option<i64> {
 
 // ----------------------------------------------------------------- entropy
 
-static ENTROPY_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// `n` bytes from the operating system's CSPRNG. Every secret this app hands
+/// out comes from here; a machine that cannot supply randomness cannot serve
+/// safely, so failing loudly is the only honest answer.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    getrandom::getrandom(&mut buf).expect("the operating system's random source failed");
+    buf
+}
 
-/// `n` pseudo-random bytes as lowercase hex, without a rand crate: the OS-seeded
-/// per-process SipHash keys behind `RandomState`, mixed with the clock, the pid
-/// and a counter, expanded through splitmix64. Plenty for record ids and a
-/// local loopback token; swap in a CSPRNG before minting anything that must
-/// survive an offline attacker.
+/// `n` random bytes as lowercase hex (record ids, the app's `.agent-token`).
 pub fn random_hex(n: usize) -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+    hex_of(&random_bytes(n))
+}
 
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u128(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
-    hasher.write_u32(std::process::id());
-    hasher.write_u64(ENTROPY_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let mut state = hasher.finish();
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
-    let mut out = String::with_capacity(n * 2);
-    let mut produced = 0;
-    while produced < n {
-        // splitmix64 step — a well-mixed expansion of the seed.
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
-        for byte in z.to_le_bytes() {
-            if produced == n {
-                break;
+/* ------------------------------------------------------------ secrets
+ *
+ * The security primitives behind accounts, sessions, invites, device codes and
+ * credentials (spec/v0_2/auth.md; oracle: adapter-core auth.ts). Every secret
+ * the app hands out (tokens, session ids, invite codes, device codes) is 256
+ * random bits, returned once, and stored only as its SHA-256. Passwords are
+ * PBKDF2-SHA256 at 600 000 iterations (OWASP), compared in constant time.
+ */
+
+/// 256 random bits, base64url (43 chars).
+pub fn new_secret() -> String {
+    BASE64URL.encode(random_bytes(32))
+}
+
+/// An agent credential token: `a2a_` + 256 random bits.
+pub fn new_token() -> String {
+    format!("a2a_{}", new_secret())
+}
+
+/// How a secret is stored and looked up: hex SHA-256 of the whole string.
+pub fn hash_secret(secret: &str) -> String {
+    hex_of(&Sha256::digest(secret.as_bytes()))
+}
+
+/// An id that is not a secret: `prefix_` + 64 random bits, hex.
+pub fn new_id(prefix: &str) -> String {
+    format!("{prefix}_{}", random_hex(8))
+}
+
+pub const PBKDF2_ITERATIONS: u32 = 600_000;
+const PBKDF2_KEY_BYTES: usize = 32;
+const PBKDF2_SALT_BYTES: usize = 16;
+pub const PASSWORD_MIN: usize = 10;
+pub const PASSWORD_MAX: usize = 256;
+
+/// `pbkdf2_sha256$<iterations>$<salt b64>$<hash b64>` — byte-compatible with
+/// adapter-core's `hashPassword`, so an account store moves between stacks.
+pub fn hash_password(password: &str, iterations: u32) -> String {
+    let salt = random_bytes(PBKDF2_SALT_BYTES);
+    let mut key = [0u8; PBKDF2_KEY_BYTES];
+    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut key);
+    format!("pbkdf2_sha256${iterations}${}${}", BASE64.encode(&salt), BASE64.encode(key))
+}
+
+/// Constant-time check of `password` against a stored hash. A malformed hash
+/// never matches.
+pub fn verify_password(password: &str, stored: &str) -> bool {
+    let parts: Vec<&str> = stored.split('$').collect();
+    if parts.len() != 4 || parts[0] != "pbkdf2_sha256" {
+        return false;
+    }
+    let Some(iterations) = parts[1].parse::<u32>().ok().filter(|i| *i >= 1) else { return false };
+    let (Ok(salt), Ok(expected)) = (BASE64.decode(parts[2]), BASE64.decode(parts[3])) else { return false };
+    if expected.is_empty() {
+        return false;
+    }
+    let mut actual = vec![0u8; expected.len()];
+    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut actual);
+    actual.ct_eq(&expected).into()
+}
+
+/// Consonants only (RFC 8628 §6.1): no vowels, so no words; no look-alikes.
+const USER_CODE_ALPHABET: &str = "BCDFGHJKLMNPQRSTVWXZ";
+
+/// `XXXX-XXXX` from [`USER_CODE_ALPHABET`], each letter uniform.
+pub fn new_user_code() -> String {
+    let alphabet = USER_CODE_ALPHABET.as_bytes();
+    // Rejection sampling: 240 is the largest multiple of 20 a byte reaches, so
+    // `% 20` over the bytes below it favours no letter.
+    let limit = (256 / alphabet.len() * alphabet.len()) as u8;
+    let mut letters = String::with_capacity(9);
+    while letters.len() < 8 {
+        for b in random_bytes(16) {
+            if b < limit && letters.len() < 8 {
+                letters.push(alphabet[b as usize % alphabet.len()] as char);
             }
-            out.push_str(&format!("{byte:02x}"));
-            produced += 1;
+        }
+    }
+    format!("{}-{}", &letters[..4], &letters[4..])
+}
+
+/// A user code as typed: case and the dash do not matter. "" when it cannot be
+/// one.
+pub fn normalize_user_code(input: &str) -> String {
+    let letters: String = input.to_uppercase().chars().filter(|c| USER_CODE_ALPHABET.contains(*c)).collect();
+    if letters.len() == 8 {
+        format!("{}-{}", &letters[..4], &letters[4..])
+    } else {
+        String::new()
+    }
+}
+
+/// A login as stored and compared: trimmed, lower-cased.
+pub fn normalize_login(login: &str) -> String {
+    login.trim().to_lowercase()
+}
+
+/// A string's length as JavaScript counts it (UTF-16 code units), so a limit
+/// means the same on every stack.
+fn js_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/* ------------------------------------------------------------ cookies */
+
+/// `decodeURIComponent`: None for a malformed escape or bytes that are not
+/// UTF-8, which is not a value this app wrote.
+fn decode_uri_component(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let pair = s.get(i + 1..i + 3).filter(|p| p.bytes().all(|c| c.is_ascii_hexdigit()))?;
+            out.push(u8::from_str_radix(pair, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `encodeURIComponent`.
+fn encode_uri_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
         }
     }
     out
+}
+
+/// `Cookie` header -> name/value pairs (the first occurrence of a name wins).
+pub fn parse_cookies(header: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for part in header.split(';') {
+        let Some(eq) = part.find('=').filter(|eq| *eq > 0) else { continue };
+        let name = part[..eq].trim().to_string();
+        if out.contains_key(&name) {
+            continue;
+        }
+        if let Some(value) = decode_uri_component(part[eq + 1..].trim()) {
+            out.insert(name, value);
+        }
+    }
+    out
+}
+
+/// A `Set-Cookie` value for the session cookie. `max_age_seconds: 0` clears it.
+pub fn session_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
+    let mut attrs = vec![
+        format!("{name}={}", encode_uri_component(value)),
+        "Path=/".to_string(),
+        "HttpOnly".to_string(),
+        "SameSite=Lax".to_string(),
+        format!("Max-Age={max_age_seconds}"),
+    ];
+    if secure {
+        attrs.push("Secure".to_string());
+    }
+    attrs.join("; ")
+}
+
+/* -------------------------------------------------- failure limiting */
+
+/// Counts failures per key in a fixed window (sign-in failures per login). In
+/// memory: a restart forgets them, which costs an attacker nothing they could
+/// not get by waiting out the window. The clock is passed in, so the rule is
+/// testable.
+pub struct FailureLimiter {
+    max: u32,
+    window_ms: i64,
+    windows: HashMap<String, (u32, i64)>,
+}
+
+impl FailureLimiter {
+    pub fn new(max: u32, window_ms: i64) -> Self {
+        FailureLimiter { max, window_ms, windows: HashMap::new() }
+    }
+
+    /// Seconds until `key` may try again, or 0 when it may now.
+    pub fn retry_after(&mut self, key: &str, now: i64) -> i64 {
+        let Some(&(count, start)) = self.windows.get(key) else { return 0 };
+        let elapsed = now - start;
+        if elapsed >= self.window_ms {
+            self.windows.remove(key);
+            return 0;
+        }
+        if count >= self.max {
+            (self.window_ms - elapsed + 999) / 1000
+        } else {
+            0
+        }
+    }
+
+    pub fn fail(&mut self, key: &str, now: i64) {
+        match self.windows.get_mut(key) {
+            Some((count, start)) if now - *start < self.window_ms => *count += 1,
+            _ => {
+                self.windows.insert(key.to_string(), (1, now));
+            }
+        }
+    }
+
+    pub fn reset(&mut self, key: &str) {
+        self.windows.remove(key);
+    }
+}
+
+/* --------------------------------------------------- grant requests */
+
+/// The optional agent name a caller gave a credential, checked: absent or
+/// null is none; otherwise 1–100 characters, trimmed.
+pub fn parse_agent_name(value: Option<&Value>) -> Result<Option<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) if !name.trim().is_empty() && js_len(name) <= AGENT_NAME_MAX => {
+            Ok(Some(name.trim().to_string()))
+        }
+        Some(_) => Err(format!("agentName is 1–{AGENT_NAME_MAX} characters.")),
+    }
+}
+
+/// The scopes and lifetime a caller asked for, checked; or the reason they
+/// cannot be granted. `scopes` defaults to `*`; every entry must be `*` or a
+/// scope the app declares. Duplicates collapse, first occurrence kept.
+pub fn parse_grant_request(body: &Value, declared: &BTreeSet<String>) -> Result<(Vec<String>, i64), String> {
+    let scopes = match body.get("scopes").filter(|s| !s.is_null()) {
+        None => vec!["*".to_string()],
+        Some(Value::Array(list)) if !list.is_empty() && list.iter().all(Value::is_string) => {
+            list.iter().map(py_str).collect()
+        }
+        Some(_) => return Err("scopes is a non-empty list of scope names (or [\"*\"]).".to_string()),
+    };
+    let unknown: Vec<&str> =
+        scopes.iter().map(String::as_str).filter(|s| *s != "*" && !declared.contains(*s)).collect();
+    if !unknown.is_empty() {
+        return Err(format!("Not scopes this app declares: {}.", unknown.join(", ")));
+    }
+    let expires_in = match body.get("expiresIn").filter(|e| !e.is_null()) {
+        None => Some(DEFAULT_EXPIRES_SECONDS),
+        // A whole number of seconds, however JSON spelled it (3600 or 3600.0).
+        Some(v) => v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64),
+    };
+    let Some(expires_in) = expires_in.filter(|e| (MIN_EXPIRES_SECONDS..=MAX_EXPIRES_SECONDS).contains(e)) else {
+        return Err(format!(
+            "expiresIn is a whole number of seconds from {MIN_EXPIRES_SECONDS} to {MAX_EXPIRES_SECONDS} (365 days)."
+        ));
+    };
+    let mut unique: Vec<String> = Vec::with_capacity(scopes.len());
+    for s in scopes {
+        if !unique.contains(&s) {
+            unique.push(s);
+        }
+    }
+    Ok((unique, expires_in))
 }
 
 // ------------------------------------------------------------------- store
@@ -1032,13 +1343,17 @@ enum Backend {
     Memory {
         rows: BTreeMap<String, Vec<Value>>,
         idem: HashMap<(String, String), String>,
+        /// adapter state: table -> key -> row (see `Store::row`)
+        state: BTreeMap<String, BTreeMap<String, Value>>,
     },
-    /// The blueprint's live store: records + idempotency keys in SQLite.
-    /// One connection behind one mutex keeps this correct without a pool.
+    /// The blueprint's live store: records, idempotency keys and adapter state
+    /// in SQLite. One connection behind one mutex keeps this correct without a
+    /// pool.
     Sqlite(Mutex<Connection>),
 }
 
-/// Record store plus adapter-owned state (tasks, events, approvals, grants).
+/// Record store plus adapter-owned state (tasks, events, approvals,
+/// credentials, accounts).
 ///
 /// Records are JSON rows in one table keyed (entity, id): the schema stays
 /// declarative and additive (a new field simply appears in the JSON) while the
@@ -1048,8 +1363,11 @@ enum Backend {
 ///
 /// Idempotency keys persist because a restart is exactly when a retried POST
 /// arrives — an in-memory table would return a duplicate record instead of the
-/// 409 the protocol promises. The task/event plane, approvals and grants stay
-/// in memory: they are runtime queues and session state, not records.
+/// 409 the protocol promises. Credentials, accounts, sessions, invites and
+/// device codes persist too (the `adapter_state` table): a restart must sign
+/// nobody out and cut off no agent. They are adapter state, never records — no
+/// record route reaches them, and a runner's `Store` methods cannot. The
+/// task/event plane and approvals stay in memory: they are runtime queues.
 ///
 /// Writes are durable when the call returns — there is no separate persist()
 /// step. A record read from this store is a COPY: mutate it, then
@@ -1064,30 +1382,32 @@ pub struct Store {
     tasks: Vec<Value>,
     events: Vec<Value>,
     approvals: HashSet<String>,
-    grants: HashMap<String, Value>,
-    task_seq: u64,
     event_seq: u64,
     /// The event types this app may emit, set by `Adapter::new` from the app's
     /// declarations. Empty means none were declared.
     event_types: BTreeSet<String>,
     /// occurrence key -> task id, so one occurrence makes one task
     dedup: HashMap<String, String>,
+    /// Who the operation being run acts for. The adapter sets it around a
+    /// runner, so a task the runner queues records who asked for it (spec/v0_2
+    /// auth.md §6.1) without the runner having to say — or being able to say
+    /// otherwise. None outside a runner: work the app queues on its own.
+    caller: Option<String>,
 }
 
 impl Store {
     pub fn memory(seed: Value) -> Store {
         Store {
-            backend: Backend::Memory { rows: BTreeMap::new(), idem: HashMap::new() },
+            backend: Backend::Memory { rows: BTreeMap::new(), idem: HashMap::new(), state: BTreeMap::new() },
             wants_seed: true,
             seed,
             tasks: Vec::new(),
             events: Vec::new(),
             approvals: HashSet::new(),
-            grants: HashMap::new(),
-            task_seq: 0,
             event_seq: 0,
             event_types: BTreeSet::new(),
             dedup: HashMap::new(),
+            caller: None,
         }
     }
 
@@ -1105,7 +1425,10 @@ impl Store {
                 PRIMARY KEY (entity, id));
              CREATE TABLE IF NOT EXISTS idem (
                 entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL,
-                PRIMARY KEY (entity, key));",
+                PRIMARY KEY (entity, key));
+             CREATE TABLE IF NOT EXISTS adapter_state (
+                tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL,
+                PRIMARY KEY (tbl, key));",
         )
         .map_err(|e| format!("cannot create tables: {e}"))?;
         Ok(Store {
@@ -1115,11 +1438,10 @@ impl Store {
             tasks: Vec::new(),
             events: Vec::new(),
             approvals: HashSet::new(),
-            grants: HashMap::new(),
-            task_seq: 0,
             event_seq: 0,
             event_types: BTreeSet::new(),
             dedup: HashMap::new(),
+            caller: None,
         })
     }
 
@@ -1148,8 +1470,15 @@ impl Store {
         }
     }
 
+    /// `query`: `filter`, `sort`, `page`, `perPage`, and `where` — `{field:
+    /// value}` constraints the adapter sets (a member sees only the records it
+    /// owns), applied before sorting and paging like any other constraint, so
+    /// pages and totals count only what the caller may see.
     pub fn list_records(&self, entity: &str, query: &Value) -> Result<Value, UnsupportedFilter> {
         let mut items = self.all_records(entity);
+        if let Some(constraints) = query.get("where").and_then(Value::as_object) {
+            items.retain(|r| constraints.iter().all(|(field, value)| get(r, field) == value));
+        }
         if let Some(expr) = query.get("filter").and_then(Value::as_str) {
             if !expr.is_empty() {
                 let (field, op, value) = match_filter(expr)?;
@@ -1255,13 +1584,118 @@ impl Store {
         }
     }
 
-    // grants ------------------------------------------------------------------
-    pub fn put_grant(&mut self, grant: Value) {
-        self.grants.insert(get_str(&grant, "token").to_string(), grant);
+    // adapter state -----------------------------------------------------------
+    // Keyed tables the auth layer owns: `users`, `sessions`, `invites`,
+    // `devices` and `grants`. Rows are keyed by id or by the SHA-256 of the
+    // secret that finds them; no secret is ever a key or a value. Private to
+    // the adapter: a runner holds this `Store` too, and must not reach them.
+
+    fn row(&self, table: &str, key: &str) -> Option<Value> {
+        match &self.backend {
+            Backend::Memory { state, .. } => state.get(table).and_then(|t| t.get(key)).cloned(),
+            Backend::Sqlite(db) => {
+                let db = db.lock().expect("sqlite mutex poisoned");
+                db.query_row("SELECT data FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+            }
+        }
     }
 
-    pub fn grant_by_token(&self, token: &str) -> Option<Value> {
-        self.grants.get(token).cloned()
+    fn put_row(&mut self, table: &str, key: &str, row: &Value) {
+        match &mut self.backend {
+            Backend::Memory { state, .. } => {
+                state.entry(table.to_string()).or_default().insert(key.to_string(), row.clone());
+            }
+            Backend::Sqlite(db) => {
+                let db = db.lock().expect("sqlite mutex poisoned");
+                let _ = db.execute(
+                    "INSERT INTO adapter_state (tbl, key, data) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
+                    params![table, key, stable_json(row)],
+                );
+            }
+        }
+    }
+
+    fn delete_row(&mut self, table: &str, key: &str) {
+        match &mut self.backend {
+            Backend::Memory { state, .. } => {
+                if let Some(t) = state.get_mut(table) {
+                    t.remove(key);
+                }
+            }
+            Backend::Sqlite(db) => {
+                let db = db.lock().expect("sqlite mutex poisoned");
+                let _ = db.execute("DELETE FROM adapter_state WHERE tbl = ?1 AND key = ?2", [table, key]);
+            }
+        }
+    }
+
+    fn rows(&self, table: &str) -> Vec<(String, Value)> {
+        match &self.backend {
+            Backend::Memory { state, .. } => state
+                .get(table)
+                .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
+            Backend::Sqlite(db) => {
+                let db = db.lock().expect("sqlite mutex poisoned");
+                let Ok(mut stmt) = db.prepare("SELECT key, data FROM adapter_state WHERE tbl = ?1") else {
+                    return Vec::new();
+                };
+                let rows = stmt.query_map([table], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)));
+                match rows {
+                    Ok(iter) => iter
+                        .filter_map(Result::ok)
+                        .filter_map(|(k, s)| serde_json::from_str(&s).ok().map(|v| (k, v)))
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            }
+        }
+    }
+
+    // credentials ---------------------------------------------------------------
+    // A grant (spec/v0_2/auth.md §2.1): `{credentialId, tokenHash, principal,
+    // agentName, scopes, createdAt, expiresAt, lastUsedAt, revokedAt, task,
+    // admin}`, in the `grants` table keyed by `tokenHash` — the hex SHA-256 of
+    // the token, the only form of it ever stored. A row without one (a token
+    // kept in plaintext by an older store) is never served: the host re-seeds
+    // its own credential at boot, hashed.
+
+    fn grant_by_token_hash(&self, token_hash: &str) -> Option<Value> {
+        self.row("grants", token_hash).filter(|g| get(g, "tokenHash").as_str() == Some(token_hash))
+    }
+
+    fn list_grants(&self) -> Vec<Value> {
+        self.rows("grants")
+            .into_iter()
+            .filter(|(key, g)| get(g, "tokenHash").as_str() == Some(key.as_str()))
+            .map(|(_, g)| g)
+            .collect()
+    }
+
+    fn grant_by_id(&self, credential_id: &str) -> Option<Value> {
+        self.list_grants().into_iter().find(|g| get_str(g, "credentialId") == credential_id)
+    }
+
+    fn put_grant(&mut self, grant: &Value) {
+        let token_hash = get_str(grant, "tokenHash").to_string();
+        // A rotated token moves its credential to a new key; the old one goes.
+        if let Some(previous) = self.grant_by_id(get_str(grant, "credentialId")) {
+            if get_str(&previous, "tokenHash") != token_hash {
+                self.delete_row("grants", get_str(&previous, "tokenHash"));
+            }
+        }
+        self.put_row("grants", &token_hash, grant);
+    }
+
+    fn delete_grant(&mut self, credential_id: &str) {
+        if let Some(g) = self.grant_by_id(credential_id) {
+            self.delete_row("grants", get_str(&g, "tokenHash"));
+        }
     }
 
     // idempotency / approvals -------------------------------------------------
@@ -1333,17 +1767,28 @@ impl Store {
         (fresh, next)
     }
 
-    pub fn enqueue_task(&mut self, event_id: &str, capability: &str, payload: &Value, dedup_key: Option<&str>) -> Value {
+    /// Queue a task. `principal` is who asked for the work (spec/v0_2 auth.md
+    /// §6.1), null for work the app queues on its own.
+    fn enqueue_task(
+        &mut self,
+        event_id: &str,
+        capability: &str,
+        payload: &Value,
+        principal: Option<&str>,
+        dedup_key: Option<&str>,
+    ) -> Value {
         if let Some(existing) = dedup_key.and_then(|k| self.dedup.get(k)).and_then(|id| self.get_task(id)) {
             return existing;
         }
-        self.task_seq += 1;
-        let id = format!("task_{}", self.task_seq);
+        // Random, never a counter: a task credential names its task, and
+        // credentials outlive a restart that would reset a counter — a new
+        // task must never revive an old task's credential.
+        let id = new_id("tsk");
         let task = json!({
             "id": id, "app": null, "event": event_id,
             "status": "submitted",
-            "request": { "capability": capability, "payload": payload }, "claim": null,
-            "progress": {}, "result": null, "reason": null, "ask": null,
+            "request": { "capability": capability, "payload": payload, "principal": principal },
+            "claim": null, "progress": {}, "result": null, "reason": null, "ask": null,
             "createdAt": now_iso(), "updatedAt": now_iso(), "deliveries": 1,
         });
         self.tasks.push(task.clone());
@@ -1359,7 +1804,27 @@ impl Store {
     /// `taskId` is null when no capability was named, because an event alone
     /// asks no agent for work. An undeclared event type is an error, and
     /// nothing is emitted.
+    ///
+    /// The task records who asked: the caller of the operation this runs in.
+    /// The agent that takes it acts as them (spec/v0_2/auth.md §6).
     pub fn trigger(&mut self, etype: &str, payload: &Value, capability: Option<&str>) -> Result<Value, String> {
+        let principal = self.caller.clone();
+        self.trigger_as(etype, payload, capability, principal.as_deref())
+    }
+
+    /// The store lent to a runner, acting for `principal`.
+    fn acting_for(&mut self, principal: &str) -> CallerScope<'_> {
+        self.caller = Some(principal.to_string());
+        CallerScope(self)
+    }
+
+    fn trigger_as(
+        &mut self,
+        etype: &str,
+        payload: &Value,
+        capability: Option<&str>,
+        principal: Option<&str>,
+    ) -> Result<Value, String> {
         if !self.event_types.is_empty() && !self.event_types.contains(etype) {
             return Err(format!("event type \"{etype}\" is not declared"));
         }
@@ -1370,13 +1835,15 @@ impl Store {
                 // same trigger firing twice must make one task. The event id is
                 // fresh per emit, so keying on it would deduplicate nothing. The
                 // occurrence is what the app asked for (type, capability,
-                // payload); serde_json's sorted map makes the serialization
-                // independent of key order.
-                let canonical = stable_json(&json!({ "type": etype, "capability": cap, "payload": payload }));
-                let digest = Sha256::digest(canonical.as_bytes());
-                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-                let key = format!("sha256:{hex}");
-                let task = self.enqueue_task(get_str(&ev, "id"), cap, payload, Some(key.as_str()));
+                // payload) and who asked — the same request from two people is
+                // two tasks, each run as the person who asked. serde_json's
+                // sorted map makes the serialization independent of key order.
+                let mut occurrence = json!({ "type": etype, "capability": cap, "payload": payload });
+                if let Some(p) = principal.filter(|p| !p.is_empty()) {
+                    occurrence["principal"] = json!(p);
+                }
+                let key = format!("sha256:{}", hex_of(&Sha256::digest(stable_json(&occurrence).as_bytes())));
+                let task = self.enqueue_task(get_str(&ev, "id"), cap, payload, principal, Some(key.as_str()));
                 Some(get_str(&task, "id").to_string())
             }
             None => None,
@@ -1431,6 +1898,17 @@ impl Store {
             Some(slot) => *slot = task,
             None => self.tasks.push(task),
         }
+    }
+}
+
+/// The store while a runner holds it (see `Store::acting_for`). Dropping it
+/// clears the caller — on return or on a panic — so a task queued afterwards is
+/// never recorded as that person's.
+struct CallerScope<'a>(&'a mut Store);
+
+impl Drop for CallerScope<'_> {
+    fn drop(&mut self) {
+        self.0.caller = None;
     }
 }
 
@@ -1546,50 +2024,89 @@ fn approval_key(name: &str, args: &Value) -> String {
     format!("ak_{}", &hex[..32])
 }
 
-/// What this caller may do, for rendering access on a describe level.
-enum Access {
-    /// The app's own UI, or an anonymous caller on a single-user app: both
-    /// reach a context without meeting the scope check, so both genuinely have
-    /// full access (or, for an anonymous caller on multi-user, none).
-    All(bool),
-    Scoped(BTreeSet<String>),
-}
+/// What this caller may do, for rendering access on a describe level: the
+/// scopes its request was given (see `Adapter::access_for`).
+struct Access(BTreeSet<String>);
 
 impl Access {
     fn read(&self, entity: &str) -> bool {
-        match self {
-            Access::All(b) => *b,
-            Access::Scoped(held) => held.contains(&format!("data:{entity}:read")),
-        }
+        self.0.contains(&format!("data:{entity}:read"))
     }
     fn write(&self, entity: &str) -> bool {
-        match self {
-            Access::All(b) => *b,
-            Access::Scoped(held) => held.contains(&format!("data:{entity}:write")),
-        }
+        self.0.contains(&format!("data:{entity}:write"))
     }
     fn run(&self, op: &str) -> bool {
-        match self {
-            Access::All(b) => *b,
-            Access::Scoped(held) => held.contains(&format!("op:{op}")),
-        }
+        self.0.contains(&format!("op:{op}"))
     }
 }
 
+/// Who a request acts for, as `Adapter::resolve` found it.
+struct Caller {
+    /// `{credentialId, agentName, principal, role}` — what a runner receives.
+    ctx: Value,
+    /// The scopes this request may use; None for an anonymous read on a
+    /// single-user app, which the scope check does not apply to.
+    held: Option<BTreeSet<String>>,
+    /// The credential presented, if one was.
+    grant: Option<Value>,
+}
+
+/// A caller that may manage accounts and credentials (spec §2.4).
+struct Manager {
+    principal: String,
+    role: String,
+}
+
 /// One operation runner: (args, ctx, store) -> JSON-able result or an error
-/// string (surfaced as a 500 operation_failed envelope).
+/// string (surfaced as a 500 operation_failed envelope). `ctx` is who is
+/// calling: `{credentialId, agentName, principal, role}`.
 pub type Runner = fn(&Value, &Value, &mut Store) -> Result<Value, String>;
 /// Runner resolution by operation name — `schema::operation_runner`.
 pub type RunnerLookup = fn(&str) -> Option<Runner>;
+/// What a principal may do (spec/v0_2/auth.md §3), as scopes (`*` is every
+/// scope), given `{id, name, role, active}`. Evaluated on every request.
+pub type PermissionsOf = fn(&Value) -> Vec<String>;
+
+/// The app's optional hooks. `schema.rs` defines one as an inherent method,
+/// `impl App { pub fn capabilities(&self) -> Value { … } }`; an inherent method
+/// wins over a trait's, so `App.capabilities()` falls back to the default below
+/// when the app defines none — and a schema written before 0.2 still compiles.
+pub struct App;
+
+pub trait AppDefaults {
+    /// `{capability: {"scopes": [...]}}`: what each capability's agent may do.
+    /// None declared: every capability's agent gets `*`, within its person's
+    /// reach.
+    fn capabilities(&self) -> Value {
+        json!({})
+    }
+    /// What a principal may do. By default everyone active may use everything
+    /// (their records still stay their own).
+    fn permissions_of(&self, _principal: &Value) -> Vec<String> {
+        vec!["*".to_string()]
+    }
+}
+
+impl AppDefaults for App {}
 
 pub struct AdapterConfig {
     pub app_id: String,
     pub app_name: Option<String>,
-    /// `{name: {"fields": [...], "module": str, "summary"?, "auth"?, "writeAllow"?}}`
+    /// `{name: {"fields": [...], "module": str, "summary"?, "auth"?,
+    /// "writeAllow"?, "ownedBy"?}}`. `ownedBy` names a readOnly string field
+    /// holding each record's owner (spec/v0_2/auth.md §5).
     pub entities: Value,
     pub operations: Value,
     pub store: Store,
+    /// The app's own `.agent-token`: seeded, hashed, as the admin credential
+    /// (spec/v0_2/auth.md §2.3).
     pub token: String,
+    /// What each person may do; None means `*` for every active principal
+    /// (their records still stay their own).
+    pub permissions_of: Option<PermissionsOf>,
+    /// `{capability: {"scopes": [...]}}`: what the agent taking each
+    /// capability's tasks may do. A capability left out gets `*`.
+    pub capabilities: Value,
     pub modules: Value,
     pub allowed_origins: Vec<String>,
     /// The origin people and agents reach the app at (A2APP_PUBLIC_URL,
@@ -1616,14 +2133,29 @@ pub struct Adapter {
     operations: Value,
     modules: Value,
     pub store: Store,
+    /// "none" or "multi-user"
     auth_mode: String,
+    /// The app's own origins, the public URL's among them, in declared order.
+    own_origins: Vec<String>,
     allowed_origins: HashSet<String>,
     allowed_hosts: HashSet<String>,
+    public_url: Option<String>,
     runner_lookup: RunnerLookup,
+    permissions_of: Option<PermissionsOf>,
+    capabilities: Value,
     credential_hint: String,
     env: Option<String>,
     limiter: RateLimiter,
     app_version: Option<Box<dyn Fn() -> String>>,
+    /// Per app: browsers do not separate cookies by port, so two apps on one
+    /// machine would otherwise sign each other out.
+    session_cookie_name: String,
+    /// `Secure` on the session cookie when the public URL is https.
+    secure_cookies: bool,
+    sign_in_failures: FailureLimiter,
+    /// Checked against when a login does not exist, so a missing account takes
+    /// as long to refuse as a wrong password and the timing does not say which.
+    dummy_hash: Option<String>,
 }
 
 /* ---------------------------------------------------------------- network
@@ -1720,6 +2252,24 @@ fn model_problems(modules: &Value, entity_defs: &Value, operations: &Value) -> V
             } else if !declared.contains(module) {
                 problems.push(format!("entity \"{name}\" names undeclared module \"{module}\""));
             }
+            if let Some(owned_by) = d.get("ownedBy").filter(|v| !v.is_null()) {
+                // The adapter writes the owner and the guard keeps clients from
+                // doing so, which only holds for a declared, read-only string
+                // field.
+                let owned_by = owned_by.as_str().map_or_else(|| stable_json(owned_by), str::to_string);
+                let owner = get(d, "fields")
+                    .as_array()
+                    .and_then(|a| a.iter().find(|f| get(f, "name").as_str() == Some(owned_by.as_str())));
+                match owner {
+                    None => problems.push(format!(
+                        "entity \"{name}\" is ownedBy \"{owned_by}\", which is not one of its fields"
+                    )),
+                    Some(f) if get_str(f, "type") != "string" || get(f, "readOnly") != &json!(true) => problems.push(
+                        format!("entity \"{name}\" is ownedBy \"{owned_by}\", which must be a readOnly string field"),
+                    ),
+                    Some(_) => {}
+                }
+            }
         }
     }
 
@@ -1774,16 +2324,7 @@ fn model_problems(modules: &Value, entity_defs: &Value, operations: &Value) -> V
 
 impl Adapter {
     pub fn new(config: AdapterConfig) -> Result<Adapter, String> {
-        let problems = model_problems(&config.modules, &config.entities, &config.operations);
-        if !problems.is_empty() {
-            // Fail fast: a model whose entities or operations name a module that
-            // was never declared cannot be walked, so serving it would answer 200
-            // while omitting real capability.
-            return Err(format!(
-                "A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - {}",
-                problems.join("\n  - ")
-            ));
-        }
+        let mut problems = model_problems(&config.modules, &config.entities, &config.operations);
         let mut store = config.store;
         // The declared event types are what keep the app->agent queue from
         // being an open channel: `store.trigger` refuses a type that is not
@@ -1795,31 +2336,88 @@ impl Adapter {
             .as_array()
             .map(|events| events.iter().map(|e| get_str(e, "type").to_string()).collect())
             .unwrap_or_default();
-        store.put_grant(json!({
-            "token": config.token, "credentialId": "cred_local", "agentName": "local",
-            "principal": "owner", "scopes": ["*"],
-        }));
         // The hosts this app answers to are derived from its own origins, so an
         // app reached at its public URL answers there and nowhere new.
         let own_origins: Vec<String> = config.allowed_origins.iter().cloned().chain(config.public_url.clone()).collect();
+        let auth_mode = if config.auth_mode == "multi-user" { "multi-user" } else { "none" };
         let mut adapter = Adapter {
+            session_cookie_name: format!("a2app_session_{}", config.app_id),
             app_id: config.app_id,
             app_name: config.app_name,
             entity_defs: config.entities,
             operations: config.operations,
             modules: config.modules,
             store,
-            auth_mode: config.auth_mode,
+            auth_mode: auth_mode.to_string(),
             allowed_origins: own_origins.iter().cloned().collect(),
             allowed_hosts: own_origins.iter().flat_map(|o| origin_hosts(o)).collect(),
+            own_origins,
+            secure_cookies: config.public_url.as_deref().map_or(false, |u| u.starts_with("https:")),
+            public_url: config.public_url,
             runner_lookup: config.runner_lookup,
+            permissions_of: config.permissions_of,
+            capabilities: config.capabilities,
             credential_hint: config
                 .credential_hint
                 .unwrap_or_else(|| "Read the app's .agent-token file (mode 0600) in the project directory.".to_string()),
             env: config.env,
             limiter: RateLimiter::new(),
             app_version: config.app_version,
+            sign_in_failures: FailureLimiter::new(SIGN_IN_FAILURES, SIGN_IN_WINDOW_MS),
+            dummy_hash: None,
         };
+
+        // A capability's agent may hold only scopes the app declares.
+        let declared = adapter.all_scopes();
+        if let Some(caps) = adapter.capabilities.as_object() {
+            for (capability, decl) in caps {
+                let unknown: Vec<String> = get(decl, "scopes")
+                    .as_array()
+                    .map(|a| a.iter().map(py_str).filter(|s| s != "*" && !declared.contains(s)).collect())
+                    .unwrap_or_default();
+                if !unknown.is_empty() {
+                    problems.push(format!(
+                        "capability \"{capability}\" needs scopes this app does not declare: {}",
+                        unknown.join(", ")
+                    ));
+                }
+            }
+        }
+        if !problems.is_empty() {
+            // Fail fast: a model whose entities or operations name a module that
+            // was never declared cannot be walked, so serving it would answer 200
+            // while omitting real capability.
+            return Err(format!(
+                "A2App adapter: the app's declarations are inconsistent and cannot be served:\n  - {}",
+                problems.join("\n  - ")
+            ));
+        }
+
+        // The app's own .agent-token is its admin credential, hashed on the way
+        // in. Re-seeding at every boot follows a rotated token file.
+        let existing = adapter.store.grant_by_id(ADMIN_CREDENTIAL_ID);
+        let kept = |field: &str| existing.as_ref().map_or(Value::Null, |g| get(g, field).clone());
+        let created_at = match kept("createdAt") {
+            Value::Null => json!(now_iso()),
+            v => v,
+        };
+        let admin = json!({
+            "credentialId": ADMIN_CREDENTIAL_ID, "tokenHash": hash_secret(&config.token),
+            "principal": OWNER, "agentName": "local", "scopes": ["*"],
+            "createdAt": created_at, "expiresAt": null, "lastUsedAt": kept("lastUsedAt"),
+            "revokedAt": null, "task": null, "admin": true,
+        });
+        adapter.store.put_grant(&admin);
+        // Revoked and expired credentials are kept a while so their tokens are
+        // told why they stopped; after that they are gone.
+        let now = epoch_ms_now();
+        for g in adapter.store.list_grants() {
+            let expired = get(&g, "expiresAt").as_str().filter(|e| iso_epoch_ms(e).map_or(true, |at| at <= now));
+            let ended = get(&g, "revokedAt").as_str().or(expired);
+            if ended.map_or(false, |at| now - iso_epoch_ms(at).unwrap_or(0) > GRANT_RETENTION_MS) {
+                adapter.store.delete_grant(get_str(&g, "credentialId"));
+            }
+        }
         // Seed records (materialize server-managed read-only fields) — but only
         // into a store that is genuinely fresh. A durable store that already
         // holds a database refuses the seed: re-seeding on every boot would
@@ -1909,6 +2507,7 @@ impl Adapter {
             "app": { "id": self.app_id, "name": self.app_name },
             "schemaVersion": self.schema_version(),
             "serverNow": now_iso(), "serverTzOffsetMinutes": 0,
+            "authMode": self.auth_mode, "accountUrl": ACCOUNT_URL,
         });
         if let Some(env) = &self.env {
             doc["env"] = json!(env);
@@ -2135,6 +2734,9 @@ impl Adapter {
         if truthy(get(d, "auth")) {
             level["auth"] = json!(true);
         }
+        if truthy(get(d, "ownedBy")) {
+            level["ownedBy"] = get(d, "ownedBy").clone();
+        }
         level
     }
 
@@ -2256,14 +2858,18 @@ impl Adapter {
     }
 
     // -- IAM ----------------------------------------------------------------
-    fn expand_scopes(&self, grant: &Value) -> BTreeSet<String> {
-        let scopes: Vec<&str> = get(grant, "scopes")
-            .as_array()
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if !scopes.contains(&"*") {
-            return scopes.iter().map(|s| s.to_string()).collect();
-        }
+    // Who a request acts for (spec/v0_2/auth.md §9), in a fixed order: the
+    // Host (in `dispatch`), a foreign Origin, the agent credential, then the
+    // session (multi-user) or the app's own View (single-user), then nothing.
+    // What it may do is its credential's scopes intersected with what its
+    // person may do now (the ceiling, §3), evaluated on every request.
+
+    fn multi_user(&self) -> bool {
+        self.auth_mode == "multi-user"
+    }
+
+    /// Every scope the app declares: what `*` means.
+    fn all_scopes(&self) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         if let Some(defs) = self.entity_defs.as_object() {
             for name in defs.keys() {
@@ -2277,47 +2883,224 @@ impl Adapter {
         out
     }
 
-    fn credential_of(&self, headers: &HashMap<String, String>) -> Option<Value> {
-        let token = headers.get("x-a2app-token").or_else(|| headers.get("x-lui-token"))?;
-        self.store.grant_by_token(token)
+    fn expand_scopes(&self, scopes: &[String]) -> BTreeSet<String> {
+        if scopes.iter().any(|s| s == "*") {
+            self.all_scopes()
+        } else {
+            scopes.iter().cloned().collect()
+        }
     }
 
-    /// True when the request carries one of the app's OWN origins — the
-    /// trusted browser-UI path `authorize` also honours.
+    /// Who a principal is — `{id, name, role, active}` — or None when unknown.
+    fn principal_info(&self, id: &str) -> Option<Value> {
+        if id == OWNER {
+            return Some(json!({ "id": OWNER, "name": "Owner", "role": "owner", "active": true }));
+        }
+        if !self.multi_user() {
+            return None;
+        }
+        self.store.row("users", id).map(|a| {
+            json!({
+                "id": get(&a, "id"), "name": get(&a, "name"), "role": get(&a, "role"), "active": get(&a, "active"),
+            })
+        })
+    }
+
+    /// What a principal may do now (spec §3), or None when it may do nothing.
+    fn permissions(&self, info: Option<&Value>) -> Option<BTreeSet<String>> {
+        let info = info.filter(|i| truthy(get(i, "active")))?;
+        let scopes = match self.permissions_of {
+            Some(permissions_of) => permissions_of(info),
+            None => vec!["*".to_string()],
+        };
+        Some(self.expand_scopes(&scopes))
+    }
+
+    /// The credential this request presents, checked in spec §9's order:
+    /// unknown, revoked (or its task is over), expired, then whether the person
+    /// it acts for may still act. Ok holds the grant, its principal and its
+    /// effective reach — its own scopes intersected with the principal's; None
+    /// when no credential was presented.
+    fn credential_of(
+        &mut self,
+        headers: &HashMap<String, String>,
+    ) -> Option<Result<(Value, Value, BTreeSet<String>), Reply>> {
+        let token = headers
+            .get("x-a2app-token")
+            .or_else(|| headers.get("x-lui-token"))
+            .filter(|t| !t.is_empty())?;
+        let now = epoch_ms_now();
+        let Some(grant) = self.store.grant_by_token_hash(&hash_secret(token)) else {
+            return Some(Err(Self::err_with(
+                401,
+                "credential_invalid",
+                "This credential is not one this app issued.",
+                &[("how", json!(RENEW_HINT))],
+            )));
+        };
+        let task_over = get(&grant, "task").as_str().map(|task_id| {
+            self.store.get_task(task_id).map_or(true, |t| TERMINAL_TASK.contains(&get_str(&t, "status")))
+        });
+        if !get(&grant, "revokedAt").is_null() || task_over == Some(true) {
+            return Some(Err(Self::err_with(
+                401,
+                "credential_revoked",
+                "This credential was revoked.",
+                &[("how", json!(RENEW_HINT))],
+            )));
+        }
+        if let Some(expires_at) = get(&grant, "expiresAt").as_str() {
+            if iso_epoch_ms(expires_at).map_or(true, |at| at <= now) {
+                return Some(Err(Self::err_with(
+                    401,
+                    "token_expired",
+                    &format!("This credential expired at {expires_at}."),
+                    &[("how", json!(RENEW_HINT))],
+                )));
+            }
+        }
+        let info = self.principal_info(get_str(&grant, "principal"));
+        let (Some(allowed), Some(info)) = (self.permissions(info.as_ref()), info) else {
+            return Some(Err(Self::err(
+                401,
+                "principal_inactive",
+                "The person this credential acts for is no longer active.",
+            )));
+        };
+        let stale = get(&grant, "lastUsedAt")
+            .as_str()
+            .and_then(iso_epoch_ms)
+            .map_or(true, |at| now - at >= LAST_USED_RESOLUTION_MS);
+        if stale {
+            let mut used = grant.clone();
+            used["lastUsedAt"] = json!(iso_of_ms(now));
+            self.store.put_grant(&used);
+        }
+        let scopes: Vec<String> = get(&grant, "scopes")
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let held = self.expand_scopes(&scopes).intersection(&allowed).cloned().collect();
+        Some(Ok((grant, info, held)))
+    }
+
+    /// True when the request carries an Origin that is not one of the app's
+    /// own. A program sends none.
+    fn is_foreign_origin(&self, headers: &HashMap<String, String>) -> bool {
+        headers.get("origin").map_or(false, |o| !self.allowed_origins.contains(o))
+    }
+
+    /// True when the request carries one of the app's OWN origins.
     fn is_same_origin(&self, headers: &HashMap<String, String>) -> bool {
         headers.get("origin").map_or(false, |o| self.allowed_origins.contains(o))
     }
 
+    /// Whether a request came from one of the app's own pages. A browser marks
+    /// same-origin fetches, GETs included, with Sec-Fetch-Site; a program sends
+    /// neither header. On a multi-user app it only ever picks which 401 to send
+    /// (sign in, or present a credential) — it never lets a request in.
+    fn from_own_page(&self, headers: &HashMap<String, String>) -> bool {
+        self.is_same_origin(headers) || headers.get("sec-fetch-site").map(String::as_str) == Some("same-origin")
+    }
+
+    /// The signed-in account behind this request's session cookie, if any, as
+    /// (session key, account row). A deactivated account's session stops here.
+    fn session_of(&mut self, headers: &HashMap<String, String>) -> Option<(String, Value)> {
+        if !self.multi_user() {
+            return None;
+        }
+        let cookies = parse_cookies(headers.get("cookie").map(String::as_str).unwrap_or(""));
+        let secret = cookies.get(&self.session_cookie_name).filter(|s| !s.is_empty())?;
+        let key = hash_secret(secret);
+        let session = self.store.row("sessions", &key)?;
+        if iso_epoch_ms(get_str(&session, "expiresAt")).map_or(true, |at| at <= epoch_ms_now()) {
+            self.store.delete_row("sessions", &key);
+            return None;
+        }
+        let account = self.store.row("users", get_str(&session, "principal"))?;
+        truthy(get(&account, "active")).then_some((key, account))
+    }
+
+    fn unauthenticated(&self, headers: &HashMap<String, String>, message: &str) -> Reply {
+        if self.multi_user() && self.from_own_page(headers) {
+            return Self::err_with(
+                401,
+                "sign_in_required",
+                "Sign in to use this app.",
+                &[("signInUrl", json!(format!("{ACCOUNT_URL}#sign-in")))],
+            );
+        }
+        Self::err_with(401, ERR_AGENT_TOKEN_REQUIRED, message, &[("how", json!(self.credential_hint))])
+    }
+
+    fn call_ctx(credential_id: &str, agent_name: &Value, principal: &str, role: &str) -> Value {
+        json!({ "credentialId": credential_id, "agentName": agent_name, "principal": principal, "role": role })
+    }
+
+    /// Who the caller is, in spec §9's order: a foreign origin is refused; then
+    /// the agent credential; then, on a multi-user app, the session (a change
+    /// must come from the app's own page — CSRF); on `authMode: none`, the
+    /// app's own View is the owner. Returns the caller with its reach, or the
+    /// refusal.
+    fn resolve(&mut self, headers: &HashMap<String, String>, is_write: bool) -> Result<Caller, Reply> {
+        if self.is_foreign_origin(headers) {
+            return Err(Self::err(403, "forbidden_origin", "Refused: request Origin is not this app's own."));
+        }
+        if let Some(presented) = self.credential_of(headers) {
+            let (grant, info, held) = presented?;
+            let ctx = Self::call_ctx(
+                get_str(&grant, "credentialId"),
+                get(&grant, "agentName"),
+                get_str(&info, "id"),
+                get_str(&info, "role"),
+            );
+            return Ok(Caller { ctx, held: Some(held), grant: Some(grant) });
+        }
+        if self.multi_user() {
+            let Some((_, account)) = self.session_of(headers) else {
+                return Err(self.unauthenticated(headers, "This app needs a credential."));
+            };
+            if is_write && !self.is_same_origin(headers) {
+                return Err(Self::err(
+                    403,
+                    "forbidden_origin",
+                    "A signed-in change must come from this app's own page.",
+                ));
+            }
+            let id = get_str(&account, "id");
+            let held = self.permissions(self.principal_info(id).as_ref()).unwrap_or_default();
+            let ctx = Self::call_ctx("session", &Value::Null, id, get_str(&account, "role"));
+            return Ok(Caller { ctx, held: Some(held), grant: None });
+        }
+        // The app's own UI (same origin) is trusted: no credential needed. A
+        // browser sends Origin only on a change; on a read it marks the request
+        // with Sec-Fetch-Site, which a web page cannot forge. A local program
+        // can, but on this mode it already reads everything without a
+        // credential, so only a change is held to the stronger Origin rule.
+        if self.is_same_origin(headers) || (!is_write && self.from_own_page(headers)) {
+            let held = self.permissions(self.principal_info(OWNER).as_ref()).unwrap_or_default();
+            let ctx = Self::call_ctx("ui", &Value::Null, OWNER, "owner");
+            return Ok(Caller { ctx, held: Some(held), grant: None });
+        }
+        // A program write always needs a credential; an anonymous read on a
+        // single-user app proceeds as the owner.
+        if is_write {
+            return Err(self.unauthenticated(headers, "This write requires an agent credential."));
+        }
+        Ok(Caller { ctx: Self::call_ctx("anonymous", &Value::Null, OWNER, "owner"), held: None, grant: None })
+    }
+
+    /// The fixed chain: origin -> credential -> scope. Returns the call
+    /// context on success, or the refusal.
     fn authorize(
-        &self,
+        &mut self,
         headers: &HashMap<String, String>,
         scope: Option<&str>,
         is_write: bool,
     ) -> Result<Value, Reply> {
-        if let Some(origin) = headers.get("origin") {
-            if !self.allowed_origins.contains(origin) {
-                return Err(Self::err(403, "forbidden_origin", "Refused: request Origin is not this app's own."));
-            }
-            return Ok(json!({ "credentialId": "ui", "agentName": null, "principal": "owner" }));
-        }
-        let grant = self.credential_of(headers);
-        let required = is_write || self.auth_mode == "multi-user";
-        let grant = match grant {
-            None => {
-                if required {
-                    return Err(Self::err_with(
-                        401,
-                        ERR_AGENT_TOKEN_REQUIRED,
-                        "This write requires an agent credential.",
-                        &[("how", json!(self.credential_hint))],
-                    ));
-                }
-                return Ok(json!({ "credentialId": "anonymous", "agentName": null, "principal": "owner" }));
-            }
-            Some(g) => g,
-        };
-        if let Some(scope) = scope {
-            if !self.expand_scopes(&grant).contains(scope) {
+        let caller = self.resolve(headers, is_write)?;
+        if let (Some(scope), Some(held)) = (scope, &caller.held) {
+            if !held.contains(scope) {
                 return Err(Self::err_with(
                     403,
                     ERR_INSUFFICIENT_SCOPE,
@@ -2326,11 +3109,43 @@ impl Adapter {
                 ));
             }
         }
-        Ok(json!({
-            "credentialId": get(&grant, "credentialId"),
-            "agentName": get(&grant, "agentName"),
-            "principal": get(&grant, "principal"),
-        }))
+        Ok(caller.ctx)
+    }
+
+    /// The caller as a manager of accounts and credentials (spec §2.4): a
+    /// signed-in person, the app's own View on `authMode: none`, or the admin
+    /// credential. An agent's delegated credential is never one.
+    fn manager_of(&mut self, headers: &HashMap<String, String>, write: bool) -> Result<Manager, Reply> {
+        let caller = self.resolve(headers, write)?;
+        if let Some(grant) = &caller.grant {
+            if get(grant, "admin") != &json!(true) {
+                return Err(Self::err(
+                    403,
+                    "not_a_manager",
+                    "An agent's credential cannot manage accounts or credentials.",
+                ));
+            }
+            return Ok(Manager { principal: OWNER.to_string(), role: "owner".to_string() });
+        }
+        if get_str(&caller.ctx, "credentialId") == "anonymous" {
+            return Err(self.unauthenticated(headers, "Managing this app needs a credential."));
+        }
+        Ok(Manager {
+            principal: get_str(&caller.ctx, "principal").to_string(),
+            role: get_str(&caller.ctx, "role").to_string(),
+        })
+    }
+
+    /// Where this app is reached, for links handed to a person. The Host
+    /// header has already passed the host check by the time a route runs.
+    fn public_origin(&self, headers: &HashMap<String, String>) -> String {
+        if let Some(public) = &self.public_url {
+            return public.clone();
+        }
+        match headers.get("host") {
+            Some(host) => format!("http://{host}"),
+            None => self.own_origins.first().cloned().unwrap_or_default(),
+        }
     }
 
     fn rate_gate(&mut self, headers: &HashMap<String, String>, class: &str) -> Option<Reply> {
@@ -2351,16 +3166,52 @@ impl Adapter {
         ))
     }
 
-    /// Mirrors `authorize`'s precedence including its two bypasses — the app's
-    /// own UI and an anonymous read on a single-user app both reach a context
-    /// without meeting the scope check, so both genuinely have full access.
-    fn access_for(&self, headers: &HashMap<String, String>) -> Access {
-        if self.is_same_origin(headers) {
-            return Access::All(true);
+    /// What this caller may do, for rendering access on a describe level.
+    ///
+    /// Mirrors `authorize`'s own precedence: a refused caller sees nothing, and
+    /// an anonymous read on a single-user app — which reaches a context without
+    /// meeting the scope check — may read everything and run read-only
+    /// operations, but write nothing (its writes answer 401). Over-reporting
+    /// there would let an agent plan against permission it never held.
+    fn access_for(&mut self, headers: &HashMap<String, String>) -> Access {
+        match self.resolve(headers, false) {
+            Err(_) => Access(BTreeSet::new()),
+            Ok(Caller { held: Some(held), .. }) => Access(held),
+            Ok(Caller { held: None, .. }) => Access(self.anonymous_reach()),
         }
-        match self.credential_of(headers) {
-            None => Access::All(self.auth_mode != "multi-user"),
-            Some(grant) => Access::Scoped(self.expand_scopes(&grant)),
+    }
+
+    /// An anonymous caller's reach on a single-user app, as scope names.
+    fn anonymous_reach(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        if let Some(defs) = self.entity_defs.as_object() {
+            for name in defs.keys() {
+                out.insert(format!("data:{name}:read"));
+            }
+        }
+        for o in self.operations.as_array().map(|a| a.as_slice()).unwrap_or_default() {
+            if get(o, "readOnly") == &json!(true) {
+                out.insert(format!("op:{}", get_str(o, "name")));
+            }
+        }
+        out
+    }
+
+    // -- ownership (spec/v0_2/auth.md §5) -----------------------------------
+
+    /// The field naming each record's owner in entity `d`, when `ctx` sees only
+    /// the records it owns: a member of a multi-user app.
+    fn owned_only<'a>(&self, d: &'a Value, ctx: &Value) -> Option<&'a str> {
+        let field = get(d, "ownedBy").as_str().filter(|f| !f.is_empty())?;
+        (self.multi_user() && get_str(ctx, "role") != "owner").then_some(field)
+    }
+
+    /// Whether `ctx` may see `rec` — another member's record is
+    /// indistinguishable from a missing one.
+    fn visible(&self, d: &Value, ctx: &Value, rec: &Value) -> bool {
+        match self.owned_only(d, ctx) {
+            Some(field) => get(rec, field).as_str() == Some(get_str(ctx, "principal")),
+            None => true,
         }
     }
 
@@ -2446,12 +3297,13 @@ impl Adapter {
         if let Some(limited) = self.rate_gate(headers, "data") {
             return limited;
         }
-        if let Err(reply) = self.authorize(headers, Some(&format!("data:{entity}:read")), false) {
-            return reply;
-        }
+        let ctx = match self.authorize(headers, Some(&format!("data:{entity}:read")), false) {
+            Ok(ctx) => ctx,
+            Err(reply) => return reply,
+        };
 
         let record_id = &segments[2];
-        let record = match self.store.get_record(entity, record_id) {
+        let record = match self.store.get_record(entity, record_id).filter(|r| self.visible(&d, &ctx, r)) {
             Some(r) => r,
             None => return Self::err(404, "record_not_found", &format!("No {entity} record \"{record_id}\".")),
         };
@@ -2533,7 +3385,7 @@ impl Adapter {
         headers: &HashMap<String, String>,
         body: Option<&Value>,
         query: &HashMap<String, String>,
-    ) -> Reply {
+    ) -> Answer {
         let headers: HashMap<String, String> =
             headers.iter().map(|(k, v)| (k.to_lowercase(), v.clone())).collect();
         let method = method.to_uppercase();
@@ -2548,6 +3400,7 @@ impl Adapter {
         }
         let trimmed = path.trim_end_matches('/');
         let path = if trimmed.is_empty() { "/" } else { trimmed };
+        let answer = |(status, json): Reply| Answer { status, json, headers: Vec::new() };
 
         // Before any route, including the unauthenticated identity document,
         // which is otherwise a free fingerprint of the app for a rebound page:
@@ -2555,16 +3408,50 @@ impl Adapter {
         // re-resolves to 127.0.0.1, but its Host header still says evil.com.
         if let Some(host) = headers.get("host") {
             if !self.is_allowed_host(host) {
-                return Self::err(403, "forbidden_host", &format!("Refused: this app answers only on its own host, not \"{host}\"."));
+                return answer(Self::err(
+                    403,
+                    "forbidden_host",
+                    &format!("Refused: this app answers only on its own host, not \"{host}\"."),
+                ));
             }
         }
+
+        // Accounts, sessions and invites (multi-user only) — the routes that
+        // set a cookie.
+        let account_route = ["/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"]
+            .iter()
+            .any(|p| path == *p || path.starts_with(&format!("{p}/")));
+        if account_route {
+            if !self.multi_user() {
+                return answer(Self::err(404, "not_multi_user", "This app has no accounts: its authMode is none."));
+            }
+            let body = body.cloned().unwrap_or_else(|| json!({}));
+            let (reply, cookie) = self.handle_accounts(&method, path, &headers, &body);
+            let mut out = answer(reply);
+            if let Some(cookie) = cookie {
+                out.headers.push(("Set-Cookie".to_string(), cookie));
+            }
+            return out;
+        }
+        answer(self.route(&method, path, &headers, body, &q))
+    }
+
+    /// Every route but the account routes, after the Host check.
+    fn route(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: Option<&Value>,
+        q: &HashMap<String, String>,
+    ) -> Reply {
         if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
             return (200, self.identity());
         }
         // Describe is navigational: the bare path is the root level, and each
         // extra segment moves one level inward (A2APP-SPEC 3).
         if path == "/api/_a2app/describe" {
-            return self.handle_describe(&headers, &[], &q);
+            return self.handle_describe(headers, &[], q);
         }
         if let Some(rest) = path.strip_prefix("/api/_a2app/describe/") {
             let segments: Vec<String> = rest.split('/').map(percent_decode).collect();
@@ -2574,48 +3461,82 @@ impl Adapter {
             if segments.iter().any(String::is_empty) {
                 return Self::err(404, "usage", "describe path has an empty segment.");
             }
-            return self.handle_describe(&headers, &segments, &q);
+            return self.handle_describe(headers, &segments, q);
         }
         if path == "/api/_a2app/whoami" {
-            let grant = match self.credential_of(&headers) {
-                Some(g) => g,
-                None => return Self::err(401, ERR_AGENT_TOKEN_REQUIRED, "whoami requires a credential."),
+            // whoami answers whoever this app will actually serve, which is
+            // what `authorize` decides — so it asks the same question. The 401
+            // that remains is the honest one: on a multi-user app `authorize`
+            // really would refuse.
+            let caller = match self.resolve(headers, false) {
+                Ok(caller) => caller,
+                Err(reply) => return reply,
             };
-            let scopes: Vec<String> = self.expand_scopes(&grant).into_iter().collect();
+            // The reach the request was given: a credential's scopes
+            // intersected with what its person may do now, or a person's own.
+            // An anonymous read was never scope-checked, so it reports the
+            // reach describe renders for it — one source, so the two agree.
+            let scopes = match caller.held {
+                Some(held) => held,
+                None => self.anonymous_reach(),
+            };
+            let principal = get_str(&caller.ctx, "principal");
+            let principal_name = self.principal_info(principal).map_or(Value::Null, |p| get(&p, "name").clone());
             return (
                 200,
                 json!({
-                    "a2app": true, "credentialId": get(&grant, "credentialId"),
-                    "agentName": get(&grant, "agentName"), "principal": get(&grant, "principal"),
-                    "scopes": scopes,
+                    "a2app": true,
+                    "credentialId": get(&caller.ctx, "credentialId"),
+                    "agentName": get(&caller.ctx, "agentName"),
+                    "principal": principal,
+                    "principalName": principal_name,
+                    "role": get(&caller.ctx, "role"),
+                    "expiresAt": caller.grant.as_ref().map_or(Value::Null, |g| get(g, "expiresAt").clone()),
+                    "scopes": scopes.into_iter().collect::<Vec<_>>(),
                 }),
             );
         }
+        if let Some(rest) = path.strip_prefix("/api/_a2app/auth/") {
+            // Unauthenticated by design (an agent starts here with nothing), so
+            // it is metered like an operation before anything is looked up.
+            if let Some(limited) = self.rate_gate(headers, "ops") {
+                return limited;
+            }
+            let body = body.cloned().unwrap_or_else(|| json!({}));
+            if let Some(reply) = self.handle_device(method, rest, headers, &body) {
+                return reply;
+            }
+        }
+        if path == "/api/_a2app/credentials" || path.starts_with("/api/_a2app/credentials/") {
+            let id = path.strip_prefix("/api/_a2app/credentials/").map(percent_decode);
+            let body = body.cloned().unwrap_or_else(|| json!({}));
+            return self.handle_credentials(method, id.as_deref(), headers, &body);
+        }
         if path == "/api/_a2app/context" {
-            if let Err(reply) = self.authorize(&headers, None, false) {
+            if let Err(reply) = self.authorize(headers, None, false) {
                 return reply;
             }
             return (200, json!({ "a2app": true, "view": null, "selected": [] }));
         }
         if path == "/api/_a2app/events" {
-            return self.handle_events(&headers, &q);
+            return self.handle_events(headers, q);
         }
         if path == "/api/_a2app/tasks" || path.starts_with("/api/_a2app/tasks/") {
             let rest: Vec<String> = match path.strip_prefix("/api/_a2app/tasks/") {
                 Some(r) => r.split('/').map(str::to_string).collect(),
                 None => Vec::new(),
             };
-            return self.handle_tasks(&method, &headers, &rest, body, &q);
+            return self.handle_tasks(method, headers, &rest, body, q);
         }
 
         if let Some(rest) = path.strip_prefix("/api/collections/") {
             let parts: Vec<&str> = rest.split('/').collect();
             if parts.len() >= 2 && !parts[0].is_empty() && parts[1] == "records" {
                 if parts.len() == 2 {
-                    return self.handle_records(&method, &headers, parts[0], None, body, &q);
+                    return self.handle_records(method, headers, parts[0], None, body, q);
                 }
                 if parts.len() == 3 && !parts[2].is_empty() {
-                    return self.handle_records(&method, &headers, parts[0], Some(parts[2]), body, &q);
+                    return self.handle_records(method, headers, parts[0], Some(parts[2]), body, q);
                 }
             }
         }
@@ -2626,7 +3547,7 @@ impl Adapter {
                     return Self::err(405, "usage", "Operations are POST-only.");
                 }
                 let args = body.cloned().unwrap_or_else(|| json!({}));
-                return self.handle_operation(&headers, name, &args);
+                return self.handle_operation(headers, name, &args);
             }
         }
 
@@ -2654,17 +3575,24 @@ impl Adapter {
         let server_now = now_iso();
 
         if method == "GET" {
-            if let Err(reply) = self.authorize(headers, Some(&format!("data:{entity}:read")), false) {
-                return reply;
-            }
+            let ctx = match self.authorize(headers, Some(&format!("data:{entity}:read")), false) {
+                Ok(ctx) => ctx,
+                Err(reply) => return reply,
+            };
             if let Some(rec_id) = rec_id {
-                return match self.store.get_record(entity, rec_id) {
+                return match self.store.get_record(entity, rec_id).filter(|r| self.visible(&d, &ctx, r)) {
                     Some(rec) => (200, rec),
                     None => Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\".")),
                 };
             }
-            let query_value = Value::Object(query.iter().map(|(k, v)| (k.clone(), json!(v))).collect());
-            return match self.store.list_records(entity, &query_value) {
+            // `where` is the adapter's alone: a member sees only the records it
+            // owns, constrained before paging so the counts are theirs too.
+            let mut query_value: Map<String, Value> =
+                query.iter().filter(|(k, _)| k.as_str() != "where").map(|(k, v)| (k.clone(), json!(v))).collect();
+            if let Some(field) = self.owned_only(&d, &ctx) {
+                query_value.insert("where".to_string(), json!({ field: get(&ctx, "principal") }));
+            }
+            return match self.store.list_records(entity, &Value::Object(query_value)) {
                 Ok(listed) => (200, listed),
                 // Refuse, never ignore: unfiltered rows under a filter would be
                 // a 200 with the wrong records (see the grammar's comment).
@@ -2672,17 +3600,25 @@ impl Adapter {
             };
         }
 
-        let _ctx = match self.authorize(headers, Some(&format!("data:{entity}:write")), true) {
+        let ctx = match self.authorize(headers, Some(&format!("data:{entity}:write")), true) {
             Ok(ctx) => ctx,
             Err(reply) => return reply,
         };
         let body = body.cloned().unwrap_or_else(|| json!({}));
+        // Another member's record answers exactly as a missing one does.
+        let foreign = |adapter: &Self, rec_id: &str| {
+            adapter.owned_only(&d, &ctx).is_some()
+                && !adapter.store.get_record(entity, rec_id).map_or(false, |r| adapter.visible(&d, &ctx, &r))
+        };
 
         if method == "DELETE" {
             let rec_id = match rec_id {
                 Some(id) => id,
                 None => return Self::err(400, "usage", "DELETE requires a record id."),
             };
+            if foreign(self, rec_id) {
+                return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\"."));
+            }
 
             // The app's referential rules bind THIS door too.
             //
@@ -2776,15 +3712,28 @@ impl Adapter {
             );
         }
 
+        // Backend write. The owner field is the adapter's to set: the guard has
+        // already refused a client that tried, because it is read-only.
         let stored: Value;
         if method == "POST" {
-            stored = self.materialize(entity, &body);
+            let create = match get(&d, "ownedBy").as_str().filter(|f| !f.is_empty()) {
+                Some(field) => {
+                    let mut owned = body.as_object().cloned().unwrap_or_default();
+                    owned.insert(field.to_string(), get(&ctx, "principal").clone());
+                    Value::Object(owned)
+                }
+                None => body.clone(),
+            };
+            stored = self.materialize(entity, &create);
             self.store.put_record(entity, stored.clone());
         } else {
             let rec_id = match rec_id {
                 Some(id) => id,
                 None => return Self::err(400, "usage", "PATCH requires a record id."),
             };
+            if foreign(self, rec_id) {
+                return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\"."));
+            }
             let mut existing = match self.store.get_record(entity, rec_id) {
                 Some(rec) => rec,
                 None => return Self::err(404, "record_not_found", &format!("No {entity} record \"{rec_id}\".")),
@@ -2883,7 +3832,9 @@ impl Adapter {
                 )
             }
         };
-        match runner(args, &ctx, &mut self.store) {
+        // A task the runner queues records its caller as who asked.
+        let outcome = runner(args, &ctx, self.store.acting_for(get_str(&ctx, "principal")).0);
+        match outcome {
             Ok(result) => (200, json!({ "a2app": true, "ok": true, "operation": name, "result": result })),
             Err(e) => Self::err(500, "operation_failed", &format!("Operation \"{name}\" threw: {e}")),
         }
@@ -3033,22 +3984,769 @@ impl Adapter {
                 self.store.save_task(task.clone());
                 (200, Self::task_wire(&self.store.get_task(&task_id).unwrap_or(task)))
             }
+            Some("credential") => self.issue_task_credential(headers, &task, &body),
             other => Self::err(404, "usage", &format!("Unknown task action \"{}\".", other.unwrap_or("None"))),
         }
     }
 
     fn task_wire(t: &Value) -> Value {
+        let mut request = get(t, "request").clone();
+        if request.is_object() && request.get("principal").is_none() {
+            request["principal"] = Value::Null;
+        }
         json!({
             "id": get(t, "id"), "app": get(t, "app"), "event": get(t, "event"), "status": get(t, "status"),
-            "request": get(t, "request"), "claim": get(t, "claim"), "progress": get(t, "progress"),
+            "request": request, "claim": get(t, "claim"), "progress": get(t, "progress"),
             "result": get(t, "result"), "reason": get(t, "reason"), "createdAt": get(t, "createdAt"),
             "updatedAt": get(t, "updatedAt"), "pollAfterMs": 2000,
         })
     }
 
+    /// `POST /api/_a2app/tasks/{id}/credential` (spec §6.2): what the bridge
+    /// runs the task's harness with — the person who queued it, the
+    /// capability's scopes, and no life past the task.
+    fn issue_task_credential(&mut self, headers: &HashMap<String, String>, task: &Value, body: &Value) -> Reply {
+        let manager = match self.manager_of(headers, true) {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        if manager.role != "owner" {
+            return Self::err(403, "not_a_manager", "Only an owner issues a task's credential.");
+        }
+        let (task_id, status) = (get_str(task, "id"), get_str(task, "status"));
+        if TERMINAL_TASK.contains(&status) {
+            return Self::err(409, ERR_TASK_NOT_CLAIMABLE, &format!("Task {task_id} already reached {status}."));
+        }
+        let principal = get(task, "request").get("principal").and_then(Value::as_str).unwrap_or(OWNER).to_string();
+        let Some(info) = self.principal_info(&principal).filter(|i| truthy(get(i, "active"))) else {
+            return Self::err(401, "principal_inactive", "The person who queued this task is no longer active.");
+        };
+        let agent_name = match parse_agent_name(body.get("agentName")) {
+            Ok(name) => name,
+            Err(problem) => return Self::err(400, "usage", &problem),
+        };
+        let capability = get_str(get(task, "request"), "capability");
+        let scopes: Vec<String> = match get(get(&self.capabilities, capability), "scopes").as_array() {
+            Some(list) => list.iter().map(py_str).collect(),
+            None => vec!["*".to_string()],
+        };
+        let (token, grant) =
+            self.mint_credential(&principal, agent_name.as_deref(), scopes, TASK_CREDENTIAL_SECONDS, Some(task_id));
+        (201, json!({ "a2app": true, "token": token, "credential": Self::credential_wire(&grant, get(&info, "name")) }))
+    }
+
+    // -- credentials (spec/v0_2/auth.md §2, §8) ----------------------------
+    //
+    //   GET /api/_a2app/credentials          a manager's own (an owner: everyone's)
+    //   POST /api/_a2app/credentials         issue one; the token is in this reply only
+    //   DELETE /api/_a2app/credentials/{id}  revoke (a manager, or the credential itself)
+    //
+    // Every credential this app issues is made by `mint_credential`: a 256-bit
+    // token returned once, stored as its SHA-256, bound to one principal, always
+    // expiring. Whatever its scopes say, each request it makes is limited to
+    // what that principal may do at the time (`credential_of`).
+
+    /// Issue a credential: store its hash, return the token (once) with the grant.
+    fn mint_credential(
+        &mut self,
+        principal: &str,
+        agent_name: Option<&str>,
+        scopes: Vec<String>,
+        expires_in_seconds: i64,
+        task: Option<&str>,
+    ) -> (String, Value) {
+        let token = new_token();
+        let now = epoch_ms_now();
+        let grant = json!({
+            "credentialId": new_id("cred"), "tokenHash": hash_secret(&token),
+            "principal": principal, "agentName": agent_name, "scopes": scopes,
+            "createdAt": iso_of_ms(now), "expiresAt": iso_of_ms(now + expires_in_seconds * 1000),
+            "lastUsedAt": null, "revokedAt": null, "task": task, "admin": false,
+        });
+        self.store.put_grant(&grant);
+        (token, grant)
+    }
+
+    /// A credential as listed: never its token or the token's hash.
+    fn credential_wire(g: &Value, principal_name: &Value) -> Value {
+        json!({
+            "credentialId": get(g, "credentialId"), "principal": get(g, "principal"),
+            "principalName": principal_name, "agentName": get(g, "agentName"), "scopes": get(g, "scopes"),
+            "createdAt": get(g, "createdAt"), "expiresAt": get(g, "expiresAt"),
+            "lastUsedAt": get(g, "lastUsedAt"), "task": get(g, "task"),
+        })
+    }
+
+    fn principal_name(&self, principal: &str) -> Value {
+        self.principal_info(principal).map_or(Value::Null, |p| get(&p, "name").clone())
+    }
+
+    /// Still able to make a request: not revoked, not expired, its task not over.
+    fn credential_live(&self, g: &Value) -> bool {
+        if get(g, "admin") == &json!(true) || !get(g, "revokedAt").is_null() {
+            return false;
+        }
+        if let Some(expires_at) = get(g, "expiresAt").as_str() {
+            if iso_epoch_ms(expires_at).map_or(true, |at| at <= epoch_ms_now()) {
+                return false;
+            }
+        }
+        match get(g, "task").as_str() {
+            Some(task_id) => {
+                self.store.get_task(task_id).map_or(false, |t| !TERMINAL_TASK.contains(&get_str(&t, "status")))
+            }
+            None => true,
+        }
+    }
+
+    fn handle_credentials(
+        &mut self,
+        method: &str,
+        id: Option<&str>,
+        headers: &HashMap<String, String>,
+        body: &Value,
+    ) -> Reply {
+        match (id, method) {
+            (None, "GET") => self.list_credentials(headers),
+            (None, "POST") => self.issue_credential(headers, body),
+            (None, _) => Self::err(405, "usage", &format!("{method} not allowed on credentials.")),
+            (Some(id), "DELETE") => self.revoke_credential(headers, id),
+            (Some(_), _) => Self::err(405, "usage", "A credential is revoked with DELETE."),
+        }
+    }
+
+    fn list_credentials(&mut self, headers: &HashMap<String, String>) -> Reply {
+        let manager = match self.manager_of(headers, false) {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        let mut grants: Vec<Value> = self
+            .store
+            .list_grants()
+            .into_iter()
+            .filter(|g| {
+                self.credential_live(g) && (manager.role == "owner" || get_str(g, "principal") == manager.principal)
+            })
+            .collect();
+        grants.sort_by(|a, b| get_str(b, "createdAt").cmp(get_str(a, "createdAt")));
+        let credentials: Vec<Value> = grants
+            .iter()
+            .map(|g| Self::credential_wire(g, &self.principal_name(get_str(g, "principal"))))
+            .collect();
+        (200, json!({ "a2app": true, "credentials": credentials }))
+    }
+
+    fn issue_credential(&mut self, headers: &HashMap<String, String>, body: &Value) -> Reply {
+        let manager = match self.manager_of(headers, true) {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        let principal = match body.get("principal").filter(|p| !p.is_null()) {
+            None => manager.principal.clone(),
+            Some(Value::String(p)) => p.clone(),
+            Some(_) => return Self::err(400, "usage", "principal is an account id (or \"owner\")."),
+        };
+        if principal != manager.principal && manager.role != "owner" {
+            return Self::err(403, "not_a_manager", "Only an owner can issue a credential for someone else.");
+        }
+        let Some(info) = self.principal_info(&principal).filter(|i| truthy(get(i, "active"))) else {
+            return Self::err(400, "usage", &format!("\"{principal}\" is not an active account of this app."));
+        };
+        let agent_name = match parse_agent_name(body.get("agentName")) {
+            Ok(name) => name,
+            Err(problem) => return Self::err(400, "usage", &problem),
+        };
+        let (scopes, expires_in) = match parse_grant_request(body, &self.all_scopes()) {
+            Ok(parsed) => parsed,
+            Err(problem) => return Self::err(400, "usage", &problem),
+        };
+        let (token, grant) = self.mint_credential(&principal, agent_name.as_deref(), scopes, expires_in, None);
+        (201, json!({ "a2app": true, "token": token, "credential": Self::credential_wire(&grant, get(&info, "name")) }))
+    }
+
+    fn revoke_credential(&mut self, headers: &HashMap<String, String>, id: &str) -> Reply {
+        let Some(grant) = self.store.grant_by_id(id) else {
+            return Self::err(404, "not_found", &format!("No credential \"{id}\"."));
+        };
+        if get(&grant, "admin") == &json!(true) {
+            return Self::err(
+                403,
+                "not_a_manager",
+                "The admin credential is the app's .agent-token: rotate that file instead.",
+            );
+        }
+        // A credential may always revoke itself — the one thing an agent may
+        // do with credentials — so an agent can hand back access it no longer
+        // needs.
+        let own = matches!(self.credential_of(headers), Some(Ok((g, _, _))) if get_str(&g, "credentialId") == id);
+        if !own {
+            let manager = match self.manager_of(headers, true) {
+                Ok(m) => m,
+                Err(reply) => return reply,
+            };
+            if manager.role != "owner" && get_str(&grant, "principal") != manager.principal {
+                return Self::err(404, "not_found", &format!("No credential \"{id}\"."));
+            }
+        }
+        // Re-read: presenting it may just have stamped lastUsedAt.
+        let grant = self.store.grant_by_id(id).unwrap_or(grant);
+        if get(&grant, "revokedAt").is_null() {
+            let mut revoked = grant;
+            revoked["revokedAt"] = json!(now_iso());
+            self.store.put_grant(&revoked);
+        }
+        (200, json!({ "a2app": true, "ok": true, "revoked": id }))
+    }
+
+    // -- device-code sign-in (spec/v0_2/auth.md §7, RFC 8628 shape) ----------
+    //
+    //   POST /api/_a2app/auth/device               an agent asks; gets a code to show
+    //   GET  /api/_a2app/auth/device/{userCode}     the person reviews (a manager)
+    //   POST /api/_a2app/auth/device/{userCode}     the person approves or denies
+    //   POST /api/_a2app/auth/token                 the agent polls; gets its credential
+    //
+    // The person approves on the app's own account page, signed in as
+    // themselves; the credential issued acts for them, with the scopes they
+    // approved. No password or session ever reaches the agent. Codes live 10
+    // minutes, are single use, and the device code is stored only as its hash.
+
+    /// Route one request under /api/_a2app/auth/ (`rest` is what follows it),
+    /// or None when it names no device route.
+    fn handle_device(
+        &mut self,
+        method: &str,
+        rest: &str,
+        headers: &HashMap<String, String>,
+        body: &Value,
+    ) -> Option<Reply> {
+        if rest == "device" {
+            return Some(if method == "POST" {
+                self.device_start(headers, body)
+            } else {
+                Self::err(405, "usage", "Start a sign-in with POST.")
+            });
+        }
+        if rest == "token" {
+            return Some(if method == "POST" {
+                self.device_poll(body)
+            } else {
+                Self::err(405, "usage", "Poll with POST.")
+            });
+        }
+        let code = percent_decode(rest.strip_prefix("device/")?);
+        Some(match method {
+            "GET" => self.device_review(headers, &code),
+            "POST" => self.device_decide(headers, &code, body),
+            _ => Self::err(405, "usage", &format!("{method} not allowed on a sign-in request.")),
+        })
+    }
+
+    /// Live device rows by key, dropping the expired as it goes.
+    fn live_devices(&mut self) -> Vec<(String, Value)> {
+        let now = epoch_ms_now();
+        let mut live = Vec::new();
+        for (key, row) in self.store.rows("devices") {
+            if iso_epoch_ms(get_str(&row, "expiresAt")).map_or(true, |at| at <= now) {
+                self.store.delete_row("devices", &key);
+            } else {
+                live.push((key, row));
+            }
+        }
+        live
+    }
+
+    /// The pending request a person's typed code names.
+    fn device_by_user_code(&mut self, input: &str) -> Option<(String, Value)> {
+        let code = normalize_user_code(input);
+        if code.is_empty() {
+            return None;
+        }
+        self.live_devices()
+            .into_iter()
+            .find(|(_, row)| get_str(row, "userCode") == code && get_str(row, "status") == "pending")
+    }
+
+    fn device_code_invalid() -> Reply {
+        Self::err(
+            404,
+            "device_code_invalid",
+            "No sign-in request with that code is waiting: it was used, or it expired.",
+        )
+    }
+
+    fn device_start(&mut self, headers: &HashMap<String, String>, body: &Value) -> Reply {
+        let (scopes, expires_in) = match parse_grant_request(body, &self.all_scopes()) {
+            Ok(parsed) => parsed,
+            Err(problem) => return Self::err(400, "usage", &problem),
+        };
+        let agent_name = match body.get("agentName") {
+            None => Value::Null,
+            Some(Value::String(name)) if !name.trim().is_empty() && js_len(name) <= AGENT_NAME_MAX => {
+                json!(name.trim())
+            }
+            Some(_) => return Self::err(400, "usage", &format!("agentName is 1–{AGENT_NAME_MAX} characters.")),
+        };
+        let taken: HashSet<String> =
+            self.live_devices().iter().map(|(_, row)| get_str(row, "userCode").to_string()).collect();
+        let mut user_code = new_user_code();
+        while taken.contains(&user_code) {
+            user_code = new_user_code();
+        }
+        let device_code = new_secret();
+        let now = epoch_ms_now();
+        self.store.put_row(
+            "devices",
+            &hash_secret(&device_code),
+            &json!({
+                "userCode": user_code, "agentName": agent_name, "scopes": scopes,
+                "expiresInSeconds": expires_in, "createdAt": iso_of_ms(now),
+                "expiresAt": iso_of_ms(now + DEVICE_CODE_TTL_SECONDS * 1000),
+                "interval": DEVICE_POLL_INTERVAL_SECONDS, "lastPolledAt": null, "status": "pending",
+                "approvedBy": null, "approvedScopes": null,
+            }),
+        );
+        let approve = format!("{}{ACCOUNT_URL}#approve", self.public_origin(headers));
+        (
+            200,
+            json!({
+                "a2app": true, "deviceCode": device_code, "userCode": user_code,
+                "verificationUri": approve, "verificationUriComplete": format!("{approve}/{user_code}"),
+                "expiresIn": DEVICE_CODE_TTL_SECONDS, "interval": DEVICE_POLL_INTERVAL_SECONDS,
+            }),
+        )
+    }
+
+    fn device_poll(&mut self, body: &Value) -> Reply {
+        let Some(device_code) = body.get("deviceCode").and_then(Value::as_str) else {
+            return Self::err(400, "usage", "Poll with { deviceCode }.");
+        };
+        let key = hash_secret(device_code);
+        let now = epoch_ms_now();
+        let row = self.store.row("devices", &key);
+        let Some(mut row) = row.filter(|r| iso_epoch_ms(get_str(r, "expiresAt")).map_or(false, |at| at > now)) else {
+            self.store.delete_row("devices", &key);
+            return Self::err(400, "expired_token", "This sign-in request expired or was already used. Start again.");
+        };
+        match get_str(&row, "status") {
+            "denied" => {
+                self.store.delete_row("devices", &key);
+                return Self::err(400, "access_denied", "The person declined this agent's request.");
+            }
+            "approved" if get(&row, "approvedBy").is_string() && get(&row, "approvedScopes").is_array() => {
+                // Single use: the row goes before the credential is handed out.
+                self.store.delete_row("devices", &key);
+                let principal = get_str(&row, "approvedBy").to_string();
+                let Some(info) = self.principal_info(&principal).filter(|i| truthy(get(i, "active"))) else {
+                    return Self::err(400, "access_denied", "The person who approved this is no longer active.");
+                };
+                let scopes: Vec<String> = get(&row, "approvedScopes")
+                    .as_array()
+                    .map(|a| a.iter().map(py_str).collect())
+                    .unwrap_or_default();
+                let expires_in = get(&row, "expiresInSeconds").as_i64().unwrap_or(DEFAULT_EXPIRES_SECONDS);
+                let agent_name = get(&row, "agentName").as_str().map(str::to_string);
+                let (token, grant) = self.mint_credential(&principal, agent_name.as_deref(), scopes, expires_in, None);
+                let credential = Self::credential_wire(&grant, get(&info, "name"));
+                return (200, json!({ "a2app": true, "token": token, "credential": credential }));
+            }
+            _ => {}
+        }
+        let interval = get(&row, "interval").as_i64().unwrap_or(DEVICE_POLL_INTERVAL_SECONDS);
+        if let Some(last) = get(&row, "lastPolledAt").as_i64() {
+            if now - last < interval * 1000 {
+                let slower = interval + DEVICE_SLOW_DOWN_STEP_SECONDS;
+                row["interval"] = json!(slower);
+                row["lastPolledAt"] = json!(now);
+                self.store.put_row("devices", &key, &row);
+                return Self::err_with(
+                    400,
+                    "slow_down",
+                    &format!("Polling too fast: wait {slower} s between polls."),
+                    &[("interval", json!(slower))],
+                );
+            }
+        }
+        row["lastPolledAt"] = json!(now);
+        self.store.put_row("devices", &key, &row);
+        Self::err_with(
+            400,
+            "authorization_pending",
+            "Waiting for the person to approve.",
+            &[("interval", json!(interval))],
+        )
+    }
+
+    fn device_review(&mut self, headers: &HashMap<String, String>, user_code: &str) -> Reply {
+        if let Err(reply) = self.manager_of(headers, false) {
+            return reply;
+        }
+        let Some((_, row)) = self.device_by_user_code(user_code) else {
+            return Self::device_code_invalid();
+        };
+        (
+            200,
+            json!({
+                "a2app": true, "userCode": get(&row, "userCode"), "agentName": get(&row, "agentName"),
+                "scopes": get(&row, "scopes"), "expiresIn": get(&row, "expiresInSeconds"),
+                "expiresAt": get(&row, "expiresAt"),
+            }),
+        )
+    }
+
+    fn device_decide(&mut self, headers: &HashMap<String, String>, user_code: &str, body: &Value) -> Reply {
+        let manager = match self.manager_of(headers, true) {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        let Some((key, mut row)) = self.device_by_user_code(user_code) else {
+            return Self::device_code_invalid();
+        };
+        let Some(approve) = body.get("approve").and_then(Value::as_bool) else {
+            return Self::err(400, "usage", "Decide with { approve: true | false }.");
+        };
+        if !approve {
+            row["status"] = json!("denied");
+            self.store.put_row("devices", &key, &row);
+            return (200, json!({ "a2app": true, "ok": true, "status": "denied" }));
+        }
+        // The person may only narrow what was asked for.
+        let mut scopes = get(&row, "scopes").clone();
+        if let Some(narrowed) = body.get("scopes") {
+            let (parsed, _) = match parse_grant_request(&json!({ "scopes": narrowed }), &self.all_scopes()) {
+                Ok(parsed) => parsed,
+                Err(problem) => return Self::err(400, "usage", &problem),
+            };
+            let asked: Vec<&str> =
+                scopes.as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if !asked.contains(&"*") {
+                let wider: Vec<&str> =
+                    parsed.iter().map(String::as_str).filter(|s| *s == "*" || !asked.contains(s)).collect();
+                if !wider.is_empty() {
+                    return Self::err(
+                        400,
+                        "usage",
+                        &format!("Approval can only narrow what the agent asked for, not add {}.", wider.join(", ")),
+                    );
+                }
+            }
+            scopes = json!(parsed);
+        }
+        row["status"] = json!("approved");
+        row["approvedBy"] = json!(manager.principal);
+        row["approvedScopes"] = scopes;
+        self.store.put_row("devices", &key, &row);
+        (200, json!({ "a2app": true, "ok": true, "status": "approved" }))
+    }
+
+    // -- accounts, sessions, invites (spec/v0_2/auth.md §4; multi-user only) --
+    //
+    //   GET/POST/DELETE /api/_a2app/session        who is signed in · sign in · sign out
+    //   POST /api/_a2app/invites                    a one-time setup link (owner manager)
+    //   GET/POST /api/_a2app/invites/{code}         read · accept (creates the account)
+    //   GET /api/_a2app/users                       every account (owner manager)
+    //   PATCH /api/_a2app/users/{id}                activate/deactivate, change role
+    //
+    // Accounts are adapter state, never records: they are not served by the
+    // records API, and a password hash never leaves this section. Each handler
+    // answers with the reply and, when it starts or ends a session, the
+    // `Set-Cookie` value.
+
+    /// The account as served: never its password hash.
+    fn account_wire(a: &Value) -> Value {
+        json!({
+            "id": get(a, "id"), "name": get(a, "name"), "login": get(a, "login"),
+            "role": get(a, "role"), "active": get(a, "active"), "createdAt": get(a, "createdAt"),
+        })
+    }
+
+    fn account_reply(status: u16, a: &Value) -> Reply {
+        let mut wire = Self::account_wire(a);
+        wire["a2app"] = json!(true);
+        (status, wire)
+    }
+
+    fn accounts(&self) -> Vec<Value> {
+        self.store.rows("users").into_iter().map(|(_, a)| a).collect()
+    }
+
+    fn account_by_login(&self, login: &str) -> Option<Value> {
+        self.accounts().into_iter().find(|a| get_str(a, "login") == login)
+    }
+
+    fn handle_accounts(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: &Value,
+    ) -> (Reply, Option<String>) {
+        if path == "/api/_a2app/session" {
+            return self.handle_session(method, headers, body);
+        }
+        let reply = if path == "/api/_a2app/invites" {
+            self.create_invite(method, headers, body)
+        } else if let Some(code) = path.strip_prefix("/api/_a2app/invites/") {
+            return self.handle_invite(method, &percent_decode(code), body);
+        } else if path == "/api/_a2app/users" {
+            self.handle_users(method, headers, body, None)
+        } else if let Some(id) = path.strip_prefix("/api/_a2app/users/") {
+            self.handle_users(method, headers, body, Some(&percent_decode(id)))
+        } else {
+            Self::err(404, "not_found", "No such route.")
+        };
+        (reply, None)
+    }
+
+    /// Sign `account` in: a fresh session, its secret in the cookie only.
+    fn start_session(&mut self, account: &Value, status: u16) -> (Reply, Option<String>) {
+        let secret = new_secret();
+        let now = epoch_ms_now();
+        self.store.put_row(
+            "sessions",
+            &hash_secret(&secret),
+            &json!({
+                "principal": get(account, "id"), "createdAt": iso_of_ms(now),
+                "expiresAt": iso_of_ms(now + SESSION_TTL_MS),
+            }),
+        );
+        let cookie = session_cookie(&self.session_cookie_name, &secret, SESSION_TTL_MS / 1000, self.secure_cookies);
+        (Self::account_reply(status, account), Some(cookie))
+    }
+
+    fn handle_session(
+        &mut self,
+        method: &str,
+        headers: &HashMap<String, String>,
+        body: &Value,
+    ) -> (Reply, Option<String>) {
+        match method {
+            "GET" => {
+                let reply = match self.session_of(headers) {
+                    Some((_, account)) => Self::account_reply(200, &account),
+                    None => Self::err_with(
+                        401,
+                        "sign_in_required",
+                        "Not signed in.",
+                        &[("signInUrl", json!(format!("{ACCOUNT_URL}#sign-in")))],
+                    ),
+                };
+                (reply, None)
+            }
+            "DELETE" => {
+                if let Some((key, _)) = self.session_of(headers) {
+                    self.store.delete_row("sessions", &key);
+                }
+                let cleared = session_cookie(&self.session_cookie_name, "", 0, self.secure_cookies);
+                ((200, json!({ "a2app": true, "ok": true })), Some(cleared))
+            }
+            "POST" => self.sign_in(body),
+            _ => (Self::err(405, "usage", &format!("{method} not allowed on the session.")), None),
+        }
+    }
+
+    fn sign_in(&mut self, body: &Value) -> (Reply, Option<String>) {
+        let login = body.get("login").and_then(Value::as_str);
+        let password = body.get("password").and_then(Value::as_str);
+        let (Some(login), Some(password)) = (login, password) else {
+            return (Self::err(400, "usage", "Sign in with { login, password }."), None);
+        };
+        let login = normalize_login(login);
+        let wait = self.sign_in_failures.retry_after(&login, epoch_ms_now());
+        if wait > 0 {
+            return (
+                Self::err_with(
+                    429,
+                    ERR_RATE_LIMITED,
+                    "Too many failed sign-ins for this login. Try again later.",
+                    &[("retryAfterSeconds", json!(wait))],
+                ),
+                None,
+            );
+        }
+        let account = self.account_by_login(&login);
+        let matches = match &account {
+            Some(a) => verify_password(password, get_str(a, "passwordHash")),
+            None => {
+                let dummy = self.dummy_hash.get_or_insert_with(|| hash_password(&new_secret(), PBKDF2_ITERATIONS));
+                verify_password(password, dummy);
+                false
+            }
+        };
+        match account {
+            Some(a) if matches && truthy(get(&a, "active")) => {
+                self.sign_in_failures.reset(&login);
+                self.start_session(&a, 200)
+            }
+            _ => {
+                self.sign_in_failures.fail(&login, epoch_ms_now());
+                (Self::err(401, "sign_in_failed", "That login and password do not match an active account."), None)
+            }
+        }
+    }
+
+    /// The live invite a code names, as (key, row); an expired one goes.
+    fn live_invite(&mut self, code: &str) -> Option<(String, Value)> {
+        let key = hash_secret(code);
+        let invite = self.store.row("invites", &key)?;
+        if iso_epoch_ms(get_str(&invite, "expiresAt")).map_or(true, |at| at <= epoch_ms_now()) {
+            self.store.delete_row("invites", &key);
+            return None;
+        }
+        Some((key, invite))
+    }
+
+    fn invite_invalid() -> Reply {
+        Self::err(404, "invite_invalid", "This invite link is not valid: it was used, or it expired.")
+    }
+
+    fn create_invite(&mut self, method: &str, headers: &HashMap<String, String>, body: &Value) -> Reply {
+        if method != "POST" {
+            return Self::err(405, "usage", &format!("{method} not allowed on invites."));
+        }
+        let manager = match self.manager_of(headers, true) {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        if manager.role != "owner" {
+            return Self::err(403, "not_a_manager", "Only an owner can invite people.");
+        }
+        let role = match body.get("role").filter(|r| !r.is_null()) {
+            None => "member",
+            Some(r) if r == "owner" || r == "member" => r.as_str().unwrap_or("member"),
+            Some(_) => return Self::err(400, "usage", "role is \"owner\" or \"member\"."),
+        };
+        let secret = new_secret();
+        let now = epoch_ms_now();
+        let invite = json!({ "role": role, "createdAt": iso_of_ms(now), "expiresAt": iso_of_ms(now + INVITE_TTL_MS) });
+        self.store.put_row("invites", &hash_secret(&secret), &invite);
+        (
+            201,
+            json!({
+                "a2app": true, "code": secret,
+                "url": format!("{}{ACCOUNT_URL}#setup/{secret}", self.public_origin(headers)),
+                "role": role, "expiresAt": get(&invite, "expiresAt"),
+            }),
+        )
+    }
+
+    /// The reason `body` is not a valid new account, or None.
+    fn account_problem(body: &Value) -> Option<String> {
+        let name = body.get("name").and_then(Value::as_str).map(str::trim);
+        if name.map_or(true, |n| n.is_empty() || js_len(n) > NAME_MAX) {
+            return Some(format!("name must be 1–{NAME_MAX} characters."));
+        }
+        let login = body.get("login").and_then(Value::as_str).map(normalize_login);
+        if login.map_or(true, |l| l.is_empty() || js_len(&l) > LOGIN_MAX) {
+            return Some(format!("login must be 1–{LOGIN_MAX} characters."));
+        }
+        let password = body.get("password").and_then(Value::as_str);
+        if password.map_or(true, |p| js_len(p) < PASSWORD_MIN || js_len(p) > PASSWORD_MAX) {
+            return Some(format!("password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters."));
+        }
+        None
+    }
+
+    fn handle_invite(&mut self, method: &str, code: &str, body: &Value) -> (Reply, Option<String>) {
+        let Some((key, invite)) = self.live_invite(code) else {
+            return (Self::invite_invalid(), None);
+        };
+        match method {
+            "GET" => {
+                let (role, expires_at) = (get(&invite, "role"), get(&invite, "expiresAt"));
+                return ((200, json!({ "a2app": true, "role": role, "expiresAt": expires_at })), None);
+            }
+            "POST" => {}
+            _ => return (Self::err(405, "usage", &format!("{method} not allowed on an invite.")), None),
+        }
+        if let Some(problem) = Self::account_problem(body) {
+            return (Self::err(400, "usage", &problem), None);
+        }
+        let login = normalize_login(get_str(body, "login"));
+        if self.account_by_login(&login).is_some() {
+            return (Self::err(409, "login_taken", "That login is already in use."), None);
+        }
+        // One request at a time: nothing can use this invite or take this login
+        // between the checks above and the write below.
+        let account = json!({
+            "id": new_id("usr"), "name": get_str(body, "name").trim(), "login": login,
+            "role": get(&invite, "role"), "active": true, "createdAt": now_iso(),
+            "passwordHash": hash_password(get_str(body, "password"), PBKDF2_ITERATIONS),
+        });
+        self.store.delete_row("invites", &key);
+        self.store.put_row("users", get_str(&account, "id"), &account);
+        self.start_session(&account, 201)
+    }
+
+    fn handle_users(
+        &mut self,
+        method: &str,
+        headers: &HashMap<String, String>,
+        body: &Value,
+        id: Option<&str>,
+    ) -> Reply {
+        let manager = match self.manager_of(headers, method != "GET") {
+            Ok(m) => m,
+            Err(reply) => return reply,
+        };
+        if manager.role != "owner" {
+            return Self::err(403, "not_a_manager", "Only an owner can manage people.");
+        }
+        let Some(id) = id else {
+            if method != "GET" {
+                return Self::err(405, "usage", &format!("{method} not allowed on users."));
+            }
+            let mut users = self.accounts();
+            users.sort_by(|a, b| get_str(a, "createdAt").cmp(get_str(b, "createdAt")));
+            let users: Vec<Value> = users.iter().map(Self::account_wire).collect();
+            return (200, json!({ "a2app": true, "users": users }));
+        };
+        if method != "PATCH" {
+            return Self::err(405, "usage", &format!("{method} not allowed on a user."));
+        }
+        let Some(account) = self.store.row("users", id) else {
+            return Self::err(404, "not_found", &format!("No account \"{id}\"."));
+        };
+        let active = body.get("active");
+        if active.map_or(false, |a| !a.is_boolean()) {
+            return Self::err(400, "usage", "active is true or false.");
+        }
+        let role = body.get("role");
+        if role.map_or(false, |r| r != "owner" && r != "member") {
+            return Self::err(400, "usage", "role is \"owner\" or \"member\".");
+        }
+        let mut next = account.clone();
+        if let Some(a) = active {
+            next["active"] = a.clone();
+        }
+        if let Some(r) = role {
+            next["role"] = r.clone();
+        }
+        let is_active_owner = |a: &Value| get_str(a, "role") == "owner" && truthy(get(a, "active"));
+        if is_active_owner(&account) && !is_active_owner(&next) {
+            let active_owners = self.accounts().iter().filter(|a| is_active_owner(a)).count();
+            if active_owners == 1 {
+                return Self::err(409, "last_owner", "This is the last active owner. Make someone else an owner first.");
+            }
+        }
+        self.store.put_row("users", id, &next);
+        Self::account_reply(200, &next)
+    }
+
     // -- app -> agent -------------------------------------------------------
-    pub fn trigger(&mut self, etype: &str, payload: &Value, capability: Option<&str>) -> Result<Value, String> {
-        self.store.trigger(etype, payload, capability)
+
+    /// Emit a declared event and, when `capability` is given, queue a task for
+    /// an agent. `principal` is who asked for the work — the agent that takes
+    /// the task acts as them (spec/v0_2/auth.md §6); None for work the app
+    /// queues on its own, which runs as the owner. A runner reaches the same
+    /// seam through `store.trigger`, which records its caller.
+    pub fn trigger(
+        &mut self,
+        etype: &str,
+        payload: &Value,
+        capability: Option<&str>,
+        principal: Option<&str>,
+    ) -> Result<Value, String> {
+        self.store.trigger_as(etype, payload, capability, principal)
     }
 }
 
@@ -3386,6 +5084,8 @@ pub fn selftest() -> i32 {
         operations: json!([]),
         store: Store::memory(json!({})),
         token: "t".into(),
+        permissions_of: None,
+        capabilities: json!({}),
         modules: json!([{ "name": "core" }]),
         allowed_origins: vec!["http://127.0.0.1:9931".into()],
         public_url: Some("https://crm.example.com".into()),
@@ -3410,8 +5110,8 @@ pub fn selftest() -> i32 {
             }
             let headers: HashMap<String, String> =
                 [("Host".to_string(), "evil.example.com".to_string())].into_iter().collect();
-            let (status, _) = hosted.dispatch("GET", "/api/_a2app", &headers, None, &HashMap::new());
-            check(&mut failures, "dispatch refuses a foreign host before identity", &json!(status), &json!(403));
+            let answer = hosted.dispatch("GET", "/api/_a2app", &headers, None, &HashMap::new());
+            check(&mut failures, "dispatch refuses a foreign host before identity", &json!(answer.status), &json!(403));
             check(
                 &mut failures,
                 "the public origin is the app's own",
@@ -3449,10 +5149,453 @@ pub fn selftest() -> i32 {
         check(&mut failures, label, &actual, &expected);
     }
 
+    // 7. Secrets (spec/v0_2/auth.md): 256-bit, stored as their SHA-256 — the
+    //    same hex digest adapter-core computes, so a store moves between stacks.
+    check(
+        &mut failures,
+        "a secret is stored as adapter-core's hex sha256",
+        &json!(hash_secret("a2a_test")),
+        &json!("fd2dc61992d56a878ad36b9cc4d6943ff70294267a7adbca1b17fdf19a01c758"),
+    );
+    let secret = new_secret();
+    let url_safe = |s: &str| s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    check(
+        &mut failures,
+        "a secret is 256 bits of base64url",
+        &json!(secret.len() == 43 && url_safe(&secret)),
+        &json!(true),
+    );
+    check(&mut failures, "two secrets differ", &json!(secret != new_secret()), &json!(true));
+    let token = new_token();
+    check(
+        &mut failures,
+        "a credential token is a2a_ + a secret",
+        &json!(token.starts_with("a2a_") && token.len() == 47 && url_safe(&token[4..])),
+        &json!(true),
+    );
+
+    // 8. Passwords: PBKDF2-SHA256 in adapter-core's stored format. The vector
+    //    below was produced by adapter-core's own hashPassword (at 1000
+    //    iterations — the format carries its count), so the two stacks verify
+    //    each other's hashes.
+    check(&mut failures, "passwords take 600 000 iterations", &json!(PBKDF2_ITERATIONS), &json!(600_000));
+    let from_core = "pbkdf2_sha256$1000$bob+PnGSka57H5zfLzHKgg==$Fe2WjPCgwnY9MvuJiLkpidvv2jHXgPj9WGG+U0xn7Qk=";
+    check(
+        &mut failures,
+        "adapter-core's hash verifies",
+        &json!([verify_password("xxxxxxxxxx", from_core), verify_password("xxxxxxxxxy", from_core)]),
+        &json!([true, false]),
+    );
+    let stored = hash_password("a long enough password", 1000);
+    let parts: Vec<&str> = stored.split('$').collect();
+    check(
+        &mut failures,
+        "a stored hash is pbkdf2_sha256$<iterations>$<16-byte salt>$<32-byte key>",
+        &json!([
+            parts.len(),
+            parts.first().copied(),
+            parts.get(1).copied(),
+            parts.get(2).and_then(|s| BASE64.decode(s).ok()).map(|b| b.len()),
+            parts.get(3).and_then(|s| BASE64.decode(s).ok()).map(|b| b.len()),
+        ]),
+        &json!([4, "pbkdf2_sha256", "1000", 16, 32]),
+    );
+    check(
+        &mut failures,
+        "a password round-trips, and a near miss does not",
+        &json!([
+            verify_password("a long enough password", &stored),
+            verify_password("a long enough passworD", &stored),
+        ]),
+        &json!([true, false]),
+    );
+    for malformed in ["", "sha1$1000$c2FsdA==$a2V5", "pbkdf2_sha256$x$c2FsdA==$a2V5", "pbkdf2_sha256$1000$c2FsdA==$"] {
+        if verify_password("anything", malformed) {
+            failures.push(format!("a malformed hash matched: {malformed:?}"));
+        }
+    }
+    check(
+        &mut failures,
+        "a login is trimmed and lower-cased",
+        &json!(normalize_login("  Bob@Example.COM ")),
+        &json!("bob@example.com"),
+    );
+
+    // 9. User codes: XXXX-XXXX from consonants, typed in any case, dash or not.
+    let code = new_user_code();
+    let consonants = |s: &str| s.len() == 4 && s.chars().all(|c| USER_CODE_ALPHABET.contains(c));
+    check(
+        &mut failures,
+        "a user code is XXXX-XXXX from the consonant alphabet",
+        &json!(code.len() == 9 && code.as_bytes()[4] == b'-' && consonants(&code[..4]) && consonants(&code[5..])),
+        &json!(true),
+    );
+    check(&mut failures, "a user code normalizes to itself", &json!(normalize_user_code(&code)), &json!(code));
+    for (typed, expected) in [
+        ("bcdf-ghjk", "BCDF-GHJK"),
+        (" b c d f g h j k ", "BCDF-GHJK"),
+        ("bcdfghj", ""),
+        ("AEIO-UBCD", ""),
+    ] {
+        check(&mut failures, &format!("user code {typed:?}"), &json!(normalize_user_code(typed)), &json!(expected));
+    }
+
+    // 10. Cookies: parsed and written exactly as adapter-core does.
+    check(
+        &mut failures,
+        "cookies: the first of a name wins, values decode, malformed ones drop",
+        &json!(parse_cookies("a=1; b=%20x; a=2; =bad; c; d=%E0%A4%A")),
+        &json!({ "a": "1", "b": " x", "": "bad" }),
+    );
+    check(
+        &mut failures,
+        "the session cookie is HttpOnly, SameSite=Lax, Secure behind https",
+        &json!(session_cookie("a2app_session_x", "v a", 1_209_600, true)),
+        &json!("a2app_session_x=v%20a; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure"),
+    );
+    check(
+        &mut failures,
+        "signing out clears it",
+        &json!(session_cookie("a2app_session_x", "", 0, false)),
+        &json!("a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+    );
+
+    // 11. Sign-in failures: ten per login per 15 minutes, then a wait.
+    let mut limiter = FailureLimiter::new(SIGN_IN_FAILURES, SIGN_IN_WINDOW_MS);
+    for _ in 0..9 {
+        limiter.fail("bob", 0);
+    }
+    let ninth = limiter.retry_after("bob", 0);
+    limiter.fail("bob", 0);
+    check(
+        &mut failures,
+        "the tenth failure locks the login until the window ends",
+        &json!([
+            ninth,
+            limiter.retry_after("bob", 0),
+            limiter.retry_after("bob", 899_500),
+            limiter.retry_after("bob", 900_000),
+        ]),
+        &json!([0, 900, 1, 0]),
+    );
+    limiter.fail("bob", 0);
+    limiter.reset("bob");
+    check(&mut failures, "a good sign-in clears the count", &json!(limiter.retry_after("bob", 0)), &json!(0));
+
+    // 12. What a credential may be asked for: declared scopes or `*`, and a
+    //     lifetime from a minute to a year (default 30 days).
+    let declared: BTreeSet<String> = ["data:tasks:read", "data:tasks:write"].iter().map(|s| s.to_string()).collect();
+    let grant_of = |body: Value| match parse_grant_request(&body, &declared) {
+        Ok((scopes, expires_in)) => json!([scopes, expires_in]),
+        Err(_) => json!("refused"),
+    };
+    for (label, body, expected) in [
+        ("defaults to * for 30 days", json!({}), json!([["*"], 2_592_000])),
+        (
+            "duplicates collapse",
+            json!({ "scopes": ["data:tasks:read", "data:tasks:read"], "expiresIn": 3600.0 }),
+            json!([["data:tasks:read"], 3600]),
+        ),
+        ("an undeclared scope is refused", json!({ "scopes": ["data:other:read"] }), json!("refused")),
+        ("no scopes is refused", json!({ "scopes": [] }), json!("refused")),
+        ("under a minute is refused", json!({ "expiresIn": 59 }), json!("refused")),
+        ("over a year is refused", json!({ "expiresIn": 31_536_001 }), json!("refused")),
+        ("a fraction of a second is refused", json!({ "expiresIn": 60.5 }), json!("refused")),
+    ] {
+        check(&mut failures, &format!("grant request: {label}"), &grant_of(body), &expected);
+    }
+    check(
+        &mut failures,
+        "agent names: absent, trimmed, or refused",
+        &json!([
+            parse_agent_name(None).ok(),
+            parse_agent_name(Some(&json!("  bot "))).ok(),
+            parse_agent_name(Some(&json!(" "))).is_err(),
+            parse_agent_name(Some(&json!("x".repeat(101)))).is_err(),
+        ]),
+        &json!([null, "bot", true, true]),
+    );
+
+    // 13. The ceiling, ownership and refusals, end to end through `dispatch` on
+    //     a multi-user adapter: a credential never does more than its person
+    //     may do now, a member sees only its own records, and an unusable
+    //     credential says why.
+    fn members_read_write(p: &Value) -> Vec<String> {
+        if p["role"] == "owner" {
+            vec!["*".to_string()]
+        } else {
+            vec!["data:tasks:read".to_string(), "data:tasks:write".to_string()]
+        }
+    }
+    let ceiling = Adapter::new(AdapterConfig {
+        app_id: "selftest".into(),
+        app_name: None,
+        entities: json!({ "tasks": { "module": "core", "ownedBy": "owner", "fields": [
+            { "name": "title", "type": "string" },
+            { "name": "owner", "type": "string", "readOnly": true },
+        ] } }),
+        operations: json!([
+            { "name": "count-tasks", "module": "core", "destructive": false, "readOnly": true, "params": {} },
+        ]),
+        store: Store::memory(json!({})),
+        token: "admin-token".into(),
+        permissions_of: Some(members_read_write),
+        capabilities: json!({}),
+        modules: json!([{ "name": "core" }]),
+        allowed_origins: vec!["http://127.0.0.1:9931".into()],
+        public_url: None,
+        runner_lookup: no_runner,
+        events: json!([]),
+        auth_mode: "multi-user".into(),
+        credential_hint: None,
+        env: None,
+        app_version: None,
+    });
+    /// One request through `dispatch`, as the holder of `token`: the reply's
+    /// JSON with its status folded in as `_status`.
+    fn ask(app: &mut Adapter, method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Value {
+        let headers: HashMap<String, String> =
+            token.map(|t| ("X-A2App-Token".to_string(), t.to_string())).into_iter().collect();
+        let answer = app.dispatch(method, path, &headers, body.as_ref(), &HashMap::new());
+        let mut out = answer.json;
+        out["_status"] = json!(answer.status);
+        out
+    }
+    let code_of = |v: &Value| v.get("code").cloned().unwrap_or_else(|| v["_status"].clone());
+    match ceiling {
+        Err(e) => failures.push(format!("could not build a multi-user adapter: {e}")),
+        Ok(mut app) => {
+            let mia = json!({ "id": "usr_mia", "name": "Mia", "login": "mia", "role": "member", "active": true,
+                              "createdAt": now_iso(), "passwordHash": "" });
+            app.store.put_row("users", "usr_mia", &mia);
+            let (wide, _) = app.mint_credential("usr_mia", Some("wide"), vec!["*".into()], 3600, None);
+            let (narrow, narrow_grant) =
+                app.mint_credential("usr_mia", Some("narrow"), vec!["data:tasks:read".into()], 3600, None);
+            check(
+                &mut failures,
+                "no token is ever stored, only its hash",
+                &json!(stable_json(&json!(app.store.list_grants())).contains(&wide)),
+                &json!(false),
+            );
+            let who = ask(&mut app, "GET", "/api/_a2app/whoami", Some(&wide), None);
+            check(
+                &mut failures,
+                "a * credential holds only what its person may do",
+                &json!([who["principal"], who["principalName"], who["role"], who["scopes"]]),
+                &json!(["usr_mia", "Mia", "member", ["data:tasks:read", "data:tasks:write"]]),
+            );
+            check(
+                &mut failures,
+                "…and a narrower one only what it was given",
+                &ask(&mut app, "GET", "/api/_a2app/whoami", Some(&narrow), None)["scopes"],
+                &json!(["data:tasks:read"]),
+            );
+            let write = json!({ "title": "x" });
+            check(
+                &mut failures,
+                "a write beyond the credential is refused",
+                &code_of(&ask(&mut app, "POST", "/api/collections/tasks/records", Some(&narrow), Some(write))),
+                &json!("insufficient_scope"),
+            );
+            let admin = ask(&mut app, "GET", "/api/_a2app/whoami", Some("admin-token"), None);
+            check(
+                &mut failures,
+                "the app's .agent-token is the owner's admin credential",
+                &json!([admin["credentialId"], admin["principal"], admin["role"], admin["expiresAt"]]),
+                &json!(["cred_local", "owner", "owner", null]),
+            );
+            let records = "/api/collections/tasks/records";
+            let mine = ask(&mut app, "POST", records, Some(&wide), Some(json!({ "title": "member's" })));
+            let theirs = ask(&mut app, "POST", records, Some("admin-token"), Some(json!({ "title": "owner's" })));
+            check(
+                &mut failures,
+                "create stamps the owner field",
+                &json!([mine["owner"], theirs["owner"]]),
+                &json!(["usr_mia", "owner"]),
+            );
+            let forged = json!({ "title": "x", "owner": "owner" });
+            check(
+                &mut failures,
+                "a client cannot set the owner field",
+                &code_of(&ask(&mut app, "POST", records, Some(&wide), Some(forged))),
+                &json!("read_only_field"),
+            );
+            // A client-sent `where` must not widen (or replace) the adapter's own.
+            let listed = ask(&mut app, "GET", "/api/collections/tasks/records?where=x", Some(&wide), None);
+            let titles: Vec<Value> =
+                listed["items"].as_array().map(|a| a.iter().map(|r| r["title"].clone()).collect()).unwrap_or_default();
+            check(
+                &mut failures,
+                "a member lists only its own records, counted before paging",
+                &json!([titles, listed["totalItems"]]),
+                &json!([["member's"], 1]),
+            );
+            let theirs_path = format!("{records}/{}", get_str(&theirs, "id"));
+            check(
+                &mut failures,
+                "…and anyone else's record is not found, to read, change or delete",
+                &json!([
+                    ask(&mut app, "GET", &theirs_path, Some(&wide), None)["_status"],
+                    ask(&mut app, "PATCH", &theirs_path, Some(&wide), Some(json!({ "title": "mine now" })))["_status"],
+                    ask(&mut app, "DELETE", &theirs_path, Some(&wide), None)["_status"],
+                ]),
+                &json!([404, 404, 404]),
+            );
+            check(
+                &mut failures,
+                "an owner sees every record",
+                &ask(&mut app, "GET", records, Some("admin-token"), None)["totalItems"],
+                &json!(2),
+            );
+            check(
+                &mut failures,
+                "an agent's credential manages nothing",
+                &code_of(&ask(&mut app, "GET", "/api/_a2app/credentials", Some(&wide), None)),
+                &json!("not_a_manager"),
+            );
+            check(
+                &mut failures,
+                "a stranger is asked for a credential",
+                &code_of(&ask(&mut app, "GET", records, None, None)),
+                &json!("agent_token_required"),
+            );
+            check(
+                &mut failures,
+                "an unknown token is refused as such",
+                &code_of(&ask(&mut app, "GET", "/api/_a2app/whoami", Some("a2a_unknown"), None)),
+                &json!("credential_invalid"),
+            );
+            let revoke = format!("/api/_a2app/credentials/{}", get_str(&narrow_grant, "credentialId"));
+            check(
+                &mut failures,
+                "a credential may revoke itself",
+                &ask(&mut app, "DELETE", &revoke, Some(&narrow), None)["_status"],
+                &json!(200),
+            );
+            check(
+                &mut failures,
+                "…and is then told it was revoked",
+                &code_of(&ask(&mut app, "GET", "/api/_a2app/whoami", Some(&narrow), None)),
+                &json!("credential_revoked"),
+            );
+            let mut deactivated = mia.clone();
+            deactivated["active"] = json!(false);
+            app.store.put_row("users", "usr_mia", &deactivated);
+            check(
+                &mut failures,
+                "deactivating a person stops their agents",
+                &code_of(&ask(&mut app, "GET", "/api/_a2app/whoami", Some(&wide), None)),
+                &json!("principal_inactive"),
+            );
+            app.store.put_row("users", "usr_mia", &mia);
+            let mut lapsed = app.store.grant_by_token_hash(&hash_secret(&wide)).unwrap_or_default();
+            lapsed["expiresAt"] = json!(iso_of_ms(epoch_ms_now() - 1000));
+            app.store.put_grant(&lapsed);
+            check(
+                &mut failures,
+                "an expired credential is told so",
+                &code_of(&ask(&mut app, "GET", "/api/_a2app/whoami", Some(&wide), None)),
+                &json!("token_expired"),
+            );
+        }
+    }
+
+    // 15. A runner's caller stays inside the call: a task it queues records who
+    //     asked, and work queued after it — even after it panicked — does not.
+    let mut queue = Store::memory(json!({}));
+    let quiet = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut asked = Value::Null;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let scope = queue.acting_for("usr_mia");
+        asked = scope.0.trigger("work.asked", &json!({ "n": 1 }), Some("work")).unwrap_or_default();
+        panic!("a runner that fails half way");
+    }));
+    std::panic::set_hook(quiet);
+    let own = queue.trigger("work.asked", &json!({ "n": 2 }), Some("work")).unwrap_or_default();
+    let principal_of = |fired: &Value| {
+        queue.get_task(get_str(fired, "taskId")).map_or(json!("<no task>"), |t| t["request"]["principal"].clone())
+    };
+    check(
+        &mut failures,
+        "a runner's task records its caller; the app's own work after a panic does not",
+        &json!([principal_of(&asked), principal_of(&own)]),
+        &json!(["usr_mia", null]),
+    );
+
+    // 14. Declarations the adapter refuses at boot: an owner field it could not
+    //     keep read-only, and a capability needing scopes the app never
+    //     declared.
+    let refusal = |entities: Value, capabilities: Value| -> String {
+        let built = Adapter::new(AdapterConfig {
+            app_id: "selftest".into(),
+            app_name: None,
+            entities,
+            operations: json!([]),
+            store: Store::memory(json!({})),
+            token: "t".into(),
+            permissions_of: None,
+            capabilities,
+            modules: json!([{ "name": "core" }]),
+            allowed_origins: vec![],
+            public_url: None,
+            runner_lookup: no_runner,
+            events: json!([]),
+            auth_mode: "multi-user".into(),
+            credential_hint: None,
+            env: None,
+            app_version: None,
+        });
+        built.err().unwrap_or_default()
+    };
+    let owned = |field: Value| json!({ "tasks": { "module": "core", "ownedBy": "owner", "fields": [field] } });
+    for (label, entities, capabilities, expected) in [
+        (
+            "ownedBy must name a field",
+            owned(json!({ "name": "title", "type": "string" })),
+            json!({}),
+            "which is not one of its fields",
+        ),
+        (
+            "…a read-only one",
+            owned(json!({ "name": "owner", "type": "string" })),
+            json!({}),
+            "which must be a readOnly string field",
+        ),
+        (
+            "…of type string",
+            owned(json!({ "name": "owner", "type": "number", "readOnly": true })),
+            json!({}),
+            "which must be a readOnly string field",
+        ),
+        (
+            "a capability may need only declared scopes",
+            owned(json!({ "name": "owner", "type": "string", "readOnly": true })),
+            json!({ "triage": { "scopes": ["data:tasks:read", "data:nope:write"] } }),
+            "capability \"triage\" needs scopes this app does not declare: data:nope:write",
+        ),
+    ] {
+        check(&mut failures, label, &json!(refusal(entities, capabilities).contains(expected)), &json!(true));
+    }
+    check(
+        &mut failures,
+        "a well-formed owner field and capability boot",
+        &json!(refusal(
+            owned(json!({ "name": "owner", "type": "string", "readOnly": true })),
+            json!({ "triage": { "scopes": ["data:tasks:read", "*"] } }),
+        )),
+        &json!(""),
+    );
+
     if !failures.is_empty() {
         println!("a2app_adapter selftest FAILED:\n  - {}", failures.join("\n  - "));
         return 1;
     }
-    println!("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, host and network policy)");
+    println!(
+        "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, \
+         host and network policy, secrets, passwords, user codes, cookies, sign-in limits, grant requests, \
+         the ceiling, record ownership, credential refusals, ownedBy and capability declarations, \
+         the runner's caller)"
+    );
     0
 }

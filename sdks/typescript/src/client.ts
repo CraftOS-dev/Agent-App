@@ -53,9 +53,6 @@ export interface A2AppClientOptions {
   token?: string | null;
   /** self-declared agent name recorded in the audit log (X-A2App-Agent) */
   agentName?: string;
-  /** @deprecated since protocol 0.2, ignored with a warning: the credential
-   *  (`token`) says who the agent acts for. Removed in the next release. */
-  authToken?: string | null;
   /** per-request timeout in ms (default 15000). A black-hole port would otherwise
    *  hang an operate command forever; on timeout the request aborts and throws
    *  {@link A2AppUnreachableError} (CLI exit 3). Pass 0 to disable. */
@@ -120,12 +117,6 @@ export class A2AppClient {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "");
     this.token = opts.token ?? null;
     this.agentName = opts.agentName ?? "a2app-sdk";
-    if (opts.authToken !== undefined && opts.authToken !== null) {
-      // 0.1 sent a second, user token as Authorization. Since 0.2 the agent's
-      // own credential says who it acts for; the option is ignored for one
-      // release, then removed.
-      console.warn("A2AppClient: authToken is ignored since protocol 0.2 — the credential (token) says who the agent acts for.");
-    }
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   }

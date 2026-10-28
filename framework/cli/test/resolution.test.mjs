@@ -4,8 +4,9 @@
  * for the app (`a2app <app> login`), then a local app's own .agent-token.
  *
  * And what is no longer sent at all: the 0.1 `.principal` password sign-in and
- * the A2APP_AUTH_TOKEN second token are ignored with a warning, so no password
- * and no Authorization header ever leaves this machine.
+ * the A2APP_AUTH_TOKEN / authToken second token are gone, so no password and no
+ * Authorization header ever leaves this machine, whatever a 0.1 setup left
+ * behind.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -90,17 +91,15 @@ try {
   writeFileSync(join(dir, ".principal"), JSON.stringify({ authUrl: "/api/collections/users/auth-with-password", identity: "bob", password: "hunter2-hunter2" }));
   seen.length = 0;
   const legacy = await whoami({ A2APP_AUTH_TOKEN: "legacy-user-token" });
-  ok("a .principal file is warned about", /\.principal is ignored since 0\.2 and holds a password/.test(legacy.err));
-  ok("…and never used to sign in", !seen.some((r) => r.path.includes("auth-with-password")));
-  ok("A2APP_AUTH_TOKEN is warned about", /A2APP_AUTH_TOKEN is ignored since 0\.2/.test(legacy.err));
-  check("…and no Authorization header is sent", seen.map((r) => r.authorization).filter((a) => a !== null), []);
-  check("the command still acts on the stored credential", legacy.who.principal, signup.json.id);
+  ok("a leftover .principal file is never used to sign in", !seen.some((r) => r.path.includes("auth-with-password")));
+  check("A2APP_AUTH_TOKEN sends no Authorization header", seen.map((r) => r.authorization).filter((a) => a !== null), []);
+  check("the command acts on the stored credential", legacy.who.principal, signup.json.id);
 
   writeFileSync(join(home, "credentials.json"), JSON.stringify({ version: 1, credentials: [{ origin: base, appId: "resolve_app", token: bobToken, authToken: "old-user-token" }] }));
   seen.length = 0;
   const entry = await whoami();
-  ok("an authToken left in credentials.json is warned about", /authToken for .* is ignored since 0\.2/.test(entry.err));
-  check("…and not sent", seen.map((r) => r.authorization).filter((a) => a !== null), []);
+  check("an authToken left in credentials.json is not sent", seen.map((r) => r.authorization).filter((a) => a !== null), []);
+  check("…and the entry's own token is used", entry.who.principal, signup.json.id);
 } finally {
   server.close();
   rmSync(dir, { recursive: true, force: true });

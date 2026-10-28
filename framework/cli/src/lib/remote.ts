@@ -33,9 +33,6 @@ export interface StoredCredential {
   /** optional: distinguishes two apps served from one origin */
   appId?: string;
   token: string;
-  /** Removed in 0.2 and ignored (with a warning): an agent's own credential
-   *  says who it acts for. */
-  authToken?: string;
   /** set by `a2app <app> login`: which credential this is, who it acts for,
    *  and when it stops working */
   credentialId?: string;
@@ -122,23 +119,14 @@ export function readCredentials(warn?: (message: string) => void): StoredCredent
  * hands an agent one app for one run (the bridge's task credential), and it
  * must win over whatever the machine happens to remember. Within the store, an
  * entry naming this `appId` beats a bare origin entry, so two apps behind one
- * hostname stay distinguishable.
- *
- * The credential alone says who the agent acts for. The 0.1 second token —
- * `A2APP_AUTH_TOKEN`, or `authToken` in an entry — is ignored, with a warning,
- * for this release.
+ * hostname stay distinguishable. The credential alone says who the agent acts
+ * for.
  */
 export function credentialFor(origin: string, appId: string | null, warn?: (message: string) => void): string | null {
-  if (process.env["A2APP_AUTH_TOKEN"] !== undefined) {
-    warn?.("A2APP_AUTH_TOKEN is ignored since 0.2: the agent's own credential (a2app <app> login) says who it acts for.");
-  }
   const envToken = process.env["A2APP_TOKEN"]?.trim();
   if (envToken) return envToken;
   const entries = readCredentials(warn).filter((c) => c.origin === origin);
   const match = (appId !== null ? entries.find((c) => c.appId === appId) : undefined) ?? entries.find((c) => !c.appId);
-  if (match?.authToken !== undefined) {
-    warn?.(`credentials.json: authToken for ${origin} is ignored since 0.2; remove it.`);
-  }
   return match?.token ?? null;
 }
 

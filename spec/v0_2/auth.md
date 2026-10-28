@@ -204,7 +204,7 @@ The session, invite and user routes exist only on `multi-user` apps; elsewhere t
 | `agent-app <app> credential list` · `mint --for <principal> --scopes … --expires …` · `revoke <id>` | manages credentials with the admin credential; `mint` prints the token once |
 | `agent-app <app> owner` · `agent-app <app> invite [--role member]` | prints a setup link |
 
-**Removed in 0.2:** `.principal`, `A2APP_AUTH_TOKEN` and the `authToken` client option. They are ignored with a warning for one release.
+**Removed in 0.2:** `.principal`, `A2APP_AUTH_TOKEN` and the `authToken` client option. A client sends only the agent's own credential.
 
 ## 12. Errors added in 0.2
 

@@ -16,8 +16,6 @@
  * being a rule an agent has to keep and becomes one it cannot break.
  */
 import { A2AppClient } from "@a2app/sdk";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { isRemoteAddress, loadProject, operateTarget, readAgentToken, UsageError, type Project } from "./project.js";
 import { credentialFor, originOf, pinAppId, pinnedAppId } from "./remote.js";
 import { homePath } from "./home.js";
@@ -205,12 +203,6 @@ export async function clientForTarget(target: Target): Promise<A2AppClient> {
  * candidate — a fresh store of its own — is reached with the app's own token.
  */
 async function localClient(project: Project): Promise<A2AppClient> {
-  if (existsSync(join(project.dir, ".principal"))) {
-    log.warn(
-      `${join(project.dir, ".principal")} is ignored since 0.2 and holds a password: delete it. ` +
-        `An agent signs in with \`a2app <app> login\`, approved by the person it acts for.`,
-    );
-  }
   const route = await operateTarget(project);
   const delegated =
     route.env === "live"

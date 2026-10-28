@@ -38,15 +38,14 @@ never do more than that person can. The normative text is
 
 ### Removed
 
-These are ignored, with a warning, for this release, and will be deleted in the
-next one.
+The 0.1 ways of naming a user. The agent's own credential now says who it acts
+for, and nothing else is sent.
 
-- **`.principal`**: password sign-in from a file in the app directory. Delete the
-  file and run `a2app <app> login`.
+- **`.principal`**: password sign-in from a file in the app directory. It is no
+  longer read; delete the file (it holds a password) and run `a2app <app> login`.
 - **`A2APP_AUTH_TOKEN`** and `authToken` in `credentials.json`: the second, user
-  token sent as `Authorization`. The agent's own credential now says who it acts
-  for.
-- **SDK `authToken` / `auth_token`** client option, for the same reason.
+  token sent as `Authorization`.
+- **SDK `authToken` / `auth_token`** client option. Passing it is now an error.
 
 ### Changed
 

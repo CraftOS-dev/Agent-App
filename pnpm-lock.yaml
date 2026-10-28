@@ -119,6 +119,9 @@ importers:
         specifier: workspace:*
         version: link:../../sdks/typescript
     devDependencies:
+      '@a2app/adapter-core':
+        specifier: workspace:*
+        version: link:../../adapters/adapter-core
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.43

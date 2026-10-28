@@ -4,6 +4,10 @@
  * Idempotent GETs retry once on network failure with a short jittered delay;
  * writes never retry (the UI disables the control instead, so a retry is the
  * user's call).
+ *
+ * On a multi-user app a request from someone who is not signed in answers
+ * `sign_in_required`; the framework's account page signs them in and sends them
+ * back here.
  */
 export async function api(path, init = {}, { retryGet = true } = {}) {
   const isGet = !init.method || init.method === "GET";
@@ -15,6 +19,10 @@ export async function api(path, init = {}, { retryGet = true } = {}) {
     });
     const text = await res.text();
     const json = text ? JSON.parse(text) : null;
+    if (res.status === 401 && json?.code === "sign_in_required") {
+      location.assign(`${json.signInUrl}?next=${encodeURIComponent(location.pathname + location.search)}`);
+      return new Promise(() => {}); // the page is leaving; nothing after this should run
+    }
     if (!res.ok) {
       const message = json?.message ?? `The app answered with an error (HTTP ${res.status}).`;
       throw Object.assign(new Error(message), { status: res.status });

@@ -1,0 +1,299 @@
+<!doctype html>
+<!--
+  The account page (SYSTEM-OWNED — hash-locked in the ownership canon; the same
+  file in every blueprint). Served at /_a2app/account. Sign in, accept an
+  invite, see who you are, manage people (owner), manage the agents acting for
+  you, and approve an agent's sign-in request.
+
+  It speaks only the adapter's JSON routes (spec/v0_2/auth.md), and every value
+  from the app reaches the page through textContent, never as markup.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Account</title>
+    <link rel="stylesheet" href="/tokens.css" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body {
+        margin: 0; font-family: var(--font-sans, system-ui, sans-serif); font-size: 15px; line-height: 1.5;
+        color: var(--text-primary, #18181b); background: var(--bg-canvas, #f7f7f8);
+      }
+      main { max-width: 560px; margin: 0 auto; padding: 40px 16px 64px; }
+      h1 { margin: 0 0 4px; font-size: 22px; line-height: 1.25; }
+      h2 { margin: 0 0 12px; font-size: 16px; }
+      .muted { color: var(--text-secondary, #52525b); }
+      .small { font-size: 13px; }
+      header { margin-bottom: 24px; }
+      header a { color: var(--accent-text, #4338ca); }
+      section {
+        background: var(--bg-surface, #fff); border: 1px solid var(--border-subtle, #e4e4e7);
+        border-radius: var(--r-xl, 12px); padding: 20px; margin-bottom: 16px;
+      }
+      form { display: grid; gap: 12px; }
+      label { display: grid; gap: 4px; font-size: 13px; font-weight: 500; }
+      input, select {
+        font: inherit; height: 38px; padding: 0 10px; color: inherit; background: var(--bg-surface, #fff);
+        border: 1px solid var(--border-default, #d4d4d8); border-radius: var(--r-md, 8px);
+      }
+      input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--focus-ring, #6366f1); outline-offset: 2px; }
+      button {
+        font: inherit; font-weight: 500; height: 38px; padding: 0 14px; cursor: pointer;
+        border-radius: var(--r-md, 8px); border: 1px solid var(--border-default, #d4d4d8);
+        background: var(--bg-surface, #fff); color: inherit;
+      }
+      button:hover { background: var(--bg-hover, #f4f4f5); }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      button.primary { background: var(--accent-solid, #4f46e5); border-color: var(--accent-solid, #4f46e5); color: var(--text-on-accent, #fff); }
+      button.primary:hover { background: var(--accent-hover, #4338ca); }
+      button.danger { color: var(--danger-solid, #dc2626); }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .spread { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+      ul.list { list-style: none; margin: 0; padding: 0; }
+      ul.list li { padding: 10px 0; border-top: 1px solid var(--border-subtle, #e4e4e7); }
+      ul.list li:first-child { border-top: 0; }
+      .badge {
+        display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; line-height: 20px;
+        background: var(--neutral-bg, #f4f4f5); color: var(--neutral-text, #3f3f46);
+      }
+      .error { color: var(--danger-solid, #dc2626); font-size: 13px; margin: 0; }
+      .error:empty { display: none; }
+      .notice { padding: 10px 12px; border-radius: var(--r-md, 8px); background: var(--info-bg, #eef2ff); font-size: 13px; }
+      code, .code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 13px; word-break: break-all; }
+      .code { padding: 8px 10px; border-radius: var(--r-md, 8px); background: var(--bg-sunken, #f4f4f5); }
+    </style>
+  </head>
+  <body>
+    <main id="root" aria-live="polite"></main>
+    <script>
+      "use strict";
+      const root = document.getElementById("root");
+
+      /* ------------------------------------------------------------ helpers */
+
+      /** An element with text children only: values never become markup. */
+      function el(tag, attrs, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          if (v === null || v === undefined || v === false) continue;
+          if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+          else node.setAttribute(k, v === true ? "" : String(v));
+        }
+        for (const c of children.flat()) {
+          if (c === null || c === undefined || c === false) continue;
+          node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        }
+        return node;
+      }
+
+      async function api(method, path, body) {
+        const res = await fetch(path, {
+          method,
+          headers: body === undefined ? {} : { "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          credentials: "same-origin",
+        });
+        let json = null;
+        try {
+          json = await res.json();
+        } catch {
+          /* not JSON */
+        }
+        return { status: res.status, ok: res.ok, json: json || {} };
+      }
+
+      /** A form whose submit button disables while `action` runs; a thrown
+       *  message, or a failed reply's message, shows under the form. */
+      function form(fields, submitLabel, action) {
+        const error = el("p", { class: "error", role: "alert" });
+        const submit = el("button", { class: "primary", type: "submit" }, submitLabel);
+        const node = el("form", {
+          onsubmit: async (e) => {
+            e.preventDefault();
+            error.textContent = "";
+            submit.disabled = true;
+            try {
+              const message = await action(new FormData(node));
+              if (message) error.textContent = message;
+            } catch (err) {
+              error.textContent = err && err.message ? err.message : String(err);
+            } finally {
+              submit.disabled = false;
+            }
+          },
+        }, fields, el("div", { class: "row" }, submit), error);
+        return node;
+      }
+
+      function field(label, attrs) {
+        return el("label", null, label, el("input", attrs));
+      }
+
+      const fmtDate = (iso) => (iso ? new Date(iso).toLocaleString() : "never");
+
+      /** Where to go after signing in: a path on this app only. */
+      function nextPath(params) {
+        const next = params.get("next") || "/";
+        return next.startsWith("/") && !next.startsWith("//") ? next : "/";
+      }
+
+      function show(...nodes) {
+        root.replaceChildren(...nodes);
+      }
+
+      /* -------------------------------------------------------------- views */
+
+      let app = { name: "This app", authMode: "none" };
+
+      function header(subtitle) {
+        return el("header", null, el("h1", null, app.name), el("p", { class: "muted" }, subtitle, " · ", el("a", { href: "/" }, "Back to the app")));
+      }
+
+      function signIn(params) {
+        show(
+          header("Sign in"),
+          el("section", null,
+            form([
+              field("Login", { name: "login", autocomplete: "username", required: true, autofocus: true }),
+              field("Password", { name: "password", type: "password", autocomplete: "current-password", required: true }),
+            ], "Sign in", async (data) => {
+              const r = await api("POST", "/api/_a2app/session", { login: data.get("login"), password: data.get("password") });
+              if (!r.ok) return r.json.message || "Could not sign in.";
+              location.assign(nextPath(params));
+            }),
+            el("p", { class: "muted small" }, "No account? Ask the app's owner for an invite link."),
+          ),
+        );
+      }
+
+      async function setup(code) {
+        const invite = await api("GET", `/api/_a2app/invites/${encodeURIComponent(code)}`);
+        if (!invite.ok) {
+          show(header("Invite"), el("section", null, el("p", null, invite.json.message || "This invite link is not valid.")));
+          return;
+        }
+        show(
+          header(invite.json.role === "owner" ? "Create the owner account" : "Create your account"),
+          el("section", null,
+            form([
+              field("Your name", { name: "name", autocomplete: "name", required: true, maxlength: 100, autofocus: true }),
+              field("Login (email or username)", { name: "login", autocomplete: "username", required: true, maxlength: 254 }),
+              field("Password (at least 10 characters)", { name: "password", type: "password", autocomplete: "new-password", required: true, minlength: 10 }),
+              field("Password again", { name: "confirm", type: "password", autocomplete: "new-password", required: true }),
+            ], "Create account", async (data) => {
+              if (data.get("password") !== data.get("confirm")) return "The passwords do not match.";
+              const r = await api("POST", `/api/_a2app/invites/${encodeURIComponent(code)}`, {
+                name: data.get("name"), login: data.get("login"), password: data.get("password"),
+              });
+              if (!r.ok) return r.json.message || "Could not create the account.";
+              history.replaceState(null, "", location.pathname);
+              location.assign("/");
+            }),
+          ),
+        );
+      }
+
+      function peopleSection(me) {
+        const list = el("ul", { class: "list" });
+        const inviteOut = el("div");
+        const error = el("p", { class: "error", role: "alert" });
+
+        async function load() {
+          const r = await api("GET", "/api/_a2app/users");
+          if (!r.ok) {
+            error.textContent = r.json.message || "Could not load people.";
+            return;
+          }
+          list.replaceChildren(...r.json.users.map((u) =>
+            el("li", { class: "spread" },
+              el("div", null,
+                el("div", null, u.name, " ", el("span", { class: "badge" }, u.role), u.active ? null : el("span", { class: "badge" }, " deactivated")),
+                el("div", { class: "muted small" }, u.login),
+              ),
+              u.id === me.id ? el("span", { class: "muted small" }, "you") : el("div", { class: "row" },
+                el("button", { type: "button", onclick: () => change(u.id, { role: u.role === "owner" ? "member" : "owner" }) },
+                  u.role === "owner" ? "Make member" : "Make owner"),
+                el("button", { type: "button", class: u.active ? "danger" : null, onclick: () => change(u.id, { active: !u.active }) },
+                  u.active ? "Deactivate" : "Reactivate"),
+              ),
+            )));
+        }
+
+        async function change(id, patch) {
+          error.textContent = "";
+          const r = await api("PATCH", `/api/_a2app/users/${encodeURIComponent(id)}`, patch);
+          if (!r.ok) error.textContent = r.json.message || "Could not change that account.";
+          await load();
+        }
+
+        const role = el("select", { name: "role", "aria-label": "Role" }, el("option", { value: "member" }, "Member"), el("option", { value: "owner" }, "Owner"));
+        const invite = el("button", {
+          type: "button",
+          onclick: async () => {
+            const r = await api("POST", "/api/_a2app/invites", { role: role.value });
+            if (!r.ok) {
+              error.textContent = r.json.message || "Could not create an invite.";
+              return;
+            }
+            inviteOut.replaceChildren(
+              el("p", { class: "small" }, `Send this one-time link to the person you are inviting (valid until ${fmtDate(r.json.expiresAt)}):`),
+              el("div", { class: "code" }, r.json.url),
+            );
+          },
+        }, "Create invite link");
+
+        load();
+        return el("section", null, el("h2", null, "People"), list, el("div", { class: "row", style: "margin-top:12px" }, role, invite), inviteOut, error);
+      }
+
+      async function home() {
+        let me = null;
+        if (app.authMode === "multi-user") {
+          const r = await api("GET", "/api/_a2app/session");
+          if (!r.ok) {
+            location.hash = `#sign-in?next=${encodeURIComponent("/_a2app/account")}`;
+            return;
+          }
+          me = r.json;
+        }
+        const sections = [];
+        if (me) {
+          sections.push(el("section", { class: "spread" },
+            el("div", null, el("div", null, me.name, " ", el("span", { class: "badge" }, me.role)), el("div", { class: "muted small" }, me.login)),
+            el("button", {
+              type: "button",
+              onclick: async () => {
+                await api("DELETE", "/api/_a2app/session");
+                location.hash = "#sign-in";
+              },
+            }, "Sign out"),
+          ));
+          if (me.role === "owner") sections.push(peopleSection(me));
+        }
+        show(header(me ? "Your account" : "Account"), ...sections);
+      }
+
+      /* ------------------------------------------------------------- router */
+
+      async function route() {
+        const hash = location.hash.slice(1);
+        const [path, query] = hash.split("?");
+        const params = new URLSearchParams(query || "");
+        const [screen, arg] = path.split("/");
+        if (screen === "sign-in") return signIn(params);
+        if (screen === "setup" && arg) return setup(arg);
+        return home();
+      }
+
+      (async () => {
+        const id = await api("GET", "/api/_a2app");
+        if (id.ok) app = { name: (id.json.app && id.json.app.name) || "This app", authMode: id.json.authMode || "none" };
+        document.title = `Account · ${app.name}`;
+        window.addEventListener("hashchange", route);
+        await route();
+      })();
+    </script>
+  </body>
+</html>

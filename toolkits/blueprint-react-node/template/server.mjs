@@ -183,13 +183,21 @@ const binding = {
     for (const [name, def] of Object.entries(schema.entities)) {
       // module + summary travel with the entity: describe groups by module, so
       // an entity that dropped them here would have no screen to appear on.
-      out[name] = { fields: def.fields, module: def.module, ...(def.summary ? { summary: def.summary } : {}) };
+      out[name] = {
+        fields: def.fields,
+        module: def.module,
+        ...(def.summary ? { summary: def.summary } : {}),
+        ...(def.ownedBy ? { ownedBy: def.ownedBy } : {}),
+      };
     }
     return out;
   },
 
   listRecords(entity, query) {
     let items = store.list(entity);
+    // `where` comes from the adapter (a member sees only its own records), so it
+    // is applied before sorting and paging like any other constraint.
+    for (const [field, value] of Object.entries(query.where ?? {})) items = items.filter((r) => r[field] === value);
     if (query.filter) items = items.filter(matchFilter(query.filter));
     if (query.sort) {
       const desc = query.sort.startsWith("-");
@@ -312,7 +320,11 @@ if (ENV === "live") {
 const view = createStaticView(servedPublicDir, {
   // The update watcher lives at the project root, not inside the View build: it
   // is system-owned, and the View is the agent's to rewrite entirely.
-  aliases: { "/_a2app/update.js": join(HERE, "a2app-update.js") },
+  aliases: {
+    "/_a2app/update.js": join(HERE, "a2app-update.js"),
+    // The framework's account page: sign in, invites, people, connected agents.
+    "/_a2app/account": join(HERE, "a2app-account.html"),
+  },
   fingerprintPaths: [join(HERE, "a2app.schema.mjs")],
   // An author who wants to move the marker by hand can bump manifest.appVersion.
   versionSalt: manifest.appVersion ?? "",

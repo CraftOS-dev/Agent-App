@@ -319,6 +319,7 @@ export function buildEntity(
       next: truncated > 0 ? [...next, `describe/${path}?all=true`] : next,
     };
     if (def.auth) level.auth = true;
+    if (def.ownedBy) level.ownedBy = def.ownedBy;
     if (truncated > 0) level.truncated = truncated;
     return level;
   };
@@ -537,6 +538,15 @@ export function modelProblems(deps: DescribeDeps): string[] {
   for (const [name, def] of Object.entries(entities)) {
     if (!def.module) problems.push(`entity "${name}" declares no module`);
     else if (!declared.has(def.module)) problems.push(`entity "${name}" names undeclared module "${def.module}"`);
+    if (def.ownedBy !== undefined) {
+      // The adapter writes the owner and the guard keeps clients from doing so,
+      // which only holds for a declared, read-only string field.
+      const owner = def.fields.find((f) => f.name === def.ownedBy);
+      if (!owner) problems.push(`entity "${name}" is ownedBy "${def.ownedBy}", which is not one of its fields`);
+      else if (owner.type !== "string" || owner.readOnly !== true) {
+        problems.push(`entity "${name}" is ownedBy "${def.ownedBy}", which must be a readOnly string field`);
+      }
+    }
   }
 
   for (const o of deps.operations) {

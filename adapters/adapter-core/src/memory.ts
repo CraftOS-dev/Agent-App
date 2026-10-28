@@ -28,6 +28,8 @@ export interface MemoryEntitySpec {
   summary?: string;
   auth?: boolean;
   writeAllow?: string[];
+  /** the read-only string field naming each record's owner (spec/v0_2 auth.md §5) */
+  ownedBy?: string;
   /** seed records */
   seed?: Record<string, unknown>[];
 }
@@ -94,6 +96,7 @@ export class MemoryBinding implements Binding {
         ...(spec.summary ? { summary: spec.summary } : {}),
         ...(spec.auth ? { auth: true } : {}),
         ...(spec.writeAllow ? { writeAllow: spec.writeAllow } : {}),
+        ...(spec.ownedBy ? { ownedBy: spec.ownedBy } : {}),
       };
     }
     return out;
@@ -103,6 +106,7 @@ export class MemoryBinding implements Binding {
     const map = this.rows[entity];
     if (!map) return { items: [] };
     let items = [...map.values()];
+    for (const [field, value] of Object.entries(query.where ?? {})) items = items.filter((r) => r[field] === value);
     if (query.filter) items = items.filter(matchFilter(query.filter));
     if (query.sort) {
       const desc = query.sort.startsWith("-");

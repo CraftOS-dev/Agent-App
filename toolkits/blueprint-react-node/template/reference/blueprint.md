@@ -46,6 +46,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
 | `server.mjs` | SYSTEM (hash-locked) | the Hono server + `@a2app/adapter-core` middleware + the SQLite binding: serves the records API, identity, describe, the built View (`dist/`), and `/_a2app/update.js`. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `scripts/dev-prepare.mjs` | lifecycle | run by `agent-app dev`: builds a fresh, seeded SQLite store in an isolated dir. Leave it alone. |
 | `scripts/promote-apply.mjs` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup. Leave it alone. |
 | `dist/` | build output | the compiled View (`npm run build`). Git-ignored; served by `server.mjs`. Never edit by hand. |
@@ -268,6 +269,30 @@ and the View has no other path to the queue yet. There, show what the agent
 writes to the record instead (a status or assignee it sets on claim and on
 finish). A 404 means the task has been pruned, so drop the indicator. Don't
 retry it.
+
+## Accounts and whose records (`authMode: multi-user`)
+
+Scaffold with `--auth-mode multi-user` for an app with accounts. The adapter
+then holds the accounts and sessions itself — they are never records — and the
+View needs no auth code of its own:
+
+- **Signing in** happens on the framework's account page, `/_a2app/account`. A
+  request from the View with no session answers `401 sign_in_required`, and
+  `src/api.js` sends the person there; it sends them back afterwards.
+- **The first owner** comes from `agent-app <dir> owner`, which prints a
+  one-time setup link. Owners invite everyone else from the account page (or
+  `agent-app <dir> invite`). Nobody's password passes through the CLI or an
+  agent.
+- **Whose records.** `ownedBy: "<field>"` on an entity names a `readOnly`
+  string field the adapter fills with the creator's principal. A member then
+  lists, reads, changes and deletes only its own records (anyone else's answer
+  404); an owner sees all. The starter's `tasks` is owned by `owner`.
+- **Runners** get the caller as `ctx = { principal, role, … }` and must hold
+  themselves to the same rule for records they touch — the starter's `mine`
+  helper in `a2app.schema.mjs` is the pattern.
+
+On `authMode: none` the same code runs with one principal, `owner`: every
+record is the owner's and nothing is filtered.
 
 ## Reaching the app from another machine
 

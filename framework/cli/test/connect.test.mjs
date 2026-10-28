@@ -236,10 +236,10 @@ await withHome(async () => {
 
 // A protocol this client does not speak: read nothing, write nothing.
 await withHome(async () => {
-  await withApp(identityFor("future", "0.2"), async (base) => {
+  await withApp(identityFor("future", "9.9"), async (base) => {
     const err = await thrown(() => clientForTarget(resolveTarget(base)));
     ok("an unrecognised protocol is refused", err !== null);
-    ok("the refusal names the version", err !== null && /"0\.2"/.test(err.message));
+    ok("the refusal names the version", err !== null && /"9\.9"/.test(err.message));
     check("nothing is pinned for an unusable protocol", pinnedAppId(originOf(base)), null);
   });
 });

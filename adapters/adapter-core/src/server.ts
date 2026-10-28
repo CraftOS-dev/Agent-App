@@ -36,6 +36,8 @@ import { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 import { FileStateStore, InMemoryStateStore, knownEventTypes, type StateStore, type StoredTask } from "./store.js";
 import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import { hostnameOf, isLoopbackName } from "./network.js";
+import { ACCOUNT_URL, createAccountRoutes, type Manager } from "./accounts.js";
+import { hashSecret, parseCookies, type AccountRow, type SessionRow } from "./auth.js";
 import {
   OperationError,
   UnsupportedFilterError,
@@ -47,10 +49,11 @@ import {
   type CallContext,
   type Grant,
   type OperationDecl,
+  type StoredRecord,
 } from "./types.js";
 
 export const ADAPTER_CORE_VERSION = "0.1.0";
-const PROTOCOL_VERSION = "0.1";
+const PROTOCOL_VERSION = "0.2";
 
 /** Page size for the referential scan a delete runs before it commits. */
 const REFERENCE_SCAN_PAGE = 500;
@@ -130,8 +133,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   const audit = config.audit ?? ((e: AuditEntry) => store.appendAudit(e));
   const limiter = new RateLimiter({ ...DEFAULT_RATE_LIMITS, ...(config.rateLimits ?? {}) }, () => now().getTime());
 
-  // Seed grants (the platform issues the default local grant at launch).
-  for (const g of config.credentials ?? []) store.putGrant(g);
+  // Seed grants (the platform issues the default local grant at launch). A
+  // seeded grant comes from the app's own files, so it is the admin
+  // credential (spec/v0_2/auth.md §2.3).
+  for (const g of config.credentials ?? []) store.putGrant({ ...g, admin: true });
 
   /* ------------------------------------------- data version + viewers */
 
@@ -355,7 +360,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     const authz = authorize(req, { scope: `data:${entityName}:read`, isWrite: false });
     if ("reply" in authz) return authz.reply;
 
-    const record = await binding.getRecord(entityName, recordId);
+    const record = visible(def, authz.ctx, await binding.getRecord(entityName, recordId));
     if (!record) return err(404, "record_not_found", `No ${entityName} record "${recordId}".`);
 
     if (relationName === undefined) {
@@ -417,6 +422,8 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       dataVersion: dataVersion(),
       serverNow: d.toISOString(),
       serverTzOffsetMinutes: -d.getTimezoneOffset(),
+      authMode: binding.authMode,
+      accountUrl: ACCOUNT_URL,
     };
     if (config.env) doc.env = config.env;
     // Published only when the app actually has one: a field that is sometimes an
@@ -431,6 +438,11 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
   function expandScopes(grant: Grant): Set<string> {
     if (!grant.scopes.includes("*")) return new Set(grant.scopes);
+    return allScopes();
+  }
+
+  /** Every scope the app declares: what `*` means. */
+  function allScopes(): Set<string> {
     const scopes = new Set<string>();
     for (const name of Object.keys(binding.entities())) {
       scopes.add(`data:${name}:read`);
@@ -473,49 +485,179 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     return origin !== undefined && allowedOrigins.has(origin);
   }
 
+  /* ----------------------------------------------- principals, sessions */
+
+  const multiUser = binding.authMode === "multi-user";
+  // Per app: browsers do not separate cookies by port, so two apps on one
+  // machine would otherwise sign each other out.
+  const sessionCookieName = `a2app_session_${binding.appId}`;
+  const secureCookies = config.publicUrl ? new URL(config.publicUrl).protocol === "https:" : false;
+
+  /** The app's administrator: the admin credential, and the only principal of
+   *  an `authMode: none` app. */
+  const OWNER = { id: "owner", name: "Owner", role: "owner" as const, active: true };
+
+  /** Who a principal is, or null when it is unknown. */
+  function principalInfo(id: string): { id: string; name: string; role: "owner" | "member"; active: boolean } | null {
+    if (id === OWNER.id) return OWNER;
+    if (!multiUser) return null;
+    const a = store.row<AccountRow>("users", id);
+    return a ? { id: a.id, name: a.name, role: a.role, active: a.active } : null;
+  }
+
+  /** The signed-in account behind this request's session cookie, if any. */
+  function sessionOf(req: A2AppRequest): { key: string; account: AccountRow } | null {
+    if (!multiUser) return null;
+    const secret = parseCookies(req.headers["cookie"])[sessionCookieName];
+    if (!secret) return null;
+    const key = hashSecret(secret);
+    const session = store.row<SessionRow>("sessions", key);
+    if (!session) return null;
+    if (Date.parse(session.expiresAt) <= now().getTime()) {
+      store.deleteRow("sessions", key);
+      return null;
+    }
+    const account = store.row<AccountRow>("users", session.principal);
+    return account && account.active ? { key, account } : null;
+  }
+
+  /** Whether a request came from one of the app's own pages. Only ever used to
+   *  pick which 401 to send (sign in, or present a credential) — never to trust
+   *  the request. A browser marks same-origin fetches, GETs included, with
+   *  Sec-Fetch-Site; a program sends neither header. */
+  function fromOwnPage(req: A2AppRequest): boolean {
+    return isSameOrigin(req) || req.headers["sec-fetch-site"] === "same-origin";
+  }
+
+  function unauthenticated(req: A2AppRequest, message: string): A2AppReply {
+    if (multiUser && fromOwnPage(req)) {
+      return err(401, "sign_in_required", "Sign in to use this app.", { signInUrl: `${ACCOUNT_URL}#sign-in` });
+    }
+    return err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, message, {
+      // App text is bounded before it is forwarded; the framework's own
+      // sentence is the fallback. Both live in agentText.ts — see the note
+      // there on why this channel is kept narrow.
+      how: boundAppText(config.credentialHint) ?? AGENT_TEXT.credentialHint,
+    });
+  }
+
+  /** A signed-in change must come from this app's own page (CSRF, spec §4). */
+  function crossSiteChange(): A2AppReply {
+    return err(403, "forbidden_origin", "A signed-in change must come from this app's own page.");
+  }
+
+  /**
+   * Who the caller is, in a fixed order: a foreign origin is refused; then the
+   * agent credential; then, on a multi-user app, the session (a change must
+   * come from the app's own page); on `authMode: none`, the app's own View is
+   * the owner. Returns the context with the caller's reach, or the refusal.
+   * `none` reach means an anonymous read on a single-user app, which the scope
+   * check does not apply to.
+   */
+  function resolve(
+    req: A2AppRequest,
+    opts: { isWrite: boolean },
+  ): { ctx: CallContext; held: Set<string> | "anonymous"; grant: Grant | null } | { reply: A2AppReply } {
+    if (isForeignOrigin(req)) {
+      return { reply: err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
+    }
+    const grant = credentialOf(req);
+    if (grant) {
+      const info = principalInfo(grant.principal);
+      const ctx: CallContext = {
+        credentialId: grant.credentialId,
+        agentName: grant.agentName,
+        principal: grant.principal,
+        role: info?.role ?? "member",
+      };
+      return { ctx, held: expandScopes(grant), grant };
+    }
+    if (multiUser) {
+      const session = sessionOf(req);
+      if (session) {
+        if (opts.isWrite && !isSameOrigin(req)) return { reply: crossSiteChange() };
+        const ctx: CallContext = { credentialId: "session", agentName: null, principal: session.account.id, role: session.account.role };
+        return { ctx, held: allScopes(), grant: null };
+      }
+      return { reply: unauthenticated(req, "This app needs a credential.") };
+    }
+    // The app's own UI (same origin) is trusted: no credential needed.
+    if (isSameOrigin(req)) {
+      return { ctx: { credentialId: "ui", agentName: null, principal: OWNER.id, role: "owner" }, held: allScopes(), grant: null };
+    }
+    // A program write always needs a credential; an anonymous read on a
+    // single-user app proceeds as the owner.
+    if (opts.isWrite) return { reply: unauthenticated(req, "This write requires an agent credential.") };
+    return { ctx: { credentialId: "anonymous", agentName: null, principal: OWNER.id, role: "owner" }, held: "anonymous", grant: null };
+  }
+
   /** The fixed chain: origin → credential → scope. Returns the call context on
    *  success, or the refusal reply. */
   function authorize(
     req: A2AppRequest,
     opts: { scope: string | null; isWrite: boolean },
   ): { ctx: CallContext } | { reply: A2AppReply } {
-    // 1. origin — a foreign browser origin is refused before anything else.
-    if (isForeignOrigin(req)) {
-      return { reply: err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
+    const caller = resolve(req, opts);
+    if ("reply" in caller) return caller;
+    if (opts.scope && caller.held !== "anonymous" && !caller.held.has(opts.scope)) {
+      return {
+        reply: err(403, ERROR_CODES.INSUFFICIENT_SCOPE, `This credential does not hold ${opts.scope}.`, {
+          required: opts.scope,
+        }),
+      };
     }
-    // The app's own UI (same origin) is trusted: no credential needed.
-    if (isSameOrigin(req)) {
-      return { ctx: { credentialId: "ui", agentName: null, principal: "owner" } };
+    return { ctx: caller.ctx };
+  }
+
+  /**
+   * The caller as a manager of accounts and credentials (spec §2.4): a
+   * signed-in person, the app's own View on `authMode: none`, or the admin
+   * credential. An agent's delegated credential is never one.
+   */
+  function managerOf(req: A2AppRequest, opts: { write: boolean }): Manager | A2AppReply {
+    const caller = resolve(req, { isWrite: opts.write });
+    if ("reply" in caller) return caller.reply;
+    if (caller.grant) {
+      if (!caller.grant.admin) return err(403, "not_a_manager", "An agent's credential cannot manage accounts or credentials.");
+      return { principal: OWNER.id, role: "owner" };
     }
-    // 2. credential — a program write always needs one; a read needs one on a
-    //    multi-user app, and is scope-checked whenever a token is presented.
-    const grant = credentialOf(req);
-    const credentialRequired = opts.isWrite || binding.authMode === "multi-user";
-    if (!grant) {
-      if (credentialRequired) {
-        return {
-          reply: err(401, ERROR_CODES.AGENT_TOKEN_REQUIRED, "This write requires an agent credential.", {
-            // App text is bounded before it is forwarded; the framework's own
-            // sentence is the fallback. Both live in agentText.ts — see the note
-            // there on why this channel is kept narrow.
-            how: boundAppText(config.credentialHint) ?? AGENT_TEXT.credentialHint,
-          }),
-        };
-      }
-      return { ctx: { credentialId: "anonymous", agentName: null, principal: "owner" } };
-    }
-    // 3. scope
-    if (opts.scope) {
-      const held = expandScopes(grant);
-      if (!held.has(opts.scope)) {
-        return {
-          reply: err(403, ERROR_CODES.INSUFFICIENT_SCOPE, `This credential does not hold ${opts.scope}.`, {
-            required: opts.scope,
-          }),
-        };
-      }
-    }
-    return { ctx: { credentialId: grant.credentialId, agentName: grant.agentName, principal: grant.principal } };
+    if (caller.ctx.credentialId === "anonymous") return unauthenticated(req, "Managing this app needs a credential.");
+    return { principal: caller.ctx.principal, role: caller.ctx.role };
+  }
+
+  /** Where this app is reached, for links handed to a person. The Host header
+   *  has already passed the host check by the time a route runs. */
+  function publicOrigin(req: A2AppRequest): string {
+    if (config.publicUrl) return new URL(config.publicUrl).origin;
+    const host = req.headers["host"];
+    return host ? `http://${host}` : (ownOrigins[0] ?? "");
+  }
+
+  const accountRoutes = createAccountRoutes({
+    store,
+    now,
+    ok,
+    err,
+    managerOf,
+    sessionOf,
+    sessionCookieName,
+    secureCookies,
+    publicOrigin,
+    isSameOrigin,
+  });
+
+  /* ------------------------------------------------------------ ownership */
+
+  /** Whether `ctx` sees only the records it owns in `def` (spec §5). */
+  function ownedOnly(def: { ownedBy?: string }, ctx: CallContext): def is { ownedBy: string } {
+    return multiUser && def.ownedBy !== undefined && ctx.role !== "owner";
+  }
+
+  /** The record if `ctx` may see it, else null (another member's record is
+   *  indistinguishable from a missing one). */
+  function visible(def: { ownedBy?: string }, ctx: CallContext, rec: StoredRecord | null): StoredRecord | null {
+    if (!rec) return null;
+    return ownedOnly(def, ctx) && rec[def.ownedBy] !== ctx.principal ? null : rec;
   }
 
   /**
@@ -528,10 +670,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
    * scope set alone would tell those callers they cannot reach modules they can.
    */
   function accessFor(req: A2AppRequest): Access {
-    if (isSameOrigin(req)) return FULL_ACCESS;
-    const grant = credentialOf(req);
-    if (!grant) return binding.authMode === "multi-user" ? NO_ACCESS : ANONYMOUS_ACCESS;
-    const held = expandScopes(grant);
+    const caller = resolve(req, { isWrite: false });
+    if ("reply" in caller) return NO_ACCESS;
+    if (caller.held === "anonymous") return ANONYMOUS_ACCESS;
+    const held = caller.held;
     return {
       canRead: (entity) => held.has(`data:${entity}:read`),
       canWrite: (entity) => held.has(`data:${entity}:write`),
@@ -668,11 +810,12 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       const authz = authorize(req, { scope: `data:${entity}:read`, isWrite: false });
       if ("reply" in authz) return authz.reply;
       if (recordId) {
-        const rec = await binding.getRecord(entity, recordId);
+        const rec = visible(def, authz.ctx, await binding.getRecord(entity, recordId));
         if (!rec) return err(404, "record_not_found", `No ${entity} record "${recordId}".`);
         return ok(rec);
       }
       const query = {
+        ...(ownedOnly(def, authz.ctx) ? { where: { [def.ownedBy]: authz.ctx.principal } } : {}),
         ...(req.query.filter !== undefined ? { filter: req.query.filter } : {}),
         ...(req.query.sort !== undefined ? { sort: req.query.sort } : {}),
         ...(req.query.perPage !== undefined ? { perPage: Number(req.query.perPage) } : {}),
@@ -702,6 +845,9 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
     if (req.method === "DELETE") {
       if (!recordId) return err(400, "usage", "DELETE requires a record id.");
+      if (ownedOnly(def, ctx) && !visible(def, ctx, await binding.getRecord(entity, recordId))) {
+        return err(404, "record_not_found", `No ${entity} record "${recordId}".`);
+      }
 
       // The app's referential rules bind THIS door too.
       //
@@ -778,12 +924,16 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       return guardEnvelope(violations, serverNow);
     }
 
-    // Backend write.
+    // Backend write. The owner field is the adapter's to set: the guard has
+    // already refused a client that tried, because it is read-only.
     let stored;
     if (req.method === "POST") {
-      stored = await binding.createRecord(entity, body);
+      stored = await binding.createRecord(entity, def.ownedBy ? { ...body, [def.ownedBy]: ctx.principal } : body);
     } else {
       if (!recordId) return err(400, "usage", "PATCH requires a record id.");
+      if (ownedOnly(def, ctx) && !visible(def, ctx, await binding.getRecord(entity, recordId))) {
+        return err(404, "record_not_found", `No ${entity} record "${recordId}".`);
+      }
       stored = await binding.updateRecord(entity, recordId, body);
       if (!stored) return err(404, "record_not_found", `No ${entity} record "${recordId}".`);
     }
@@ -1122,6 +1272,8 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         credentialId: authz.ctx.credentialId,
         agentName: authz.ctx.agentName,
         principal: authz.ctx.principal,
+        principalName: principalInfo(authz.ctx.principal)?.name ?? null,
+        role: authz.ctx.role,
         // A credentialled caller reports its grant. A caller that reaches a
         // context WITHOUT one was never scope-checked, so it has no scope set to
         // report — what it has is the reach `accessFor` renders on describe, and
@@ -1129,6 +1281,13 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         // source is what keeps them the same answer.
         scopes: grant ? [...expandScopes(grant)].sort() : [...reachAsScopes(accessFor(req))].sort(),
       });
+    }
+    const accountPath = ["/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"].some(
+      (p) => path === p || path.startsWith(`${p}/`),
+    );
+    if (accountPath) {
+      if (!multiUser) return err(404, "not_multi_user", "This app has no accounts: its authMode is none.");
+      return (await accountRoutes(req, path))!;
     }
     if (path === "/api/_a2app/context") {
       const authz = authorize(req, { scope: null, isWrite: false });

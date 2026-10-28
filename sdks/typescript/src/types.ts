@@ -6,11 +6,13 @@
  */
 import type { ProtocolType } from "@a2app/rules";
 
-export const PROTOCOL_VERSION = "0.1";
+export const PROTOCOL_VERSION = "0.2";
 
-/** Wire `protocol` values a 0.1 client accepts. Some adapters may still report
- *  "1.0"; it is an alias of "0.1" during the transition window. */
-export const ACCEPTED_PROTOCOLS = ["0.1", "1.0"] as const;
+/** Wire `protocol` values this client accepts. 0.2 added accounts and
+ *  delegated credentials (spec/v0_2/auth.md) without changing what a 0.1 app
+ *  serves, so a 0.1 app is still operated. Some adapters may still report "1.0";
+ *  it is an alias of "0.1" during the transition window. */
+export const ACCEPTED_PROTOCOLS = ["0.1", "0.2", "1.0"] as const;
 
 /** `GET /.well-known/a2app.json` and `GET /api/_a2app`. */
 export interface Identity {
@@ -21,6 +23,11 @@ export interface Identity {
   schemaVersion: string;
   serverNow: string;
   serverTzOffsetMinutes: number;
+  /** 0.2: "none" (one principal, `owner`) or "multi-user" (accounts). Absent
+   *  on a 0.1 app. */
+  authMode?: "none" | "multi-user";
+  /** 0.2: the path of the app's account page (sign in, approve an agent). */
+  accountUrl?: string;
   /** non-normative extension used by safe-evolve: "dev" | "live" */
   env?: string;
   /**
@@ -184,7 +191,15 @@ export interface Whoami {
   a2app: true;
   credentialId: string;
   agentName?: string | null;
+  /** who the caller acts for: `owner`, or an account id on a multi-user app */
   principal: string;
+  /** 0.2: the principal's display name */
+  principalName?: string | null;
+  /** 0.2: the principal's role; an owner sees every record */
+  role?: "owner" | "member";
+  /** 0.2: when the presented credential stops working (null: never / none) */
+  expiresAt?: string | null;
+  /** effective scopes: the grant intersected with what the principal may do now */
   scopes: string[];
 }
 

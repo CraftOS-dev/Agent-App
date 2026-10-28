@@ -6,11 +6,13 @@
   "systemPaths": [
     "manifest.json",
     "server.mjs",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "adapterPaths": [
     "server.mjs",
-    "a2app-update.js"
+    "a2app-update.js",
+    "a2app-account.html"
   ],
   "gate": [
     {

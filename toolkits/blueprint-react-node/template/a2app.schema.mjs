@@ -29,8 +29,20 @@
  * serve and keeps discovery bounded however large the app grows — an entity or
  * operation outside every module has no screen and cannot be reached by walking.
  *
+ * WHOSE RECORDS. `ownedBy` names a read-only string field the adapter fills
+ * with the caller's principal on create. On a multi-user app a member then
+ * lists, reads, changes and deletes only its own records (anyone else's answer
+ * 404), and the owner sees all; on a single-user app every record is the
+ * owner's. Operation runners get the caller as `ctx` ({ principal, role }) and
+ * hold themselves to the same rule — see `mine` below.
+ *
  * This starter models a to-do list. Replace it with your own entities.
  */
+
+/** The record if `ctx` may touch it: an owner may touch any task, a member
+ *  only its own. */
+const mine = (ctx, rec) => (rec && (ctx.role === "owner" || rec.owner === ctx.principal) ? rec : null);
+
 export const schema = {
   entities: {
     tasks: {
@@ -42,9 +54,11 @@ export const schema = {
         { name: "due", type: "string", max: 10, dayKey: true },
         { name: "notes", type: "string", max: 2000 },
         { name: "created", type: "datetime", readOnly: true },
+        { name: "owner", type: "string", readOnly: true },
       ],
+      ownedBy: "owner",
       seed: [
-        { id: "task_welcome", title: "Welcome — edit or delete me", status: "todo", created: "2026-01-01T00:00:00.000Z" },
+        { id: "task_welcome", title: "Welcome — edit or delete me", status: "todo", created: "2026-01-01T00:00:00.000Z", owner: "owner" },
       ],
     },
   },
@@ -92,22 +106,23 @@ export const schema = {
   // about.
   events: [{ type: "task.needs_triage" }],
 
-  // Runner signature: (args, ctx, { store, trigger }) => jsonable result. `store` is the
+  // Runner signature: (args, ctx, { store, trigger }) => jsonable result. `ctx` is
+  // who is calling ({ credentialId, agentName, principal, role }). `store` is the
   // SQLite-backed record store — list(entity) · get(entity, id) · put(entity,
   // record) · remove(entity, id). Writes are durable when the call returns;
   // there is no separate persist() step on this stack. `trigger(type, payload,
   // capability?)` emits a declared event (see `request-triage` below).
   operationRunners: {
-    "clear-done": (_args, _ctx, { store }) => {
+    "clear-done": (_args, ctx, { store }) => {
       let removed = 0;
       for (const rec of store.list("tasks")) {
-        if (rec.status === "done" && store.remove("tasks", rec.id)) removed++;
+        if (rec.status === "done" && mine(ctx, rec) && store.remove("tasks", rec.id)) removed++;
       }
       return { removed };
     },
-    "count-tasks": (_args, _ctx, { store }) => ({ count: store.list("tasks").length }),
-    "complete-task": (args, _ctx, { store }) => {
-      const task = store.get("tasks", args?.task);
+    "count-tasks": (_args, ctx, { store }) => ({ count: store.list("tasks").filter((rec) => mine(ctx, rec)).length }),
+    "complete-task": (args, ctx, { store }) => {
+      const task = mine(ctx, store.get("tasks", args?.task));
       if (!task) return { ok: false, reason: "no such task" };
       task.status = "done";
       store.put("tasks", task);
@@ -125,8 +140,8 @@ export const schema = {
     // read. Nothing here can widen what the agent may do: the payload is data
     // on the other side, and the capability names the kind of work, not a
     // command to run.
-    "request-triage": (args, _ctx, { store, trigger }) => {
-      const task = store.get("tasks", args?.task);
+    "request-triage": (args, ctx, { store, trigger }) => {
+      const task = mine(ctx, store.get("tasks", args?.task));
       if (!task) return { ok: false, reason: "no such task" };
       const { taskId } = trigger("task.needs_triage", { task: task.id }, "triage");
       return { ok: true, task: task.id, queued: taskId };

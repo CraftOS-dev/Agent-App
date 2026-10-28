@@ -100,7 +100,14 @@ export async function run(args: string[], app: string): Promise<number> {
     manifest.name = name;
     manifest.agentAppVersion = AGENT_APP_VERSION;
     manifest.adapterVersion = adapterVersion;
-    if (manifest.authMode === undefined) manifest.authMode = "none";
+    // `multi-user` gives the app accounts, sign-in and per-person records
+    // (spec/v0_2/auth.md); `none` is a personal tool with one principal. The
+    // manifest is system-owned, so this is the moment to choose.
+    const authMode = flag(args, "auth-mode") ?? manifest.authMode ?? "none";
+    if (authMode !== "none" && authMode !== "multi-user") {
+      throw new UsageError(`--auth-mode is "none" or "multi-user" (got "${String(authMode)}")`);
+    }
+    manifest.authMode = authMode;
     // Every app needs at least one module before it can declare an entity, so a
     // blueprint that ships none gets a single starter to rename. Seeding it here
     // rather than leaving the key absent means a freshly scaffolded app serves a

@@ -19,7 +19,7 @@
  * this split adds is taught at the moment it is needed rather than surfacing as
  * "Unknown command".
  */
-import { A2AppUnreachableError } from "@a2app/sdk";
+import { A2AppUnreachableError, PROTOCOL_VERSION } from "@a2app/sdk";
 import { EnvError, UsageError } from "./lib/project.js";
 import { ValuelessFlagError } from "./lib/args.js";
 import { log } from "./lib/log.js";
@@ -49,7 +49,7 @@ interface CommandMeta {
 
 const COMMANDS: Record<string, CommandMeta> = {
   // agent-app — the framework: build, evolve, and manage Agent Apps.
-  scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app", scope: "app" },
+  scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app", scope: "app", args: "[--blueprint <id>] [--name <name>] [--port <n>] [--auth-mode none|multi-user]" },
   import: { summary: "Import an existing app: fresh identity + port, strip credentials, re-vendor from a trusted toolkit", surface: "agent-app", scope: "app" },
   validate: { summary: "Run the validation + security gate", surface: "agent-app", scope: "app" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
@@ -67,6 +67,8 @@ const COMMANDS: Record<string, CommandMeta> = {
   promote: { summary: "Require a fresh gate pass, take the pre-promote backup, apply the new migrations to live, destroy the dev instance", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },
   restore: { summary: "Restore a backup (captures current state, rolls back on failure)", surface: "agent-app", scope: "app", args: "[<backup-id>]" },
+  owner: { summary: "Print a one-time setup link for an owner account (multi-user apps): how the first owner is created", surface: "agent-app", scope: "app" },
+  invite: { summary: "Print a one-time setup link for a new account (multi-user apps)", surface: "agent-app", scope: "app", args: "[--role member|owner]" },
   forget: { summary: "Drop an app from the registry, releasing its port (never touches files)", surface: "agent-app", scope: "app", args: "[--force]" },
   remove: { summary: "Delete an app's files and drop it from the registry (data backed up first; needs --yes)", surface: "agent-app", scope: "app", args: "[--yes] [--force]" },
   // agent-app registry commands: the machine's set of apps, not one app.
@@ -184,7 +186,7 @@ export async function main(surface: Surface): Promise<number> {
     return 0;
   }
   if (first === "version" || first === "--version" || first === "-v") {
-    log.raw(JSON.stringify({ [surface]: VERSION, protocol: "0.1" }));
+    log.raw(JSON.stringify({ [surface]: VERSION, protocol: PROTOCOL_VERSION }));
     return 0;
   }
 

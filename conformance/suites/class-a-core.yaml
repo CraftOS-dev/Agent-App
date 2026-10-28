@@ -13,8 +13,8 @@ checks:
       status: 200
       match:
         a2app: true
-        protocol: "0.1"
-      has: [app.id, schemaVersion, serverNow, serverTzOffsetMinutes]
+        protocol: "0.2"
+      has: [app.id, schemaVersion, serverNow, serverTzOffsetMinutes, authMode, accountUrl]
 
   - name: well-known identity is the same document
     request: { method: GET, path: /.well-known/a2app.json }

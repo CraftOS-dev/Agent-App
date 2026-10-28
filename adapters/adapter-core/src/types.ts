@@ -30,6 +30,14 @@ export interface EntityDef {
   /** true if the entity is an auth/accounts collection (describe `auth: true`) */
   auth?: boolean;
   /**
+   * The field that records which principal owns each record (spec/v0_2
+   * auth.md §5). It must be a declared `string` field marked `readOnly`: the
+   * adapter sets it on create, and on a multi-user app a member lists, reads,
+   * updates and deletes only records it owns — anyone else's answers 404. The
+   * owner sees every record.
+   */
+  ownedBy?: string;
+  /**
    * Extra body keys accepted on a write without being declared fields
    * (e.g. `password`/`passwordConfirm` on an auth signup). Passed to the guard's
    * allow-list so they are neither rejected as unknown nor validated as fields.
@@ -45,6 +53,13 @@ export interface ListQuery {
   sort?: string;
   page?: number;
   perPage?: number;
+  /**
+   * Field = value constraints the binding applies before sorting and paging,
+   * alongside `filter`. The adapter uses it to show a member only the records
+   * it owns ({@link EntityDef.ownedBy}); a binding that ignored it would leak
+   * other people's records and miscount pages.
+   */
+  where?: Record<string, string>;
 }
 
 export interface ListResult {
@@ -104,7 +119,11 @@ export interface OperationDecl {
 export interface CallContext {
   credentialId: string;
   agentName: string | null;
+  /** who the call acts for: `owner`, or an account id on a multi-user app */
   principal: string;
+  /** the principal's role. An `owner` sees every record; a `member` only the
+   *  records it owns — a runner applies the same rule to records it touches. */
+  role: "owner" | "member";
 }
 
 /* ---------------------------------------------------------------- binding */
@@ -173,6 +192,9 @@ export interface Grant {
   /** `data:<entity>:read` · `data:<entity>:write` · `op:<name>`, or `*` for the
    *  v1 all-access local default (expanded to concrete scopes in whoami). */
   scopes: string[];
+  /** The app's admin credential (seeded from its `.agent-token`): it may manage
+   *  accounts and credentials. Seeded grants are admin. */
+  admin?: boolean;
 }
 
 /* ---------------------------------------------------------------- events */

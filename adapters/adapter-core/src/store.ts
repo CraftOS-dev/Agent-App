@@ -77,8 +77,18 @@ export interface StoredEvent {
   createdAt: string;
 }
 
+/** The keyed tables the auth layer owns (spec/v0_2/auth.md): accounts,
+ *  sessions, invites and device codes. Rows are keyed by id or by the hash of
+ *  the secret that finds them; no secret is ever a key or a value. */
+export type AuthTable = "users" | "sessions" | "invites" | "devices";
+
 /** The pluggable state contract. */
 export interface StateStore {
+  row<T>(table: AuthTable, key: string): T | null;
+  putRow<T>(table: AuthTable, key: string, row: T): void;
+  deleteRow(table: AuthTable, key: string): void;
+  rows<T>(table: AuthTable): Array<[string, T]>;
+
   grantByToken(token: string): Grant | null;
   grantByCredentialId(id: string): Grant | null;
   putGrant(grant: Grant): void;
@@ -131,6 +141,7 @@ interface Snapshot {
   tasks: StoredTask[];
   dedup: Array<[string, string]>;
   audit: AuditEntry[];
+  tables?: Partial<Record<AuthTable, Array<[string, unknown]>>>;
 }
 
 export class InMemoryStateStore implements StateStore {
@@ -143,6 +154,7 @@ export class InMemoryStateStore implements StateStore {
   protected tasks = new Map<string, StoredTask>();
   protected dedup = new Map<string, string>();
   protected audit: AuditEntry[] = [];
+  protected tables = new Map<AuthTable, Map<string, unknown>>();
   protected readonly app: string;
   protected readonly clock: () => number;
 
@@ -165,6 +177,7 @@ export class InMemoryStateStore implements StateStore {
       tasks: [...this.tasks.values()],
       dedup: [...this.dedup.entries()],
       audit: this.audit,
+      tables: Object.fromEntries([...this.tables].map(([name, t]) => [name, [...t.entries()]])),
     };
   }
 
@@ -180,6 +193,33 @@ export class InMemoryStateStore implements StateStore {
     for (const t of s.tasks ?? []) this.tasks.set(t.id, t);
     this.dedup = new Map(s.dedup ?? []);
     this.audit = s.audit ?? [];
+    for (const [name, entries] of Object.entries(s.tables ?? {})) {
+      this.tables.set(name as AuthTable, new Map(entries ?? []));
+    }
+  }
+
+  /* ---------------------------------------------------------- auth rows */
+
+  private table(name: AuthTable): Map<string, unknown> {
+    let t = this.tables.get(name);
+    if (!t) {
+      t = new Map();
+      this.tables.set(name, t);
+    }
+    return t;
+  }
+  row<T>(table: AuthTable, key: string): T | null {
+    return (this.table(table).get(key) as T | undefined) ?? null;
+  }
+  putRow<T>(table: AuthTable, key: string, row: T): void {
+    this.table(table).set(key, row);
+    this.onChange();
+  }
+  deleteRow(table: AuthTable, key: string): void {
+    if (this.table(table).delete(key)) this.onChange();
+  }
+  rows<T>(table: AuthTable): Array<[string, T]> {
+    return [...this.table(table).entries()] as Array<[string, T]>;
   }
 
   /* -------------------------------------------------------------- grants */

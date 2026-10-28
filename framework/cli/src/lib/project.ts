@@ -191,6 +191,32 @@ async function principalToken(project: Project, baseUrl: string): Promise<string
   }
 }
 
+/**
+ * A client for the LIVE app, holding its admin credential (`.agent-token`).
+ *
+ * For the framework's own administration — invites, credentials — which act
+ * on the real app, never on a dev candidate. The port is verified to answer as
+ * THIS app before the admin token is sent, so a port that has since been taken
+ * by another process never receives it.
+ */
+export async function adminClient(project: Project): Promise<A2AppClient> {
+  const token = readAgentToken(project.dir);
+  if (token === null) {
+    throw new UsageError(`${project.dir} has no .agent-token yet: serve the app once (agent-app <dir> serve) to create it.`);
+  }
+  const answering = await identifyApp(appPort(project.manifest));
+  if (answering === null) {
+    throw new UsageError(`${project.manifest.name ?? project.dir} is not running. Start it: agent-app <dir> serve`);
+  }
+  if (answering !== project.manifest.id) {
+    throw new UsageError(
+      `${project.baseUrl} answers as app "${answering}", not ${project.manifest.id}: another app holds this port. ` +
+        `Nothing was sent to it.`,
+    );
+  }
+  return new A2AppClient({ baseUrl: project.baseUrl, token, agentName: "agent-app" });
+}
+
 /** A usage error maps to CLI exit code 2. */
 export class UsageError extends Error {
   constructor(message: string) {

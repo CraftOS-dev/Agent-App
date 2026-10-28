@@ -157,7 +157,7 @@ async function status(args: string[], app: string, project: Project): Promise<nu
   if (selection.profile === null) log.warn(selection.why);
   else if (mode === null) explainNoRoute(app, ladder);
   else if (mode === "subscribe") log.info(`${selection.profile.id} subscribes — start it to be shown the listen command`);
-  else log.info(`bridge start would run ${selection.profile.id} via ${mode} (${selection.why})`);
+  else if (running === null) log.info(`bridge start would run ${selection.profile.id} via ${mode} (${selection.why})`);
   const waiting = agentWork.tasksWaiting;
   if (waiting === null) {
     const down = agentWork.queueError === "the app is not answering";

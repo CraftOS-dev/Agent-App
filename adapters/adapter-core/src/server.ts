@@ -38,6 +38,7 @@ import { RateLimiter, DEFAULT_RATE_LIMITS, type RouteClass } from "./rate.js";
 import { hostnameOf, isLoopbackName } from "./network.js";
 import { ACCOUNT_URL, createAccountRoutes, type Manager } from "./accounts.js";
 import { createCredentialRoutes } from "./credentials.js";
+import { createDeviceRoutes } from "./device.js";
 import { hashSecret, parseCookies, type AccountRow, type SessionRow } from "./auth.js";
 import {
   OperationError,
@@ -727,6 +728,17 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     declaredScopes: allScopes,
   });
 
+  const deviceRoutes = createDeviceRoutes({
+    store,
+    now,
+    ok,
+    err,
+    managerOf,
+    principalInfo,
+    declaredScopes: allScopes,
+    publicOrigin,
+  });
+
   /* ------------------------------------------------------------ ownership */
 
   /** Whether `ctx` sees only the records it owns in `def` (spec §5). */
@@ -1362,6 +1374,14 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         // disagree.
         scopes: caller.held === "anonymous" ? [...reachAsScopes(accessFor(req))].sort() : [...caller.held].sort(),
       });
+    }
+    if (path.startsWith("/api/_a2app/auth/")) {
+      // Unauthenticated by design (an agent starts here with nothing), so it is
+      // metered like an operation before anything is looked up.
+      const limited = rateGate(req, "ops");
+      if (limited) return limited;
+      const reply = deviceRoutes(req, path);
+      if (reply) return reply;
     }
     if (path === "/api/_a2app/credentials" || path.startsWith("/api/_a2app/credentials/")) {
       return credentialRoutes(req, path)!;

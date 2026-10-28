@@ -49,13 +49,15 @@ const TRANSIENT = new Set(["EPERM", "EACCES", "EBUSY"]);
  * on it — including a reader that is only listing apps. A single attempt makes
  * concurrent commands fail sporadically and silently lose registry entries.
  */
-export function writeFileAtomic(file: string, contents: string, attempts = 12): void {
+/** `mode` applies from the moment the file exists (0o600 for a file holding
+ *  a secret), never after a world-readable window. */
+export function writeFileAtomic(file: string, contents: string, attempts = 12, mode = 0o666): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   // Write + fsync the temp file before renaming, so the bytes are on disk when
   // the rename publishes them: a crash right after the rename cannot then leave
   // a present-but-empty file (the failure mode of writeFileSync + rename).
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", mode);
   try {
     writeSync(fd, contents);
     fsyncSync(fd);

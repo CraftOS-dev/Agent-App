@@ -150,7 +150,7 @@ async function noIdentity(target: RemoteTarget): Promise<UsageError> {
  *     that matters here is operating a different app than the one intended,
  *     which looks exactly like success until it does not.
  */
-async function verifyRemote(client: A2AppClient, target: RemoteTarget): Promise<void> {
+export async function verifyRemote(client: A2AppClient, target: RemoteTarget): Promise<void> {
   const id = await client.identity();
   if (id === null) throw await noIdentity(target);
   if (!A2AppClient.protocolSupported(id.protocol)) {

@@ -88,11 +88,18 @@ const COMMANDS: Record<string, CommandMeta> = {
   context: { summary: "Show what the user is currently viewing", surface: "a2app", scope: "app" },
   tasks: { summary: "Poll/claim/progress/complete the app→agent task queue", surface: "a2app", scope: "app" },
   events: { summary: "Poll the app's event log", surface: "a2app", scope: "app" },
+  login: {
+    summary: "Ask the person to approve this agent in the app; stores the credential it is given (never printed)",
+    surface: "a2app",
+    scope: "app",
+    args: "[--scopes a,b] [--expires 30d] [--name <agent>]",
+  },
+  logout: { summary: "Revoke and forget this agent's stored credential for the app", surface: "a2app", scope: "app" },
 };
 
 /**
  * The first path segments `a2app` keeps for the protocol surface. Everything
- * else in that position is a module name, which is why these six are forbidden
+ * else in that position is a module name, which is why these eight are forbidden
  * as module names (framework spec 5.1) — a module called `data` would be
  * permanently unreachable, and the build gate rejects one.
  *
@@ -100,7 +107,7 @@ const COMMANDS: Record<string, CommandMeta> = {
  * gate checks against; this copy exists so the dispatcher does not have to load
  * the rules package to route a command.
  */
-const RESERVED_SEGMENTS = new Set(["data", "identity", "whoami", "context", "tasks", "events"]);
+const RESERVED_SEGMENTS = new Set(["data", "identity", "whoami", "context", "tasks", "events", "login", "logout"]);
 
 function isReservedSegment(segment: string): boolean {
   return RESERVED_SEGMENTS.has(segment);

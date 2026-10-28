@@ -45,7 +45,7 @@ export const DESCRIBE_BUDGET_CHARS = 2000;
  * resolves the first segment as a module unless it is reserved, so a module
  * named `data` would be permanently unreachable.
  */
-export const RESERVED_PATH_SEGMENTS = ["data", "identity", "whoami", "context", "tasks", "events"] as const;
+export const RESERVED_PATH_SEGMENTS = ["data", "identity", "whoami", "context", "tasks", "events", "login", "logout"] as const;
 
 /** Module names are lower-kebab and never a reserved segment. */
 const MODULE_NAME = /^[a-z][a-z0-9-]{0,31}$/;

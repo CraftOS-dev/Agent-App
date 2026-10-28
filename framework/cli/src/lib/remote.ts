@@ -35,6 +35,11 @@ export interface StoredCredential {
   token: string;
   /** optional: the acting user's own auth token on a multi-user app */
   authToken?: string;
+  /** set by `a2app <app> login`: which credential this is, who it acts for,
+   *  and when it stops working */
+  credentialId?: string;
+  principal?: string;
+  expiresAt?: string | null;
 }
 
 export interface CredentialStore {
@@ -131,6 +136,36 @@ export function credentialFor(
   const match = (appId !== null ? entries.find((c) => c.appId === appId) : undefined) ?? entries.find((c) => !c.appId);
   if (!match) return { token: null, authToken: envAuth?.trim() || null };
   return { token: match.token, authToken: match.authToken ?? envAuth?.trim() ?? null };
+}
+
+/**
+ * Store (or replace) the credential for one app, under the home lock. The file
+ * holds bearer tokens, so it is written 0600 from the start.
+ */
+export async function saveCredential(entry: StoredCredential): Promise<void> {
+  await withHomeLock(() => {
+    const kept = readCredentials().filter((c) => !(c.origin === entry.origin && c.appId === entry.appId));
+    writeCredentials([...kept, entry]);
+  });
+}
+
+/** Drop the stored credential for one app; returns what was dropped. */
+export async function forgetCredential(origin: string, appId: string): Promise<StoredCredential | null> {
+  return withHomeLock(() => {
+    const all = readCredentials();
+    const gone = all.find((c) => c.origin === origin && c.appId === appId) ?? null;
+    if (gone) writeCredentials(all.filter((c) => c !== gone));
+    return gone;
+  });
+}
+
+function writeCredentials(credentials: StoredCredential[]): void {
+  writeFileAtomic(
+    credentialsPath(),
+    JSON.stringify({ version: CREDENTIALS_VERSION, credentials } satisfies CredentialStore, null, 2) + "\n",
+    undefined,
+    0o600,
+  );
 }
 
 /* ------------------------------------------------------------------- pins */

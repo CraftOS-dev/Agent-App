@@ -352,6 +352,79 @@
         show(header(me ? "Your account" : "Account"), ...sections);
       }
 
+      /** An agent asked to act for the person (a2app <app> login): show what
+       *  it asked for, and let them approve — narrowed to reading if they like —
+       *  or decline. */
+      async function approve(code) {
+        if (app.authMode === "multi-user" && !(await api("GET", "/api/_a2app/session")).ok) {
+          location.hash = `#sign-in?next=${encodeURIComponent(`/_a2app/account#approve/${code || ""}`)}`;
+          return;
+        }
+        if (!code) {
+          show(
+            header("Approve an agent"),
+            el("section", null,
+              el("p", null, "Enter the code the agent showed you."),
+              form([field("Code", { name: "code", required: true, autofocus: true, autocomplete: "off", placeholder: "XXXX-XXXX" })], "Continue", async (data) => {
+                location.hash = `#approve/${encodeURIComponent(String(data.get("code")).trim())}`;
+              }),
+            ),
+          );
+          return;
+        }
+        const r = await api("GET", `/api/_a2app/auth/device/${encodeURIComponent(code)}`);
+        if (!r.ok) {
+          show(header("Approve an agent"), el("section", null, el("p", null, r.json.message || "No request with that code is waiting."),
+            el("p", { class: "muted small" }, "Ask the agent to start again (a2app <app> login), then use the new code.")));
+          return;
+        }
+        const ask = r.json;
+        const askedAll = ask.scopes.includes("*");
+        const days = Math.round(ask.expiresIn / 86400);
+        const decide = async (approve, scopes) => {
+          const d = await api("POST", `/api/_a2app/auth/device/${encodeURIComponent(ask.userCode)}`, scopes ? { approve, scopes } : { approve });
+          if (!d.ok) return d.json.message || "Could not record your decision.";
+          show(header("Approve an agent"), el("section", null,
+            el("p", null, approve ? `Approved. ${ask.agentName || "The agent"} can now use ${app.name} as you; it continues on its own.` : "Declined. The agent gets nothing."),
+            el("p", { class: "muted small" }, "You can close this page. Agents acting for you are listed on your account page, where you can revoke them."),
+          ));
+          return null;
+        };
+        const error = el("p", { class: "error", role: "alert" });
+        const readOnly = el("input", { type: "checkbox", name: "readOnly" });
+        show(
+          header("Approve an agent"),
+          el("section", null,
+            el("p", null, el("strong", null, ask.agentName || "An agent"), ` wants to use ${app.name} as you.`),
+            el("p", { class: "small" }, "Code ", el("span", { class: "code" }, ask.userCode), " — check it matches what the agent shows."),
+            el("p", { class: "small" }, `It asks to: ${askedAll ? "do everything you can do" : ask.scopes.join(", ")}, for ${days >= 1 ? `${days} day${days === 1 ? "" : "s"}` : `${Math.round(ask.expiresIn / 60)} minutes`}.`),
+            el("label", { class: "row small" }, readOnly, "Only let it read"),
+            el("p", { class: "muted small" }, "It can never do more than you can, and it stops if your account is deactivated."),
+            el("div", { class: "row" },
+              el("button", {
+                class: "primary", type: "button",
+                onclick: async () => {
+                  let scopes;
+                  if (readOnly.checked) {
+                    const who = await api("GET", "/api/_a2app/whoami");
+                    const reads = (who.json.scopes || []).filter((sc) => sc.endsWith(":read"));
+                    scopes = askedAll ? reads : ask.scopes.filter((sc) => sc.endsWith(":read"));
+                    if (scopes.length === 0) {
+                      error.textContent = "There is nothing to read that it asked for.";
+                      return;
+                    }
+                  }
+                  const message = await decide(true, scopes);
+                  if (message) error.textContent = message;
+                },
+              }, "Approve"),
+              el("button", { type: "button", onclick: async () => { const message = await decide(false); if (message) error.textContent = message; } }, "Decline"),
+            ),
+            error,
+          ),
+        );
+      }
+
       /* ------------------------------------------------------------- router */
 
       async function route() {
@@ -361,6 +434,7 @@
         const [screen, arg] = path.split("/");
         if (screen === "sign-in") return signIn(params);
         if (screen === "setup" && arg) return setup(arg);
+        if (screen === "approve") return approve(arg ? decodeURIComponent(arg) : "");
         return home();
       }
 

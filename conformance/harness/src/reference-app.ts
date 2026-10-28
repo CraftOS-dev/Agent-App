@@ -12,7 +12,7 @@ import {
   createA2AppServer,
   MemoryBinding,
   type A2App,
-  type Grant,
+  type SeedCredential,
 } from "@a2app/adapter-core";
 import type { NormalizedField } from "@a2app/rules";
 
@@ -33,7 +33,7 @@ const cardFields: NormalizedField[] = [
 export const FULL_TOKEN = "a2app_conformance_full";
 export const READONLY_TOKEN = "a2app_conformance_readonly";
 
-const grants: Grant[] = [
+const grants: SeedCredential[] = [
   { token: FULL_TOKEN, credentialId: "cred_full", agentName: "conformance", principal: "owner", scopes: ["*"] },
   {
     token: READONLY_TOKEN,

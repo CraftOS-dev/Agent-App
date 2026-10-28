@@ -35,6 +35,9 @@ export const AGENT_TEXT = {
    * to something its callers can actually use.
    */
   credentialHint: "Read the app's .agent-token file (mode 0600) in the project directory.",
+  /** Said to an agent whose credential stopped working (revoked, expired, or
+   *  its person deactivated): a new one is the person's to give. */
+  renewHint: "Ask the person this agent acts for to approve it again (a2app <app> login), or the app's owner for a new credential.",
 } as const;
 
 /**

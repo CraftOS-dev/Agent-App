@@ -89,10 +89,11 @@ export interface StateStore {
   deleteRow(table: AuthTable, key: string): void;
   rows<T>(table: AuthTable): Array<[string, T]>;
 
-  grantByToken(token: string): Grant | null;
-  grantByCredentialId(id: string): Grant | null;
+  grantByTokenHash(tokenHash: string): Grant | null;
+  grantById(credentialId: string): Grant | null;
   putGrant(grant: Grant): void;
-  revoke(credentialId: string): void;
+  deleteGrant(credentialId: string): void;
+  listGrants(): Grant[];
 
   idempotencyGet(entity: string, key: string): IdempotencyRecord | null;
   idempotencyPut(entity: string, key: string, recordId: string): void;
@@ -145,8 +146,9 @@ interface Snapshot {
 }
 
 export class InMemoryStateStore implements StateStore {
-  protected grantsByToken = new Map<string, Grant>();
   protected grantsById = new Map<string, Grant>();
+  /** tokenHash → credentialId */
+  protected grantTokens = new Map<string, string>();
   protected idem = new Map<string, IdempotencyRecord>();
   protected approvals = new Map<string, number>();
   protected events: StoredEvent[] = [];
@@ -183,8 +185,12 @@ export class InMemoryStateStore implements StateStore {
 
   protected hydrate(s: Snapshot): void {
     for (const g of s.grants ?? []) {
-      this.grantsByToken.set(g.token, g);
+      // A snapshot from before 0.2 held seeded grants with their plaintext
+      // token. They are not carried over: the host seeds them again at boot,
+      // hashed, and no token is ever written back to disk.
+      if (typeof g.tokenHash !== "string") continue;
       this.grantsById.set(g.credentialId, g);
+      this.grantTokens.set(g.tokenHash, g.credentialId);
     }
     this.idem = new Map(s.idem ?? []);
     this.approvals = new Map(s.approvals ?? []);
@@ -224,23 +230,29 @@ export class InMemoryStateStore implements StateStore {
 
   /* -------------------------------------------------------------- grants */
 
-  grantByToken(token: string): Grant | null {
-    return this.grantsByToken.get(token) ?? null;
+  grantByTokenHash(tokenHash: string): Grant | null {
+    const id = this.grantTokens.get(tokenHash);
+    return id === undefined ? null : (this.grantsById.get(id) ?? null);
   }
-  grantByCredentialId(cid: string): Grant | null {
-    return this.grantsById.get(cid) ?? null;
+  grantById(credentialId: string): Grant | null {
+    return this.grantsById.get(credentialId) ?? null;
   }
   putGrant(grant: Grant): void {
-    this.grantsByToken.set(grant.token, grant);
+    const previous = this.grantsById.get(grant.credentialId);
+    if (previous && previous.tokenHash !== grant.tokenHash) this.grantTokens.delete(previous.tokenHash);
     this.grantsById.set(grant.credentialId, grant);
+    this.grantTokens.set(grant.tokenHash, grant.credentialId);
     this.onChange();
   }
-  revoke(credentialId: string): void {
+  deleteGrant(credentialId: string): void {
     const g = this.grantsById.get(credentialId);
     if (!g) return;
     this.grantsById.delete(credentialId);
-    this.grantsByToken.delete(g.token);
+    this.grantTokens.delete(g.tokenHash);
     this.onChange();
+  }
+  listGrants(): Grant[] {
+    return [...this.grantsById.values()];
   }
 
   /* --------------------------------------------------------- idempotency */

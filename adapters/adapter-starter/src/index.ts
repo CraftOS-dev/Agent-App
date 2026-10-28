@@ -12,7 +12,7 @@
  * real stack, replace the four record methods and `entities()` with calls into
  * your database; keep everything else.
  */
-import { createA2App, createA2AppServer, type Binding, type EntityDef, type Grant, type StoredRecord } from "@a2app/adapter-core";
+import { createA2App, createA2AppServer, type Binding, type EntityDef, type SeedCredential, type StoredRecord } from "@a2app/adapter-core";
 import type { NormalizedField } from "@a2app/rules";
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -71,7 +71,7 @@ export class NotesBinding implements Binding {
 
 /** 3) Mount and run. In production the credential comes from your launch flow. */
 export function startNotesApp(port = 8091, token = "a2app_starter_token"): ReturnType<typeof createA2AppServer> {
-  const grant: Grant = { token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] };
+  const grant: SeedCredential = { token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"], admin: true };
   const app = createA2App(new NotesBinding(), {
     credentials: [grant],
     modules: [{ name: "notes", summary: "what you wrote down" }],

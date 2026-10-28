@@ -183,18 +183,49 @@ export class OperationError extends Error {
 
 /* -------------------------------------------------------- IAM / credentials */
 
-/** A grant: one credential, one principal, a scope set. */
-export interface Grant {
+/** A credential as a host seeds it at boot, from files of its own (the app's
+ *  `.agent-token`). The token is hashed on the way in and never stored. */
+export interface SeedCredential {
   token: string;
   credentialId: string;
   agentName: string | null;
   principal: string;
-  /** `data:<entity>:read` · `data:<entity>:write` · `op:<name>`, or `*` for the
-   *  v1 all-access local default (expanded to concrete scopes in whoami). */
+  /** `data:<entity>:read` · `data:<entity>:write` · `op:<name>`, or `*` */
   scopes: string[];
-  /** The app's admin credential (seeded from its `.agent-token`): it may manage
-   *  accounts and credentials. Seeded grants are admin. */
+  /** The app's admin credential (spec/v0_2/auth.md §2.3): it may manage
+   *  accounts and credentials. Only the app's own `.agent-token` should be. */
   admin?: boolean;
+}
+
+/**
+ * A stored credential (spec/v0_2/auth.md §2.1): one bearer token, held only as
+ * its SHA-256, bound to one principal with a scope set. Every request it makes
+ * is further limited to what that principal may do at that moment.
+ */
+export interface Grant {
+  credentialId: string;
+  /** hex SHA-256 of the token */
+  tokenHash: string;
+  principal: string;
+  agentName: string | null;
+  /** as granted; `*` means every scope the app declares */
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  /** set when revoked; the row is kept so the token is told so */
+  revokedAt: string | null;
+  /** a task credential: dead once that task is completed, failed or canceled */
+  task: string | null;
+  admin: boolean;
+}
+
+/** Who a principal is: `owner`, or an account on a multi-user app. */
+export interface PrincipalInfo {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  active: boolean;
 }
 
 /* ---------------------------------------------------------------- events */
@@ -230,8 +261,15 @@ export interface A2AppReply {
 /* ---------------------------------------------------------------- config */
 
 export interface A2AppConfig {
-  /** seeded grants; the first is the primary local agent. */
-  credentials?: Grant[];
+  /** credentials seeded at boot; the first is the primary local agent. */
+  credentials?: SeedCredential[];
+  /**
+   * What a principal may do (spec/v0_2/auth.md §3), as scopes; `*` is every
+   * scope. Evaluated on every request: a credential's effective reach is its
+   * own scopes intersected with this. Default: `*` for every active principal
+   * (record ownership still applies). An inactive principal has none.
+   */
+  permissionsOf?: (principal: PrincipalInfo) => string[];
   /** the adapter-owned state store. When omitted, the core builds a durable
    *  {@link import("./store.js").FileStateStore} if `storePath` is given, else an
    *  in-memory store (fast, but non-conforming for idempotency across a restart).

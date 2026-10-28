@@ -36,6 +36,14 @@
  * owner's. Operation runners get the caller as `ctx` ({ principal, role }) and
  * hold themselves to the same rule — see `mine` below.
  *
+ * WHAT EACH PERSON MAY DO. On a multi-user app, an optional
+ * `permissionsOf(principal)` returns the scopes a person may use
+ * (`data:<entity>:read|write`, `op:<name>`, `*`); every agent acting for them
+ * is limited to the same, on every request. Without it everyone active may
+ * use everything (their records stay their own):
+ *
+ *     permissionsOf: (p) => (p.role === "owner" ? ["*"] : ["data:tasks:read", "data:tasks:write", "op:request-triage"]),
+ *
  * This starter models a to-do list. Replace it with your own entities.
  */
 

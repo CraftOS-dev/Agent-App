@@ -36,7 +36,7 @@ function makeApp({ authMode = "multi-user", publicUrl } = {}) {
     {
       modules: [{ name: "desk", summary: "notes" }],
       allowedOrigins: [ORIGIN],
-      credentials: [{ token: ADMIN, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
+      credentials: [{ token: ADMIN, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"], admin: true }],
       ...(publicUrl ? { publicUrl } : {}),
     },
   );

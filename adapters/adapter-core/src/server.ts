@@ -49,6 +49,7 @@ import {
   type CallContext,
   type Grant,
   type OperationDecl,
+  type PrincipalInfo,
   type StoredRecord,
 } from "./types.js";
 
@@ -63,6 +64,12 @@ const REFERENCE_SCAN_LIMIT = 10;
 /** Hard stop on paging, so a binding that ignores `page` cannot spin forever. */
 const REFERENCE_SCAN_MAX_PAGES = 200;
 const TASK_TIMEOUT_MS = 60_000;
+/** How long a revoked or expired credential is remembered (spec §2.1). */
+const GRANT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** `lastUsedAt` is written at most this often, so use does not mean a disk
+ *  write per request. */
+const LAST_USED_RESOLUTION_MS = 60_000;
+const TERMINAL_TASK = new Set(["completed", "failed", "canceled"]);
 const TASK_MAX_DELIVERIES = 5;
 const DESCRIBE_PREFIX = "/api/_a2app/describe/";
 /** A miss is usually a guessed route, so it names the routes that answer. */
@@ -133,10 +140,30 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   const audit = config.audit ?? ((e: AuditEntry) => store.appendAudit(e));
   const limiter = new RateLimiter({ ...DEFAULT_RATE_LIMITS, ...(config.rateLimits ?? {}) }, () => now().getTime());
 
-  // Seed grants (the platform issues the default local grant at launch). A
-  // seeded grant comes from the app's own files, so it is the admin
-  // credential (spec/v0_2/auth.md §2.3).
-  for (const g of config.credentials ?? []) store.putGrant({ ...g, admin: true });
+  // Seed credentials from the host's own files (the app's .agent-token), hashed
+  // on the way in. Re-seeding at every boot follows a rotated token file.
+  for (const seed of config.credentials ?? []) {
+    const existing = store.grantById(seed.credentialId);
+    store.putGrant({
+      credentialId: seed.credentialId,
+      tokenHash: hashSecret(seed.token),
+      principal: seed.principal,
+      agentName: seed.agentName,
+      scopes: seed.scopes,
+      createdAt: existing?.createdAt ?? now().toISOString(),
+      expiresAt: null,
+      lastUsedAt: existing?.lastUsedAt ?? null,
+      revokedAt: null,
+      task: null,
+      admin: seed.admin === true,
+    });
+  }
+  // Revoked and expired credentials are kept a while so their tokens are told
+  // why they stopped; after that they are gone.
+  for (const g of store.listGrants()) {
+    const ended = g.revokedAt ?? (g.expiresAt && Date.parse(g.expiresAt) <= now().getTime() ? g.expiresAt : null);
+    if (ended && now().getTime() - Date.parse(ended) > GRANT_RETENTION_MS) store.deleteGrant(g.credentialId);
+  }
 
   /* ------------------------------------------- data version + viewers */
 
@@ -436,9 +463,18 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
   /* --------------------------------------------------------- IAM helpers */
 
-  function expandScopes(grant: Grant): Set<string> {
-    if (!grant.scopes.includes("*")) return new Set(grant.scopes);
-    return allScopes();
+  function expandScopes(scopes: string[]): Set<string> {
+    return scopes.includes("*") ? allScopes() : new Set(scopes);
+  }
+
+  /** What a principal may do now (spec §3), or null when it may do nothing. */
+  function permissions(info: PrincipalInfo | null): Set<string> | null {
+    if (!info || !info.active) return null;
+    return expandScopes(config.permissionsOf ? config.permissionsOf(info) : ["*"]);
+  }
+
+  function intersect(a: Set<string>, b: Set<string>): Set<string> {
+    return new Set([...a].filter((s) => b.has(s)));
   }
 
   /** Every scope the app declares: what `*` means. */
@@ -452,10 +488,39 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     return scopes;
   }
 
-  function credentialOf(req: A2AppRequest): Grant | null {
+  /**
+   * The credential this request presents, checked in the order spec §9 gives:
+   * unknown, revoked (or its task is over), expired, then whether the person it
+   * acts for may still act. Returns the grant with its effective reach — its
+   * own scopes intersected with the principal's — or the refusal; null when no
+   * credential was presented.
+   */
+  function credentialOf(
+    req: A2AppRequest,
+  ): { grant: Grant; info: PrincipalInfo; held: Set<string> } | { reply: A2AppReply } | null {
     const token = req.headers["x-a2app-token"] ?? req.headers["x-lui-token"];
     if (!token) return null;
-    return store.grantByToken(token);
+    const grant = store.grantByTokenHash(hashSecret(token));
+    const t = now().getTime();
+    if (!grant) {
+      return { reply: err(401, "credential_invalid", "This credential is not one this app issued.", { how: AGENT_TEXT.renewHint }) };
+    }
+    const task = grant.task === null ? null : store.getTask(grant.task);
+    if (grant.revokedAt !== null || (grant.task !== null && (!task || TERMINAL_TASK.has(task.status)))) {
+      return { reply: err(401, "credential_revoked", "This credential was revoked.", { how: AGENT_TEXT.renewHint }) };
+    }
+    if (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= t) {
+      return { reply: err(401, "token_expired", `This credential expired at ${grant.expiresAt}.`, { how: AGENT_TEXT.renewHint }) };
+    }
+    const info = principalInfo(grant.principal);
+    const allowed = permissions(info);
+    if (!info || !allowed) {
+      return { reply: err(401, "principal_inactive", "The person this credential acts for is no longer active.") };
+    }
+    if (grant.lastUsedAt === null || t - Date.parse(grant.lastUsedAt) >= LAST_USED_RESOLUTION_MS) {
+      store.putGrant({ ...grant, lastUsedAt: new Date(t).toISOString() });
+    }
+    return { grant, info, held: intersect(expandScopes(grant.scopes), allowed) };
   }
 
   /**
@@ -495,10 +560,10 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
 
   /** The app's administrator: the admin credential, and the only principal of
    *  an `authMode: none` app. */
-  const OWNER = { id: "owner", name: "Owner", role: "owner" as const, active: true };
+  const OWNER: PrincipalInfo = { id: "owner", name: "Owner", role: "owner", active: true };
 
   /** Who a principal is, or null when it is unknown. */
-  function principalInfo(id: string): { id: string; name: string; role: "owner" | "member"; active: boolean } | null {
+  function principalInfo(id: string): PrincipalInfo | null {
     if (id === OWNER.id) return OWNER;
     if (!multiUser) return null;
     const a = store.row<AccountRow>("users", id);
@@ -561,29 +626,26 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
     if (isForeignOrigin(req)) {
       return { reply: err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
     }
-    const grant = credentialOf(req);
-    if (grant) {
-      const info = principalInfo(grant.principal);
-      const ctx: CallContext = {
-        credentialId: grant.credentialId,
-        agentName: grant.agentName,
-        principal: grant.principal,
-        role: info?.role ?? "member",
-      };
-      return { ctx, held: expandScopes(grant), grant };
+    const presented = credentialOf(req);
+    if (presented && "reply" in presented) return presented;
+    if (presented) {
+      const { grant, info, held } = presented;
+      const ctx: CallContext = { credentialId: grant.credentialId, agentName: grant.agentName, principal: info.id, role: info.role };
+      return { ctx, held, grant };
     }
     if (multiUser) {
       const session = sessionOf(req);
       if (session) {
         if (opts.isWrite && !isSameOrigin(req)) return { reply: crossSiteChange() };
+        const info = principalInfo(session.account.id);
         const ctx: CallContext = { credentialId: "session", agentName: null, principal: session.account.id, role: session.account.role };
-        return { ctx, held: allScopes(), grant: null };
+        return { ctx, held: permissions(info) ?? new Set(), grant: null };
       }
       return { reply: unauthenticated(req, "This app needs a credential.") };
     }
     // The app's own UI (same origin) is trusted: no credential needed.
     if (isSameOrigin(req)) {
-      return { ctx: { credentialId: "ui", agentName: null, principal: OWNER.id, role: "owner" }, held: allScopes(), grant: null };
+      return { ctx: { credentialId: "ui", agentName: null, principal: OWNER.id, role: "owner" }, held: permissions(OWNER) ?? new Set(), grant: null };
     }
     // A program write always needs a credential; an anonymous read on a
     // single-user app proceeds as the owner.
@@ -1264,22 +1326,22 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       // the `how` the write path sends, because this is the first 401 many
       // agents meet and a bare one sends them back to a step whose whole input
       // is that field.
-      const authz = authorize(req, { scope: null, isWrite: false });
-      if ("reply" in authz) return authz.reply;
-      const grant = credentialOf(req);
+      const caller = resolve(req, { isWrite: false });
+      if ("reply" in caller) return caller.reply;
       return ok({
         a2app: true,
-        credentialId: authz.ctx.credentialId,
-        agentName: authz.ctx.agentName,
-        principal: authz.ctx.principal,
-        principalName: principalInfo(authz.ctx.principal)?.name ?? null,
-        role: authz.ctx.role,
-        // A credentialled caller reports its grant. A caller that reaches a
-        // context WITHOUT one was never scope-checked, so it has no scope set to
-        // report — what it has is the reach `accessFor` renders on describe, and
-        // the two must not be able to disagree. Deriving the list from that one
-        // source is what keeps them the same answer.
-        scopes: grant ? [...expandScopes(grant)].sort() : [...reachAsScopes(accessFor(req))].sort(),
+        credentialId: caller.ctx.credentialId,
+        agentName: caller.ctx.agentName,
+        principal: caller.ctx.principal,
+        principalName: principalInfo(caller.ctx.principal)?.name ?? null,
+        role: caller.ctx.role,
+        expiresAt: caller.grant?.expiresAt ?? null,
+        // The reach the request was given: a credential's scopes intersected
+        // with what its person may do now, or a person's own. An anonymous
+        // read on a single-user app was never scope-checked, so it reports the
+        // reach `accessFor` renders on describe — one source, so the two cannot
+        // disagree.
+        scopes: caller.held === "anonymous" ? [...reachAsScopes(accessFor(req))].sort() : [...caller.held].sort(),
       });
     }
     const accountPath = ["/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"].some(

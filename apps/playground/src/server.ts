@@ -22,7 +22,7 @@
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { pathToFileURL } from "node:url";
-import { createA2App, createA2AppServer, MemoryBinding, type A2App, type Grant } from "@a2app/adapter-core";
+import { createA2App, createA2AppServer, MemoryBinding, type A2App, type SeedCredential } from "@a2app/adapter-core";
 import type { NormalizedField } from "@a2app/rules";
 
 const companyFields: NormalizedField[] = [
@@ -128,12 +128,13 @@ export function buildPlayground(): A2App {
     },
   });
 
-  const grant: Grant = {
+  const grant: SeedCredential = {
     token: PLAYGROUND_TOKEN,
     credentialId: "cred_local",
     agentName: "playground",
     principal: "owner",
     scopes: ["*"],
+    admin: true,
   };
 
   return createA2App(binding, {

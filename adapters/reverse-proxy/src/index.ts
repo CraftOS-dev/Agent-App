@@ -17,7 +17,7 @@ import {
   type A2App,
   type Binding,
   type EntityDef,
-  type Grant,
+  type SeedCredential,
   type ListResult,
   type OperationDecl,
   type StoredRecord,
@@ -169,7 +169,7 @@ export function operationDecls(cfg: ReverseProxyConfig): OperationDecl[] {
  *  module level: root lists the modules, each module lists its operations, and
  *  there is no entity or record screen to descend into. The walk never assumes
  *  entities exist (A2APP-SPEC 3.6). */
-export function createReverseProxy(cfg: ReverseProxyConfig, credentials: Grant[]): A2App {
+export function createReverseProxy(cfg: ReverseProxyConfig, credentials: SeedCredential[]): A2App {
   return createA2App(new ProxyBinding(cfg), {
     credentials,
     modules: cfg.modules,
@@ -180,7 +180,7 @@ export function createReverseProxy(cfg: ReverseProxyConfig, credentials: Grant[]
 
 /** Run the proxy as a standalone sidecar server. */
 export function startReverseProxy(cfg: ReverseProxyConfig, port: number, token: string): ReturnType<typeof createA2AppServer> {
-  const grant: Grant = { token, credentialId: "cred_proxy", agentName: "local", principal: "owner", scopes: ["*"] };
+  const grant: SeedCredential = { token, credentialId: "cred_proxy", agentName: "local", principal: "owner", scopes: ["*"], admin: true };
   const server = createA2AppServer(createReverseProxy(cfg, [grant]));
   // Loopback explicitly: `listen(port)` alone binds every interface, which this
   // line already claimed it did not. A sidecar carrying an owner-scoped grant

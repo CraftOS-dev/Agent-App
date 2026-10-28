@@ -331,11 +331,15 @@ const view = createStaticView(servedPublicDir, {
 });
 
 const a2app = createA2App(binding, {
-  credentials: [{ token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
+  // The app's own .agent-token is its admin credential (spec/v0_2/auth.md §2.3).
+  credentials: [{ token, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"], admin: true }],
   // Re-derived per request, so it stays true for a server whose files changed
   // under it — the same "derive, do not declare" rule schemaVersion follows.
   appVersion: () => view.version(),
   operations: schema.operations ?? [],
+  // What each person may do (spec/v0_2/auth.md §3), when the schema says;
+  // every agent acting for them is limited to the same.
+  ...(schema.permissionsOf ? { permissionsOf: schema.permissionsOf } : {}),
   // The event types this app may emit. Declaring them is what keeps the
   // app→agent queue from being an open channel: `trigger` refuses a type that
   // is not here, so the set of things this app can ever ask an agent to react

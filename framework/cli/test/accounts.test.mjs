@@ -63,7 +63,7 @@ async function serveApp(port, { id, authMode }) {
   const app = createA2App(new MemoryBinding({ appId: id, appName: "CLI Accounts", authMode, entities: {} }), {
     modules: [{ name: "desk" }],
     allowedOrigins: [`http://127.0.0.1:${port}`],
-    credentials: [{ token: TOKEN, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"] }],
+    credentials: [{ token: TOKEN, credentialId: "cred_local", agentName: "local", principal: "owner", scopes: ["*"], admin: true }],
   });
   const server = createA2AppServer(app);
   await new Promise((r) => server.listen(port, "127.0.0.1", r));

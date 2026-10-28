@@ -140,6 +140,10 @@ func promoteCheck() int {
 
 	// Refuse to orphan data: an entity that holds live records must still exist
 	// in the new schema (removing it is a destructive migration).
+	declared := map[string]bool{}
+	for _, e := range declaredEntities(ENTITIES) {
+		declared[getStr(e, "name")] = true
+	}
 	orphaned := []string{}
 	liveEntities := []string{}
 	for _, hr := range held {
@@ -147,7 +151,7 @@ func promoteCheck() int {
 			continue
 		}
 		liveEntities = append(liveEntities, hr.entity)
-		if _, declared := ENTITIES[hr.entity]; !declared {
+		if !declared[hr.entity] {
 			orphaned = append(orphaned, hr.entity)
 		}
 	}
@@ -168,7 +172,7 @@ func promoteCheck() int {
 		inLive = "none"
 	}
 	fmt.Printf("live database compatible with the new schema (%d declared; live data in: %s)\n",
-		len(ENTITIES), inLive)
+		len(declared), inLive)
 	return 0
 }
 
@@ -331,9 +335,10 @@ func (v *staticView) version() string {
 	return v.cachedVersion
 }
 
-// resolveFile is the file this request names, or "" when there is none to
-// serve. Returns "" rather than erroring for every hostile shape (traversal, a
-// NUL byte, a directory) so the caller answers one honest 404.
+// resolveFile is the file a request path (as sent, still percent-encoded)
+// names, or "" when there is none to serve. Returns "" rather than erroring
+// for every hostile shape (traversal, a bad escape, a NUL byte, a directory)
+// so the caller answers one honest 404.
 func (v *staticView) resolveFile(rawPath string) string {
 	if target, ok := v.aliases[rawPath]; ok {
 		if st, err := os.Stat(target); err == nil && st.Mode().IsRegular() {
@@ -341,7 +346,10 @@ func (v *staticView) resolveFile(rawPath string) string {
 		}
 		return ""
 	}
-	rel := rawPath // net/http has already percent-decoded the path
+	rel, err := decodeURIComponent(rawPath)
+	if err != nil {
+		return "" // a malformed escape is not a path we can have
+	}
 	if rel == "/" || rel == "" {
 		rel = "/index.html"
 	}
@@ -380,7 +388,7 @@ func matchesEtag(header, etag string) bool {
 
 func (v *staticView) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// Path before method: 405 is only for a file that exists.
-	file := v.resolveFile(r.URL.Path)
+	file := v.resolveFile(r.URL.EscapedPath())
 	if file == "" {
 		writeJSON(w, 404, M{"a2app": true, "ok": false, "code": "not_found", "message": "No such route."})
 		return
@@ -589,17 +597,21 @@ func serveApp() {
 		salt: getStr(manifest, "appVersion"),
 	}
 
-	// Durable store: records + idempotency keys in SQLite inside the lifecycle
-	// dataDir. Seeded only when this boot CREATED the database file.
+	// Durable store: records and every piece of adapter state (credentials,
+	// accounts, tasks, events, approvals, idempotency keys, the audit log) in
+	// SQLite inside the lifecycle dataDir. Seeded only when this boot CREATED
+	// the database file.
 	store, err := NewSqliteStore(filepath.Join(dataDir, "db.sqlite"), SEED)
 	if err != nil {
 		fatal("could not open the database: " + err.Error())
 	}
 
 	adapter, err := NewAdapter(AdapterConfig{
-		AppID:      getStr(manifest, "id"),
-		AppName:    manifest["name"],
-		Entities:   ENTITIES,
+		AppID:   getStr(manifest, "id"),
+		AppName: manifest["name"],
+		// In the order schema.go declares them, which is the order describe
+		// lists them in.
+		Entities:   declaredEntities(ENTITIES),
 		Operations: OPERATIONS,
 		Store:      store,
 		// The app's own .agent-token is its admin credential (spec/v0_2/
@@ -632,77 +644,10 @@ func serveApp() {
 	}
 
 	// Route ownership, in order: (1) the A2App adapter answers every path it
-	// owns (identity, describe, records, operations, tasks/events); (2)
-	// anything else falls through to the static View. The adapter is the only
-	// agent surface; the View is the human one.
-	apiHandler := func(w http.ResponseWriter, r *http.Request) {
-		var body M
-		method := strings.ToUpper(r.Method)
-		if method == "POST" || method == "PATCH" || method == "PUT" {
-			// Count bytes as they arrive rather than trusting Content-Length,
-			// so a client that lies about the length gains nothing.
-			raw, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes+1))
-			if err != nil {
-				writeJSON(w, 400, M{"a2app": true, "ok": false, "code": "bad_request", "message": "The request body could not be read."})
-				return
-			}
-			if len(raw) > maxRequestBodyBytes || r.ContentLength > maxRequestBodyBytes {
-				w.Header().Set("Connection", "close")
-				writeJSON(w, 413, M{
-					"a2app": true, "ok": false, "code": "payload_too_large",
-					"message":    fmt.Sprintf("Request body exceeds the %d-byte limit.", maxRequestBodyBytes),
-					"limitBytes": maxRequestBodyBytes,
-				})
-				return
-			}
-			if text := strings.TrimSpace(string(raw)); text != "" {
-				// A body that is not a JSON object is handed to the guard as
-				// `__unparsed__` so it is rejected by the adapter's own rules
-				// rather than 500-ing here.
-				var parsed any
-				if json.Unmarshal([]byte(text), &parsed) == nil {
-					if obj, ok := parsed.(map[string]any); ok {
-						body = obj
-					} else {
-						body = M{"__unparsed__": text}
-					}
-				} else {
-					body = M{"__unparsed__": text}
-				}
-			}
-		}
-		headers := map[string]string{}
-		for k, vs := range r.Header {
-			if len(vs) > 0 {
-				headers[strings.ToLower(k)] = vs[0]
-			}
-		}
-		// net/http moves Host out of the header map; the adapter's host check
-		// needs it back.
-		headers["host"] = r.Host
-		query := map[string]string{}
-		for k, vs := range r.URL.Query() {
-			if len(vs) > 0 {
-				query[k] = vs[len(vs)-1]
-			}
-		}
-		status, payload, replyHeaders := func() (status int, payload M, replyHeaders map[string]string) {
-			// Fail open internally: an adapter bug never 500s the whole app
-			// silently — it answers with a machine-readable adapter error.
-			defer func() {
-				if p := recover(); p != nil {
-					status, payload, replyHeaders = 500, M{"a2app": true, "ok": false, "code": "adapter_error", "message": fmt.Sprint(p)}, nil
-				}
-			}()
-			return adapter.dispatch(method, r.URL.Path, headers, body, query)
-		}()
-		// The session cookie, when a reply signs someone in or out.
-		for name, value := range replyHeaders {
-			w.Header().Set(name, value)
-		}
-		writeJSON(w, status, payload)
-	}
-
+	// owns (identity, describe, records, operations, tasks/events, accounts);
+	// (2) anything else falls through to the static View. Every request meets
+	// the adapter first, so its Host check covers the View too. The adapter is
+	// the only agent surface; the View is the human one.
 	var nextRequestID atomic.Int64
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := nextRequestID.Add(1)
@@ -727,20 +672,57 @@ func serveApp() {
 				"status": rec.status, "ms": time.Since(started).Milliseconds(),
 			})
 		}()
-		path := r.URL.Path
-		if path == "/.well-known/a2app.json" || path == "/api" || strings.HasPrefix(path, "/api/") {
-			apiHandler(rec, r)
-			return
-		}
-		// The system pages (the account page, the update watcher) answer only
-		// on the app's own hosts, like every adapter route.
-		if _, system := view.aliases[path]; system {
-			if status, refusal := adapter.hostRefusal(r.Host); refusal != nil {
-				writeJSON(rec, status, refusal)
+
+		method := strings.ToUpper(r.Method)
+		var body any
+		var bodyKeys []string
+		if method == "POST" || method == "PATCH" || method == "PUT" {
+			// Count bytes as they arrive rather than trusting Content-Length,
+			// so a client that lies about the length gains nothing.
+			raw, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes+1))
+			if err != nil {
+				writeJSON(rec, 400, M{"a2app": true, "ok": false, "code": "bad_request", "message": "The request body could not be read."})
 				return
 			}
+			if len(raw) > maxRequestBodyBytes || r.ContentLength > maxRequestBodyBytes {
+				rec.Header().Set("Connection", "close")
+				writeJSON(rec, 413, M{
+					"a2app": true, "ok": false, "code": "payload_too_large",
+					"message":    fmt.Sprintf("Request body exceeds the %d-byte limit.", maxRequestBodyBytes),
+					"limitBytes": maxRequestBodyBytes,
+				})
+				return
+			}
+			// JSON.parse's reading: a body that is not JSON reaches the guard as
+			// `__unparsed__`, so the adapter's own rules refuse it.
+			body, bodyKeys = ParseBody(raw)
 		}
-		view.serveHTTP(rec, r)
+		headers := map[string]string{}
+		for k, vs := range r.Header {
+			separator := ", "
+			if strings.EqualFold(k, "cookie") {
+				separator = "; "
+			}
+			headers[strings.ToLower(k)] = strings.Join(vs, separator)
+		}
+		// net/http moves Host out of the header map; the adapter's host check
+		// needs it back. A request with none (HTTP/1.0) has none to check.
+		if r.Host != "" {
+			headers["host"] = r.Host
+		}
+		status, payload, replyHeaders, handled := adapter.Handle(Request{
+			Method: method, Path: r.URL.EscapedPath(), Query: parseQuery(r.URL.RawQuery),
+			Headers: headers, Body: body, BodyKeys: bodyKeys,
+		})
+		if !handled {
+			view.serveHTTP(rec, r)
+			return
+		}
+		// The session cookie, when a reply signs someone in or out.
+		for name, value := range replyHeaders {
+			rec.Header().Set(name, value)
+		}
+		writeJSON(rec, status, payload)
 	})
 
 	// Bind the address NetworkPolicy resolved (loopback unless the owner

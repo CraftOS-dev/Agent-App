@@ -68,7 +68,9 @@ edit the locked original.
   SQLite table keyed (entity, id); there are no migration files on this stack.
   Add a field to the schema and it is simply available; existing rows keep
   their stored values. This is the opposite of the pocketbase stack — do not go
-  looking for a `migrations/` directory.
+  looking for a `migrations/` directory. The adapter keeps its own state —
+  credentials, accounts, the task queue, events, approvals, idempotency keys —
+  in tables of its own in the same file, so a restart loses none of it.
 - **The View is served BUILT.** `vite build` compiles `index.html` + `src/`
   into `dist/`; `main.go` serves `dist/` with real cache validators. A source
   edit does nothing until the next build.
@@ -76,11 +78,14 @@ edit the locked original.
 ## Schema — entities & fields
 
 Edit `schema.go`. Entities and fields are declared as data (`M` is
-`map[string]any`):
+`map[string]any`). `ENTITIES` is a list, each entity naming itself, and
+describe lists them in that order — put the most-used first (an older
+`schema.go` that declares a map still works, listed by name):
 
 ```go
-var ENTITIES = map[string]M{
-	"<entity>": {
+var ENTITIES = []M{
+	{
+		"name":    "<entity>",
 		"module":  "<module-from-manifest>", // REQUIRED — every entity names its module
 		"summary": "one line shown beside it on the module screen",
 		"fields": []M{
@@ -151,8 +156,14 @@ var OPERATION_RUNNERS = map[string]OperationRunner{
   "agentName", "principal", "role"}`). `store` is the SQLite-backed record store —
   `listRecords(entity, query)` · `getRecord(entity, id)` ·
   `putRecord(entity, record)` · `deleteRecord(entity, id)`. Writes are durable
-  when the call returns; there is no separate persist() step. Returning an
-  error (or panicking) answers `operation_failed`.
+  when the call returns; there is no separate persist() step. To refuse a
+  call in terms the caller can act on, return
+  `&OperationError{Code: "…", Message: "…", HTTPStatus: 409}` (400 when
+  unset; `Extra` adds fields to the reply). Any other error, or a panic,
+  answers `operation_failed`.
+- **`args` are checked against `params` first**, like a record write: a
+  missing required parameter, an undeclared one or a value of the wrong type
+  is refused before the runner (or an approval) is reached.
 - **`params` is REQUIRED and typed** (same vocabulary as fields); use `M{}` for
   none. The record screen renders it as the signature — args described only in
   prose can neither be shown nor checked.

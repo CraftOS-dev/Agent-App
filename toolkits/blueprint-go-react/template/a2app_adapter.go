@@ -11,14 +11,18 @@
 // Protocol 0.2 (spec/v0_2/auth.md) adds who a request acts for: principals,
 // delegated agent credentials stored only as hashes, the user ceiling, and on
 // `authMode: multi-user` accounts, sessions, invites, record ownership and
-// device-code sign-in. Parity oracle: adapters/adapter-core/src (auth.ts,
-// accounts.ts, credentials.ts, device.ts, server.ts).
+// device-code sign-in. The adapter-owned state — credentials, accounts, the
+// task queue, the event log, approvals, idempotency keys and the audit log —
+// lives in the same SQLite file as the records, so a restart loses none of it.
 //
-// The pure validation rules below MUST match `@a2app/rules` — and the Python
-// port in blueprint-python-fastapi, which is this file's line-for-line oracle —
-// so a Go app and a Node app reject identical payloads identically, verified by
-// the conformance suite. HTTP wiring lives in `main.go`; this file never touches
-// net/http. An agent evolves the app by editing `schema.go`, never this file.
+// Parity oracle: adapters/adapter-core/src (server.ts, store.ts, describe.ts,
+// canon.ts, auth.ts, accounts.ts, credentials.ts, device.ts) and the pure rules
+// in adapters/rules/src, so a Go app and a Node app answer identical requests
+// identically, verified by the conformance suites. Where JavaScript itself
+// decides an answer (how a number prints, what Number("0x1A") is, the order of
+// a body's keys), the "JavaScript semantics" section below says so once. HTTP
+// wiring lives in `main.go`; this file never touches net/http. An agent evolves
+// the app by editing `schema.go`, never this file.
 package main
 
 import (
@@ -33,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"net"
@@ -47,6 +52,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -82,6 +89,8 @@ const (
 	codeTaskCanceled       = "task_canceled"
 	codeAgentTokenRequired = "agent_token_required"
 	codeRateLimited        = "rate_limited"
+	codeMissingRequired    = "missing_required"
+	codeInvalidFilter      = "invalid_filter"
 	// The record is still referenced, and a `ref` pointing at it says `restrict`.
 	codeRecordReferenced = "record_referenced"
 )
@@ -169,27 +178,13 @@ func toAnyList(v any) []any {
 	return nil
 }
 
-// toStr renders a scalar the way the oracle's string coercions do: strings
-// pass through, booleans are the JSON words, numbers drop a trailing ".0".
+// toStr is a declared value as text: String(value), except that a missing
+// value is "" rather than "null".
 func toStr(v any) string {
-	switch t := v.(type) {
-	case nil:
+	if v == nil {
 		return ""
-	case string:
-		return t
-	case bool:
-		if t {
-			return "true"
-		}
-		return "false"
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case int:
-		return strconv.Itoa(t)
-	case int64:
-		return strconv.FormatInt(t, 10)
 	}
-	return fmt.Sprint(v)
+	return jsString(v)
 }
 
 func valuesOf(f M) []string {
@@ -239,6 +234,514 @@ func truthy(v any) bool {
 		return t != 0
 	}
 	return true
+}
+
+/* ---------------------------------------------------- JavaScript semantics */
+// The reference adapter is JavaScript, and a few of its answers are decided by
+// the language rather than by the protocol: what Number("0x1A") is, how a
+// number prints, the order Object.keys lists a body's fields in, how two keys
+// sort, what JSON.stringify does with Infinity. Each rule is written once here,
+// so a Go app answers byte for byte as a Node app does.
+
+// isJSSpace is a character String.prototype.trim removes.
+func isJSSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ', 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+		return true
+	}
+	return r >= 0x2000 && r <= 0x200A
+}
+
+var jsDecimalRe = regexp.MustCompile(`^[+-]?(?:Infinity|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)$`)
+var jsRadixRe = regexp.MustCompile(`^0([xXoObB])([0-9a-zA-Z]+)$`)
+
+// jsNumber is ECMAScript Number(string): a trimmed decimal literal (Infinity
+// included) or an unsigned 0x/0o/0b integer; blank is 0, anything else NaN.
+// Go's ParseFloat alone would also take "inf", "NaN" and hex floats.
+func jsNumber(s string) float64 {
+	t := strings.TrimFunc(s, isJSSpace)
+	if t == "" {
+		return 0
+	}
+	if m := jsRadixRe.FindStringSubmatch(t); m != nil {
+		base := map[string]int{"x": 16, "o": 8, "b": 2}[strings.ToLower(m[1])]
+		n, ok := new(big.Int).SetString(m[2], base)
+		if !ok {
+			return math.NaN()
+		}
+		f, _ := new(big.Float).SetInt(n).Float64()
+		return f
+	}
+	if !jsDecimalRe.MatchString(t) {
+		return math.NaN()
+	}
+	// Out of range is ±Infinity in JavaScript too; ParseFloat says so with ErrRange.
+	f, err := strconv.ParseFloat(t, 64)
+	if err != nil && !math.IsInf(f, 0) {
+		return math.NaN()
+	}
+	return f
+}
+
+// jsNumberString is ECMAScript Number.prototype.toString: the shortest digits
+// that round-trip, in fixed notation from 1e-7 to 1e21 and exponent notation
+// outside it — also RFC 8785's number form.
+func jsNumberString(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	case f == 0:
+		return "0"
+	}
+	sign := ""
+	if f < 0 {
+		sign, f = "-", -f
+	}
+	// "d.ddde±x" gives the shortest round-trip digits and the exponent.
+	mantissa, exp, _ := strings.Cut(strconv.FormatFloat(f, 'e', -1, 64), "e")
+	digits := strings.Replace(mantissa, ".", "", 1)
+	e, _ := strconv.Atoi(exp)
+	k, n := len(digits), e+1
+	switch {
+	case k <= n && n <= 21:
+		return sign + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	}
+	expSign := "+"
+	if n-1 < 0 {
+		expSign = "-"
+	}
+	head := digits[:1]
+	if k > 1 {
+		head += "." + digits[1:]
+	}
+	return sign + head + "e" + expSign + strconv.Itoa(abs(n-1))
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// jsString is ECMAScript String(value) for a JSON value: arrays join their
+// elements with "," (null as empty), objects are "[object Object]".
+func jsString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case float64:
+		return jsNumberString(t)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case M:
+		return "[object Object]"
+	}
+	if items := toAnyList(v); items != nil {
+		parts := make([]string, len(items))
+		for i, item := range items {
+			if item != nil {
+				parts[i] = jsString(item)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return fmt.Sprint(v)
+}
+
+// jsCompare orders two strings as JavaScript does, by UTF-16 code unit — which
+// differs from Go's byte order only past U+FFFF.
+func jsCompare(a, b string) int {
+	x, y := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
+	for i := 0; i < len(x) && i < len(y); i++ {
+		if x[i] != y[i] {
+			if x[i] < y[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return len(x) - len(y)
+}
+
+// isArrayIndex is a key JavaScript treats as an array index ("0", "17").
+func isArrayIndex(key string) bool {
+	if key == "0" {
+		return true
+	}
+	if key == "" || key[0] < '1' || key[0] > '9' {
+		return false
+	}
+	n, err := strconv.ParseUint(key, 10, 64)
+	return err == nil && n < math.MaxUint32 && strconv.FormatUint(n, 10) == key
+}
+
+// jsKeyOrder is the order Object.keys lists an object's keys in, given the
+// order they were written: array-index keys first, ascending, then the rest as
+// written.
+func jsKeyOrder(written []string) []string {
+	indices, names := []string{}, []string{}
+	for _, k := range written {
+		if isArrayIndex(k) {
+			indices = append(indices, k)
+		} else {
+			names = append(names, k)
+		}
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		x, _ := strconv.ParseUint(indices[i], 10, 64)
+		y, _ := strconv.ParseUint(indices[j], 10, 64)
+		return x < y
+	})
+	return append(indices, names...)
+}
+
+// errURIMalformed is decodeURIComponent's refusal. The reference lets it
+// escape the router, so the request answers 500 adapter_error, and so does
+// this port.
+var errURIMalformed = errors.New("URI malformed")
+
+// decodeURIComponent decodes every %XX escape; a malformed escape, or bytes
+// that are not UTF-8, refuse.
+func decodeURIComponent(s string) (string, error) {
+	if !strings.Contains(s, "%") {
+		return s, nil
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' {
+			out = append(out, s[i])
+			continue
+		}
+		if i+2 >= len(s) {
+			return "", errURIMalformed
+		}
+		b, err := hex.DecodeString(s[i+1 : i+3])
+		if err != nil {
+			return "", errURIMalformed
+		}
+		out = append(out, b[0])
+		i += 2
+	}
+	if !utf8.Valid(out) {
+		return "", errURIMalformed
+	}
+	return string(out), nil
+}
+
+// mustDecode is a path segment, decoded; a malformed one panics with
+// errURIMalformed, which Handle answers as adapter_error, as the reference's
+// thrown URIError is.
+func mustDecode(s string) string {
+	decoded, err := decodeURIComponent(s)
+	if err != nil {
+		panic(err)
+	}
+	return decoded
+}
+
+// parseQuery is a query string as URLSearchParams reads it: "&"-separated
+// pairs, "+" is a space, escapes decoded leniently (a malformed one stays as
+// written). A repeated name keeps its last value, as the reference's
+// `query[k] = v` does.
+func parseQuery(raw string) map[string]string {
+	out := map[string]string{}
+	decode := func(s string) string {
+		s = strings.ReplaceAll(s, "+", " ")
+		buf := make([]byte, 0, len(s))
+		for i := 0; i < len(s); i++ {
+			if s[i] == '%' && i+2 < len(s) {
+				if b, err := hex.DecodeString(s[i+1 : i+3]); err == nil {
+					buf = append(buf, b[0])
+					i += 2
+					continue
+				}
+			}
+			buf = append(buf, s[i])
+		}
+		return strings.ToValidUTF8(string(buf), "�")
+	}
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
+		}
+		name, value, _ := strings.Cut(pair, "=")
+		out[decode(name)] = decode(value)
+	}
+	return out
+}
+
+// jsonSafe is a value as JSON.stringify writes it: NaN and ±Infinity become
+// null (JSON has neither), at any depth.
+func jsonSafe(v any) any {
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return nil
+		}
+		return t
+	case M:
+		out := make(M, len(t))
+		for k, x := range t {
+			out[k] = jsonSafe(x)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, x := range t {
+			out[i] = jsonSafe(x)
+		}
+		return out
+	case []M:
+		out := make([]any, len(t))
+		for i, x := range t {
+			out[i] = jsonSafe(x)
+		}
+		return out
+	}
+	return v
+}
+
+// marshalJSON is JSON with JSON.stringify's handling of non-finite numbers,
+// `<` and `&` left as themselves, and keys sorted at every depth.
+func marshalJSON(value any) ([]byte, error) {
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(jsonSafe(value)); err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSuffix(buf.String(), "\n")), nil
+}
+
+// canonicalize is RFC 8785 (JCS) JSON for the values A2App arguments are made
+// of: keys sorted by UTF-16 code unit, numbers in their ECMAScript form,
+// minimal string escapes. Parity oracle: adapter-core canon.ts — two adapters
+// that follow it compute the same approval key for the same call. A
+// non-finite number cannot be canonicalized, and panics, as it throws there.
+func canonicalize(v any) string {
+	var b strings.Builder
+	var encode func(v any)
+	encodeString := func(s string) {
+		b.WriteByte('"')
+		for _, r := range s {
+			switch r {
+			case '"':
+				b.WriteString(`\"`)
+			case '\\':
+				b.WriteString(`\\`)
+			case '\b':
+				b.WriteString(`\b`)
+			case '\f':
+				b.WriteString(`\f`)
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				if r < 0x20 {
+					fmt.Fprintf(&b, `\u%04x`, r)
+				} else {
+					b.WriteRune(r)
+				}
+			}
+		}
+		b.WriteByte('"')
+	}
+	encode = func(v any) {
+		switch t := v.(type) {
+		case nil:
+			b.WriteString("null")
+		case bool:
+			b.WriteString(jsString(t))
+		case float64:
+			if math.IsNaN(t) || math.IsInf(t, 0) {
+				panic(errors.New("cannot canonicalize a non-finite number"))
+			}
+			b.WriteString(jsNumberString(t))
+		case int, int64:
+			b.WriteString(jsString(t))
+		case string:
+			encodeString(t)
+		case M:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool { return jsCompare(keys[i], keys[j]) < 0 })
+			b.WriteByte('{')
+			for i, k := range keys {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				encodeString(k)
+				b.WriteByte(':')
+				encode(t[k])
+			}
+			b.WriteByte('}')
+		default:
+			items := toAnyList(v)
+			if items == nil {
+				panic(fmt.Errorf("cannot canonicalize value of type %T", v))
+			}
+			b.WriteByte('[')
+			for i, item := range items {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				encode(item)
+			}
+			b.WriteByte(']')
+		}
+	}
+	encode(v)
+	return b.String()
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// approvalKey is the content address of one exact operation call: sha256 hex
+// of the JCS form of {"operation", "args"} (args default {}). Approving one
+// call approves no argument variant.
+func approvalKey(operation string, args any) string {
+	if args == nil {
+		args = M{}
+	}
+	return sha256Hex(canonicalize(M{"operation": operation, "args": args}))
+}
+
+/* -- request bodies -- */
+
+// ParseBody reads a request body as the reference's transport does with
+// JSON.parse: nil for a blank body, the JSON value for valid JSON (numbers as
+// float64, an overflowing one as ±Infinity), and {"__unparsed__": text} for
+// anything else, so the guard refuses it as an unknown field instead of the
+// request failing. keys is a top-level object's keys in the order they were
+// written, which is the order violations are reported in.
+func ParseBody(raw []byte) (body any, keys []string) {
+	text := string(raw)
+	if strings.TrimFunc(text, isJSSpace) == "" {
+		return nil, nil
+	}
+	unparsed := M{"__unparsed__": text}
+	dec := json.NewDecoder(strings.NewReader(text))
+	// Numbers stay text until fromJSONNumbers reads them, so one too large for
+	// a float64 is Infinity, as JSON.parse makes it, rather than a parse error.
+	dec.UseNumber()
+	var value any
+	if dec.Decode(&value) != nil {
+		return unparsed, nil
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return unparsed, nil // trailing content: JSON.parse refuses it
+	}
+	value = fromJSONNumbers(value)
+	if _, isObject := value.(M); isObject {
+		keys = writtenKeys(text)
+	}
+	return value, keys
+}
+
+func fromJSONNumbers(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		f, _ := strconv.ParseFloat(string(t), 64) // out of range is ±Inf, as JSON.parse has it
+		return f
+	case M:
+		for k, x := range t {
+			t[k] = fromJSONNumbers(x)
+		}
+	case []any:
+		for i, x := range t {
+			t[i] = fromJSONNumbers(x)
+		}
+	}
+	return v
+}
+
+// writtenKeys is a JSON object's keys in the order they first appear.
+func writtenKeys(text string) []string {
+	dec := json.NewDecoder(strings.NewReader(text))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	keys, seen := []string{}, map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		key, isKey := t.(string)
+		if err != nil || !isKey {
+			break
+		}
+		if !seen[key] {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			break
+		}
+	}
+	return keys
+}
+
+// bodyView is a request body as the reference's handlers read it — through
+// `req.body ?? {}` and Object.keys. An object's keys are its own, in
+// JavaScript's order; an array's and a string's are their indices; any other
+// value, and no body at all, has none.
+type bodyView struct {
+	// the parsed value (nil when there was none, or it was null)
+	raw    any
+	keys   []string
+	fields M
+}
+
+func viewBody(body any, written []string) bodyView {
+	view := bodyView{raw: body, keys: []string{}, fields: M{}}
+	switch t := body.(type) {
+	case M:
+		view.fields = t
+		if len(written) != len(t) {
+			written = make([]string, 0, len(t))
+			for k := range t {
+				written = append(written, k)
+			}
+			sort.Strings(written)
+		}
+		view.keys = jsKeyOrder(written)
+	case string:
+		for i, unit := range utf16.Encode([]rune(t)) {
+			view.keys = append(view.keys, strconv.Itoa(i))
+			view.fields[strconv.Itoa(i)] = string(utf16.Decode([]uint16{unit}))
+		}
+	default:
+		for i, item := range toAnyList(body) {
+			view.keys = append(view.keys, strconv.Itoa(i))
+			view.fields[strconv.Itoa(i)] = item
+		}
+	}
+	return view
 }
 
 /* --------------------------------------------------------------- pure rules */
@@ -294,11 +797,6 @@ func violation(code, field, expected string, got any) M {
 	return M{"code": code, "field": field, "expected": expected, "got": got}
 }
 
-func isNumberString(s string) bool {
-	_, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	return err == nil
-}
-
 func isNumeric(v any) bool {
 	switch v.(type) {
 	case float64, int, int64:
@@ -307,11 +805,12 @@ func isNumeric(v any) bool {
 	return false
 }
 
-// validate checks a RAW body against normalized fields; returns every violation.
-// Body keys are visited in sorted order: a Go map has no insertion order to
-// honour, and a deterministic order is what keeps the FIRST violation (the one
-// the envelope leads with) stable across runs.
-func validate(fields []M, body M, allow map[string]bool) []M {
+// validate checks a RAW body against normalized fields and returns every
+// violation, in the order of `keys` (the body's own, as Object.keys lists
+// them). `allow` names extra keys accepted without being fields;
+// `requireRequired` is set on a create only, where a required field left out
+// is missing. Parity oracle: `validate` in @a2app/rules.
+func validate(fields []M, keys []string, body M, allow map[string]bool, requireRequired bool) []M {
 	byName := map[string]M{}
 	var writable []string
 	for _, f := range fields {
@@ -320,65 +819,95 @@ func validate(fields []M, body M, allow map[string]bool) []M {
 			writable = append(writable, getStr(f, "name"))
 		}
 	}
-	keys := make([]string, 0, len(body))
-	for k := range body {
-		keys = append(keys, k)
+	// An operation may declare no parameters at all, and "one of: " with nothing
+	// after it reads as a truncated message rather than as the answer it is.
+	accepted := "nothing — no writable fields are declared"
+	if len(writable) > 0 {
+		accepted = "one of: " + strings.Join(writable, ", ")
 	}
-	sort.Strings(keys)
 
 	out := []M{}
 	for _, key := range keys {
-		value := body[key]
 		if allow[key] {
 			continue
 		}
+		value := body[key]
 		f, known := byName[key]
 		if !known {
-			out = append(out, violation(codeUnknownField, key, "one of: "+strings.Join(writable, ", "), value))
+			out = append(out, violation(codeUnknownField, key, accepted, value))
 			continue
 		}
 		if getBool(f, "readOnly") {
 			out = append(out, violation(codeReadOnlyField, key, "not writable (server-managed)", value))
 			continue
 		}
+		// Blank clears a field — legitimate only when the field is not required.
 		if isBlank(value) {
+			if getBool(f, "required") {
+				out = append(out, violation(codeMissingRequired, key, "a non-blank value (required field)", value))
+			}
 			continue
 		}
-		ftype := getStr(f, "type")
-		_, isString := value.(string)
-		_, isBool := value.(bool)
-		switch {
-		case ftype == "datetime" && !looksLikeDate(value):
-			out = append(out, violation(codeInvalidDate, key, "an ISO 8601 date", value))
-		case getBool(f, "dayKey") && !isDayKeyValue(value):
-			out = append(out, violation(codeInvalidDaykey, key, `a day key "YYYY-MM-DD"`, value))
-		case ftype == "string" && !isString:
-			out = append(out, violation(codeInvalidString, key, "text", value))
-		case ftype == "number" && !isNumeric(value) &&
-			!(isString && strings.TrimSpace(value.(string)) != "" && isNumberString(value.(string))):
-			out = append(out, violation(codeInvalidNumber, key, "a number", value))
-		case ftype == "boolean" && !isBool && value != "true" && value != "false":
-			out = append(out, violation(codeInvalidBoolean, key, "true or false", value))
-		case ftype == "enum" && len(valuesOf(f)) > 0 && !contains(valuesOf(f), toStr(value)):
-			out = append(out, violation(codeInvalidEnum, key, "one of: "+strings.Join(valuesOf(f), " | "), value))
-		case ftype == "list<enum>" && len(valuesOf(f)) > 0:
-			items := toAnyList(value)
-			if items == nil {
-				items = []any{value}
+		if v := fieldViolation(f, key, value); v != nil {
+			out = append(out, v)
+		}
+	}
+	if requireRequired {
+		for _, f := range fields {
+			if !getBool(f, "required") || getBool(f, "readOnly") || hasKey(body, getStr(f, "name")) {
+				continue
 			}
-			allowed := valuesOf(f)
-			bad := false
-			for _, item := range items {
-				if !contains(allowed, toStr(item)) {
-					bad = true
-				}
-			}
-			if bad {
-				out = append(out, violation(codeInvalidEnum, key, "each of: "+strings.Join(valuesOf(f), " | "), value))
-			}
+			out = append(out, violation(codeMissingRequired, getStr(f, "name"), "a non-blank value (required field)", nil))
 		}
 	}
 	return out
+}
+
+// fieldViolation is what is wrong with one non-blank value for its field, or
+// nil. The first rule that fails is the one reported.
+func fieldViolation(f M, key string, value any) M {
+	ftype := getStr(f, "type")
+	text, isString := value.(string)
+	_, isBool := value.(bool)
+	allowed := valuesOf(f)
+	switch {
+	case ftype == "datetime" && !looksLikeDate(value):
+		return violation(codeInvalidDate, key, "an ISO 8601 date", value)
+	case getBool(f, "dayKey") && !isDayKeyValue(value):
+		return violation(codeInvalidDaykey, key, `a day key "YYYY-MM-DD"`, value)
+	case ftype == "string" && !isString:
+		return violation(codeInvalidString, key, "text", value)
+	case ftype == "string" && isNumeric(f["max"]) && float64(jsLength(text)) > numberOf(f["max"]):
+		// `max` is published in describe, so a client plans against it; length is
+		// its documented meaning on a string field, counted as JavaScript does.
+		return violation(codeInvalidString, key, "text of at most "+toStr(f["max"])+" characters", value)
+	case ftype == "number" && !isNumeric(value) &&
+		(!isString || strings.TrimFunc(text, isJSSpace) == "" || math.IsNaN(jsNumber(text))):
+		return violation(codeInvalidNumber, key, "a number", value)
+	case ftype == "boolean" && !isBool && value != "true" && value != "false":
+		return violation(codeInvalidBoolean, key, "true or false", value)
+	case ftype == "enum" && len(allowed) > 0 && !contains(allowed, jsString(value)):
+		return violation(codeInvalidEnum, key, "one of: "+strings.Join(allowed, " | "), value)
+	case ftype == "list<enum>" && len(allowed) > 0:
+		// The wire form of a list is an array: wrapping a bare scalar would hide a
+		// client bug and make the stored shape depend on how many were sent.
+		items, isList := value.([]any)
+		if !isList {
+			return violation(codeInvalidEnum, key, "an array of: "+strings.Join(allowed, " | "), value)
+		}
+		for _, item := range items {
+			if !contains(allowed, jsString(item)) {
+				return violation(codeInvalidEnum, key, "each of: "+strings.Join(allowed, " | "), value)
+			}
+		}
+	}
+	return nil
+}
+
+// numberOf is a declared number (int in schema.go, float64 from JSON).
+func numberOf(v any) float64 {
+	f, _ := asFloat(v)
+	return f
 }
 
 func contains(list []string, s string) bool {
@@ -391,23 +920,18 @@ func contains(list []string, s string) bool {
 }
 
 // divergences is the read-back backstop: which non-blank requested values
-// failed to land? Keys are visited sorted, for the same reason validate's are.
-func divergences(fields []M, body M, read func(string) any) []M {
+// failed to land? A write-only field is never read back, so it is exempt.
+func divergences(fields []M, keys []string, body M, read func(string) any) []M {
 	byName := map[string]M{}
 	for _, f := range fields {
 		byName[getStr(f, "name")] = f
 	}
-	keys := make([]string, 0, len(body))
-	for k := range body {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 
 	out := []M{}
 	for _, key := range keys {
 		requested := body[key]
 		f, known := byName[key]
-		if !known || getBool(f, "readOnly") {
+		if !known || getBool(f, "readOnly") || getBool(f, "writeOnly") {
 			continue
 		}
 		if isBlank(requested) {
@@ -458,32 +982,29 @@ func fieldPrint(f M) string {
 	if getBool(f, "dayKey") {
 		parts = append(parts, "day")
 	}
-	if max, ok := f["max"]; ok && max != nil {
-		parts = append(parts, "max="+toStr(max))
+	if isNumeric(f["max"]) {
+		parts = append(parts, "max="+toStr(f["max"]))
 	}
 	if getStr(f, "entity") != "" {
 		parts = append(parts, "entity="+getStr(f, "entity"))
 	}
 	if values := valuesOf(f); len(values) > 0 {
 		sorted := append([]string(nil), values...)
-		sort.Strings(sorted)
+		sort.Slice(sorted, func(i, j int) bool { return jsCompare(sorted[i], sorted[j]) < 0 })
 		parts = append(parts, "values="+strings.Join(sorted, "|"))
 	}
 	return strings.Join(parts, ":")
 }
 
 // stableJSON is JSON with keys sorted at every depth and no spaces, so
-// declaration order cannot move a hash. encoding/json sorts map keys at every
-// depth; HTML escaping is turned off so `<` survives as itself, as it does in
-// the Python and Node canonical forms.
+// declaration order cannot move a hash, written as JSON.stringify would (see
+// marshalJSON). Every reply body is written with it too.
 func stableJSON(value any) string {
-	var buf strings.Builder
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(value); err != nil {
+	data, err := marshalJSON(value)
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSuffix(buf.String(), "\n")
+	return string(data)
 }
 
 func operationPrint(o M) string {
@@ -501,17 +1022,14 @@ func operationPrint(o M) string {
 	if flags != "" {
 		head += ":" + flags
 	}
-	parts := []string{head}
-	if getStr(o, "module") != "" {
-		parts = append(parts, "mod="+getStr(o, "module"))
-	}
+	parts := []string{head, "mod=" + getStr(o, "module")}
 	if getStr(o, "entity") != "" {
 		parts = append(parts, "on="+getStr(o, "entity"))
 	}
 	if params, ok := o["params"].(M); ok && len(params) > 0 {
 		parts = append(parts, "params="+stableJSON(params))
 	}
-	if when, ok := o["appliesWhen"].(M); ok && len(when) > 0 {
+	if when, ok := o["appliesWhen"].(M); ok {
 		parts = append(parts, "when="+stableJSON(when))
 	}
 	return strings.Join(parts, ":")
@@ -545,11 +1063,11 @@ func schemaFingerprint(entities map[string]M, operations []M) string {
 	}
 	sort.Strings(ops)
 	joined := strings.Join(parts, ";") + "|" + strings.Join(ops, ",")
-	// djb2-xor over Unicode code points (Python iterates characters, not bytes),
-	// masked to 32 bits — uint32 arithmetic wraps to exactly that mask.
+	// djb2-xor over UTF-16 code units (JavaScript's charCodeAt), masked to 32
+	// bits — uint32 arithmetic wraps to exactly that mask.
 	var h uint32 = 5381
-	for _, r := range joined {
-		h = (h * 33) ^ uint32(r)
+	for _, unit := range utf16.Encode([]rune(joined)) {
+		h = (h * 33) ^ uint32(unit)
 	}
 	return "sv_" + strconv.FormatUint(uint64(h), 16)
 }
@@ -579,14 +1097,10 @@ func asDeclared(value any, declaredType string) any {
 		return value
 	}
 	if declaredType == "number" {
-		switch t := value.(type) {
-		case bool, float64, int, int64:
-			return value
-		case string:
-			if n, err := strconv.ParseFloat(t, 64); err == nil {
+		if t, ok := value.(string); ok {
+			if n := jsNumber(t); !math.IsNaN(n) && !math.IsInf(n, 0) {
 				return n
 			}
-			return value
 		}
 		return value
 	}
@@ -706,7 +1220,10 @@ func renderValue(v any) string {
 	if s, ok := v.(string); ok {
 		return `"` + s + `"`
 	}
-	return stableJSON(v)
+	if kind := reflect.ValueOf(v).Kind(); kind == reflect.Map || kind == reflect.Slice {
+		return stableJSON(v)
+	}
+	return jsString(v)
 }
 
 // predicateFields is every field name a predicate reads, for declaration-time
@@ -787,7 +1304,11 @@ func explain(p M, record M, index map[string]M) string {
 		if hasKey(inner, "eq") {
 			return getStr(inner, "field") + " is " + renderValue(readFieldAs(record, getStr(inner, "field"), index))
 		}
-		return "the condition is not met"
+		subject := getStr(inner, "field")
+		if hasKey(inner, "all") || hasKey(inner, "any") || hasKey(inner, "not") {
+			subject = "the record"
+		}
+		return "the condition on " + subject + " is not met"
 	}
 
 	field := getStr(p, "field")
@@ -879,7 +1400,7 @@ func (l *rateLimiter) check(caller, cls string) rateDecision {
 	w.count++
 	l.windows[key] = w
 	if w.count > limit {
-		retry := int((60000 - (now - w.start)) / 1000)
+		retry := int(math.Ceil(float64(60000-(now-w.start)) / 1000))
 		if retry < 1 {
 			retry = 1
 		}
@@ -1221,6 +1742,11 @@ type deviceRow struct {
 	Status         string   `json:"status"` // pending · approved · denied
 	ApprovedBy     string   `json:"approvedBy"`
 	ApprovedScopes []string `json:"approvedScopes"`
+	// the 127.0.0.1 port the agent waits on, when it is on the person's computer
+	LoopbackPort *int `json:"loopbackPort"`
+	// SHA-256 of the confirmation code issued at approval
+	ConfirmationHash string `json:"confirmationHash"`
+	ConfirmAttempts  int    `json:"confirmAttempts"`
 }
 
 // The keyed tables the auth layer owns: accounts, sessions, invites and device
@@ -1255,19 +1781,6 @@ func (e *UnsupportedFilter) Error() string {
 	return "filter expression is not supported by this backend: " + e.Expression
 }
 
-func filterStr(value any) string {
-	if value == nil {
-		return ""
-	}
-	if b, ok := value.(bool); ok {
-		if b {
-			return "true"
-		}
-		return "false"
-	}
-	return toStr(value)
-}
-
 func matchFilter(expr string) (func(M) bool, error) {
 	m := filterRe.FindStringSubmatchIndex(expr)
 	if m == nil {
@@ -1292,7 +1805,7 @@ func matchFilter(expr string) (func(M) bool, error) {
 		value = bare
 	}
 	return func(record M) bool {
-		current := filterStr(record[field])
+		current := toStr(record[field])
 		switch op {
 		case "=":
 			return current == value
@@ -1307,6 +1820,10 @@ func nowISO() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
+// coerce is a guarded raw value in its stored form: a number or boolean sent
+// as text becomes one, read as JavaScript reads it ("0x1A" is 26, "1e3" is
+// 1000). "Infinity" passes the guard there too, and is stored as JSON can hold
+// it: null.
 func coerce(field M, value any) any {
 	if value == nil || value == "" {
 		return value
@@ -1314,21 +1831,7 @@ func coerce(field M, value any) any {
 	if s, ok := value.(string); ok {
 		switch getStr(field, "type") {
 		case "number":
-			if strings.Contains(s, ".") {
-				if f, err := strconv.ParseFloat(s, 64); err == nil {
-					return f
-				}
-			}
-			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-				return n
-			}
-			// The guard already accepted the string as numeric, so the only way
-			// here is an exponent form ("1e5") — land it as a float rather than
-			// crash, which is where a raised ValueError would have gone.
-			if f, err := strconv.ParseFloat(s, 64); err == nil {
-				return f
-			}
-			return value
+			return jsNumber(s)
 		case "boolean":
 			return s == "true"
 		}
@@ -1336,28 +1839,33 @@ func coerce(field M, value any) any {
 	return value
 }
 
-// Store is the record store plus adapter-owned state (tasks, events,
-// idempotency keys, approvals, grants). NewStore builds the disposable
-// in-memory variant for tests and tooling; NewSqliteStore is the blueprint's
-// live store — same interface, records + idempotency keys durable in SQLite.
+// Store is the record store plus every piece of adapter-owned state: the task
+// queue, the event log, approvals, idempotency keys, the audit log,
+// credentials and the auth tables. All of it lives in one SQLite database —
+// NewSqliteStore opens the app's file inside the toolkit's lifecycle dataDir,
+// NewStore a private in-memory one for tests and tooling — so both variants
+// run the same code. Parity oracle: adapter-core store.ts (FileStateStore).
 //
 // Records are JSON rows in one table keyed (entity, id): the schema stays
 // declarative and additive (a new field simply appears in the JSON) while the
-// DATABASE is a real on-disk file inside the toolkit's declared lifecycle
-// dataDir — which is what backup/restore/promote protect. WAL keeps a reader
-// and a writer from blocking each other.
+// DATABASE is a real on-disk file — which is what backup/restore/promote
+// protect. WAL keeps a reader and a writer from blocking each other.
 //
-// Idempotency keys persist because a restart is exactly when a retried POST
-// arrives — an in-memory table would return a duplicate record instead of the
-// 409 the protocol promises. Credentials and the auth tables (accounts,
-// sessions, invites, device codes) persist too, in tables of their own: they
-// are adapter state, never records, and a person must not lose their account
-// or their agents' access to a restart. The task/event plane and approvals
-// stay in memory: they are runtime queues, not records.
+// Everything the adapter keeps survives a restart, because a restart is exactly
+// when it is needed: a retried POST arrives with its idempotency key, an agent
+// polls with the event cursor it saved, a person approves the key they were
+// shown, and a task credential names a task that must still be there (a task
+// id that restarted from 1 would hand an old credential a new task). Adapter
+// state is never a record: the records API cannot serve it.
 //
 // Writes are durable when the call returns — there is no separate persist()
-// step. A record read from the SQLite store is a COPY: mutate it, then
-// putRecord() it back, or the change never happened.
+// step. A record read from the store is a COPY: mutate it, then putRecord() it
+// back, or the change never happened.
+//
+// A database error is not an answer the store can give: it panics with a
+// storeFailure, as the reference's store throws. The request then answers
+// 500 adapter_error — or operation_failed inside an operation runner — rather
+// than reporting a write that never happened.
 //
 // A Store is a handle on one shared storeState. The handle an operation runner
 // is given also knows who called the runner, so a task its trigger queues
@@ -1380,107 +1888,84 @@ type storeState struct {
 	WantsSeed bool
 
 	// One mutex guards everything: net/http serves concurrently, and one
-	// connection guarded by one lock keeps SQLite correct without a pool.
+	// connection guarded by one lock keeps SQLite correct without a pool, and
+	// makes each multi-statement change one step.
 	mu sync.Mutex
-	db *sql.DB // nil for the in-memory variant
-
-	rows      map[string]map[string]M
-	rowOrder  map[string][]string // insertion order, so listing is deterministic
-	memIdem   map[string]string
-	tasks     map[string]M
-	taskOrder []string
-	events    []M
-	approvals map[string]bool
-	// The in-memory variant's credentials (by credentialId, plus an index by
-	// token hash) and auth tables.
-	memGrants  *memTable
-	tokenIndex map[string]string
-	memAuth    map[string]*memTable
-	taskSeq    int
-	eventSeq   int
+	db *sql.DB
+	// The app every task and event names (set by NewAdapter).
+	app string
 	// The event types this app may emit, set by NewAdapter from the app's
 	// declarations. Empty means none were declared.
 	eventTypes map[string]bool
-	// occurrence key -> task id, so one occurrence makes one task
-	dedup map[string]string
+	// The clock timestamps and expiries are read from.
+	now func() time.Time
 }
 
-func newStoreState(seed map[string][]M) *Store {
+// How long adapter state is kept (adapter-core store.ts).
+const (
+	// An idempotency key answers a retry for at least this long.
+	idempotencyTTL = 24 * time.Hour
+	// An approval key must be used this soon after it was issued.
+	approvalTTL = 10 * time.Minute
+	// The event log and the audit log are rings of this many rows: the oldest
+	// fall off, and event sequence numbers stay monotonic across the prune, so
+	// a saved cursor keeps working.
+	eventRetention = 5000
+	auditRetention = 5000
+)
+
+// storeFailure is a database error the store cannot answer around.
+type storeFailure struct{ err error }
+
+func (f *storeFailure) Error() string { return "the database failed: " + f.err.Error() }
+
+// must raises a database error as a storeFailure.
+func must(err error) {
+	if err != nil {
+		panic(&storeFailure{err})
+	}
+}
+
+// queryer is what both the database and a transaction answer, so one helper
+// serves inside a transaction and outside one.
+type queryer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+var storeSchema = []string{
+	"CREATE TABLE IF NOT EXISTS records (entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (entity, id))",
+	// Idempotency keys, by scope (an entity, `entity#id` for an update,
+	// `op:<name>`) and key: the record (or operation) they produced, and when.
+	"CREATE TABLE IF NOT EXISTS idem (entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (entity, key))",
+	// Credentials, found by the hash of their token — never the token.
+	"CREATE TABLE IF NOT EXISTS grants (credential_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, data TEXT NOT NULL)",
+	"CREATE INDEX IF NOT EXISTS grants_by_token ON grants (token_hash)",
+	// The auth tables (users, sessions, invites, devices).
+	"CREATE TABLE IF NOT EXISTS auth (tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (tbl, key))",
+	// Approval keys issued and not yet used, with when they stop working (unix ms).
+	"CREATE TABLE IF NOT EXISTS approvals (key TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)",
+	"CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, data TEXT NOT NULL)",
+	"CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+	// One occurrence makes one task: occurrence key -> task id.
+	"CREATE TABLE IF NOT EXISTS dedup (key TEXT PRIMARY KEY, task_id TEXT NOT NULL)",
+	"CREATE TABLE IF NOT EXISTS audit (seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL)",
+	// Counters that must outlive the rows they number (the event sequence).
+	"CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+}
+
+func openStore(dsn string, seed map[string][]M) (*Store, error) {
 	if seed == nil {
 		seed = map[string][]M{}
 	}
-	return &Store{storeState: &storeState{
-		Seed:       seed,
-		WantsSeed:  true,
-		rows:       map[string]map[string]M{},
-		rowOrder:   map[string][]string{},
-		memIdem:    map[string]string{},
-		tasks:      map[string]M{},
-		approvals:  map[string]bool{},
-		memGrants:  newMemTable(),
-		tokenIndex: map[string]string{},
-		memAuth:    map[string]*memTable{},
-		eventTypes: map[string]bool{},
-		dedup:      map[string]string{},
-	}}
-}
-
-// forCaller is this store as handed to an operation runner called by
-// `principal`: the same records and queue, with the caller bound to trigger.
-func (s *Store) forCaller(principal string) *Store {
-	return &Store{storeState: s.storeState, caller: principal}
-}
-
-// memTable is one keyed table of the in-memory variant. Rows are held as JSON,
-// so a read is a copy exactly as it is from SQLite, in insertion order.
-type memTable struct {
-	rows  map[string][]byte
-	order []string
-}
-
-func newMemTable() *memTable { return &memTable{rows: map[string][]byte{}} }
-
-func (t *memTable) put(key string, data []byte) {
-	if _, existed := t.rows[key]; !existed {
-		t.order = append(t.order, key)
-	}
-	t.rows[key] = data
-}
-
-func (t *memTable) remove(key string) {
-	if _, ok := t.rows[key]; !ok {
-		return
-	}
-	delete(t.rows, key)
-	for i, k := range t.order {
-		if k == key {
-			t.order = append(t.order[:i], t.order[i+1:]...)
-			break
-		}
-	}
-}
-
-// NewStore is the in-memory variant — always empty, so it always takes the seed.
-func NewStore(seed map[string][]M) *Store { return newStoreState(seed) }
-
-// NewSqliteStore opens (or creates) the live database file.
-func NewSqliteStore(path string, seed map[string][]M) (*Store, error) {
-	s := newStoreState(seed)
-	full, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return nil, err
-	}
-	_, statErr := os.Stat(full)
-	fresh := os.IsNotExist(statErr)
-	db, err := sql.Open("sqlite", full)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	// One connection, guarded by the store mutex — SQLite is happiest that way,
-	// and the interface stays a plain synchronous call.
+	// the interface stays a plain synchronous call, and an in-memory database
+	// lives exactly as long as its one connection.
 	db.SetMaxOpenConns(1)
 	// WAL keeps a reader and a writer from blocking each other. The pragma
 	// answers with a row (the new mode), so it goes through QueryRow — some
@@ -1490,71 +1975,187 @@ func NewSqliteStore(path string, seed map[string][]M) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	for _, stmt := range []string{
-		"CREATE TABLE IF NOT EXISTS records (entity TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (entity, id))",
-		"CREATE TABLE IF NOT EXISTS idem (entity TEXT NOT NULL, key TEXT NOT NULL, rec_id TEXT NOT NULL, PRIMARY KEY (entity, key))",
-		// Credentials, found by the hash of their token — never the token.
-		"CREATE TABLE IF NOT EXISTS grants (credential_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, data TEXT NOT NULL)",
-		"CREATE INDEX IF NOT EXISTS grants_by_token ON grants (token_hash)",
-		// The auth tables (users, sessions, invites, devices): adapter state,
-		// apart from the records table so the records API can never serve them.
-		"CREATE TABLE IF NOT EXISTS auth (tbl TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (tbl, key))",
-	} {
+	for _, stmt := range storeSchema {
 		if _, err := db.Exec(stmt); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	s.db = db
+	// Idempotency keys did not expire before 0.2, so an older database's table
+	// has no time column: add it, dating the keys it holds from now.
+	var dated int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('idem') WHERE name = 'at'").Scan(&dated); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if dated == 0 {
+		for _, stmt := range []string{"ALTER TABLE idem ADD COLUMN at INTEGER NOT NULL DEFAULT 0", "UPDATE idem SET at = ?"} {
+			if _, err := db.Exec(stmt, time.Now().UnixMilli()); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
+	}
+	return &Store{storeState: &storeState{
+		Seed: seed, WantsSeed: true, db: db, eventTypes: map[string]bool{}, now: time.Now,
+	}}, nil
+}
+
+// NewStore is a private in-memory store — always empty, so it always takes
+// the seed.
+func NewStore(seed map[string][]M) *Store {
+	s, err := openStore(":memory:", seed)
+	must(err)
+	return s
+}
+
+// NewSqliteStore opens (or creates) the live database file.
+func NewSqliteStore(path string, seed map[string][]M) (*Store, error) {
+	full, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return nil, err
+	}
+	_, statErr := os.Stat(full)
+	fresh := os.IsNotExist(statErr)
+	s, err := openStore(full, seed)
+	if err != nil {
+		return nil, err
+	}
 	s.WantsSeed = fresh
 	return s, nil
 }
 
-// Close releases the database file (the last connection closing checkpoints
-// the WAL into the main file). A no-op on the in-memory variant.
-func (s *Store) Close() error {
-	if s.db == nil {
-		return nil
+// Close releases the database (the last connection closing checkpoints the
+// WAL into the main file).
+func (s *Store) Close() error { return s.db.Close() }
+
+// forCaller is this store as handed to an operation runner called by
+// `principal`: the same records and queue, with the caller bound to trigger.
+func (s *Store) forCaller(principal string) *Store {
+	return &Store{storeState: s.storeState, caller: principal}
+}
+
+// transaction runs change as one step under the store lock.
+func (s *Store) transaction(change func(tx *sql.Tx)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	must(err)
+	defer tx.Rollback() // a no-op once committed; undoes a change that panicked
+	change(tx)
+	must(tx.Commit())
+}
+
+// putJSON writes value as one row's JSON, by an upsert statement whose last
+// argument is the data.
+func putJSON(q queryer, stmt string, value any, args ...any) {
+	data, err := marshalJSON(value)
+	must(err)
+	_, err = q.Exec(stmt, append(args, string(data))...)
+	must(err)
+}
+
+// rowJSON decodes one row's JSON into out; false when there is no such row.
+func rowJSON(q queryer, out any, query string, args ...any) bool {
+	var data string
+	err := q.QueryRow(query, args...).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
 	}
-	return s.db.Close()
+	must(err)
+	return json.Unmarshal([]byte(data), out) == nil
+}
+
+// eachJSON decodes every row a query returns, in order, skipping one that is
+// not JSON of out's shape.
+func eachJSON[T any](q queryer, query string, args ...any) []T {
+	rows, err := q.Query(query, args...)
+	must(err)
+	defer rows.Close()
+	out := []T{}
+	for rows.Next() {
+		var data string
+		must(rows.Scan(&data))
+		var row T
+		if json.Unmarshal([]byte(data), &row) == nil {
+			out = append(out, row)
+		}
+	}
+	must(rows.Err())
+	return out
 }
 
 /* records ------------------------------------------------------------- */
 
-// allRecords is every record of one entity — the single hook the durable
-// backend swaps for reads; listRecords keeps the shared filter/sort/page.
+// allRecords is every record of one entity, in the table's own order (by id).
 func (s *Store) allRecords(entity string) []M {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		out := make([]M, 0, len(s.rowOrder[entity]))
-		for _, id := range s.rowOrder[entity] {
-			out = append(out, s.rows[entity][id])
-		}
-		return out
-	}
-	rows, err := s.db.Query("SELECT data FROM records WHERE entity = ?", entity)
-	if err != nil {
-		return []M{}
-	}
-	defer rows.Close()
-	out := []M{}
-	for rows.Next() {
-		var data string
-		if rows.Scan(&data) != nil {
-			continue
-		}
-		var rec M
-		if json.Unmarshal([]byte(data), &rec) == nil {
-			out = append(out, rec)
-		}
-	}
-	return out
+	return eachJSON[M](s.db, "SELECT data FROM records WHERE entity = ?", entity)
 }
 
-// listRecords filters, sorts and pages one entity. `where` (field -> value) is
-// the adapter's own constraint — a member sees only the records it owns — so
-// it is applied first, before anything is counted or paged.
+// compareValues is the reference binding's sort comparison: a value equal to
+// the other compares equal, a missing one sorts first, and the rest compare
+// as text.
+func compareValues(a, b any) int {
+	switch {
+	case a == nil && b == nil, sameScalar(a, b):
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	case jsCompare(jsString(a), jsString(b)) < 0:
+		return -1
+	}
+	return 1
+}
+
+// sameScalar is JavaScript's === for the scalars a record holds.
+func sameScalar(a, b any) bool {
+	switch x := a.(type) {
+	case string:
+		y, ok := b.(string)
+		return ok && x == y
+	case bool:
+		y, ok := b.(bool)
+		return ok && x == y
+	}
+	x, aNumber := asFloat(a)
+	y, bNumber := asFloat(b)
+	return aNumber && bNumber && x == y
+}
+
+// jsSlice is the index range Array.prototype.slice(start, end) selects from n
+// items — NaN as 0, fractions truncated, negatives counted from the end — so a
+// page asked for as perPage=0, perPage=abc or page=0 answers what it answers on
+// the reference.
+func jsSlice(n int, start, end float64) (int, int) {
+	index := func(x float64) int {
+		if math.IsNaN(x) {
+			return 0
+		}
+		x = math.Trunc(x)
+		if x < 0 {
+			return int(math.Max(float64(n)+x, 0))
+		}
+		return int(math.Min(x, float64(n)))
+	}
+	from, to := index(start), index(end)
+	if to < from {
+		to = from
+	}
+	return from, to
+}
+
+// listRecords filters, sorts and pages one entity as the reference binding
+// does. `where` (field -> value) is the adapter's own constraint — a member
+// sees only the records it owns — so it is applied first, before anything is
+// counted or paged. `perPage` defaults to every record and `page` to 1; the
+// reply echoes both as given.
 func (s *Store) listRecords(entity string, query M) (M, error) {
 	items := s.allRecords(entity)
 	if where, ok := query["where"].(map[string]string); ok && len(where) > 0 {
@@ -1587,66 +2188,33 @@ func (s *Store) listRecords(entity string, query M) (M, error) {
 		items = kept
 	}
 	if sortKey := getStr(query, "sort"); sortKey != "" {
-		desc := strings.HasPrefix(sortKey, "-")
-		key := strings.TrimPrefix(sortKey, "-")
-		// Mirrors the oracle's (value is None, str(value)) sort tuple: records
-		// holding a value come first ascending, blanks last; desc reverses the
-		// whole ordering, blanks included.
+		key, direction := sortKey, 1
+		if strings.HasPrefix(sortKey, "-") {
+			key, direction = sortKey[1:], -1
+		}
 		sort.SliceStable(items, func(i, j int) bool {
-			a, b := items[i], items[j]
-			if desc {
-				a, b = b, a
-			}
-			aNil, bNil := a[key] == nil, b[key] == nil
-			if aNil != bNil {
-				return !aNil
-			}
-			return toStr(a[key]) < toStr(b[key])
+			return compareValues(items[i][key], items[j][key])*direction < 0
 		})
 	}
 	total := len(items)
-	perPage := total
-	if truthy(query["perPage"]) {
-		perPage = intOf(query["perPage"])
+	perPage, ok := asFloat(query["perPage"])
+	if !ok {
+		perPage = float64(total)
 	}
-	page := 1
-	if truthy(query["page"]) {
-		page = intOf(query["page"])
+	page, ok := asFloat(query["page"])
+	if !ok {
+		page = 1
 	}
-	paged := items
-	if perPage != 0 {
-		start := (page - 1) * perPage
-		if start < 0 {
-			start = 0
-		}
-		if start > total {
-			start = total
-		}
-		end := start + perPage
-		if end > total {
-			end = total
-		}
-		paged = items[start:end]
-	}
-	if paged == nil {
-		paged = []M{}
-	}
-	return M{"items": paged, "page": page, "perPage": perPage, "totalItems": total}, nil
+	start := (page - 1) * perPage
+	from, to := jsSlice(total, start, start+perPage)
+	return M{"items": items[from:to], "page": page, "perPage": perPage, "totalItems": total}, nil
 }
 
 func (s *Store) getRecord(entity, recID string) M {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return s.rows[entity][recID]
-	}
-	var data string
-	err := s.db.QueryRow("SELECT data FROM records WHERE entity = ? AND id = ?", entity, recID).Scan(&data)
-	if err != nil {
-		return nil
-	}
 	var rec M
-	if json.Unmarshal([]byte(data), &rec) != nil {
+	if !rowJSON(s.db, &rec, "SELECT data FROM records WHERE entity = ? AND id = ?", entity, recID) {
 		return nil
 	}
 	return rec
@@ -1655,57 +2223,27 @@ func (s *Store) getRecord(entity, recID string) M {
 func (s *Store) putRecord(entity string, rec M) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := getStr(rec, "id")
-	if s.db == nil {
-		if s.rows[entity] == nil {
-			s.rows[entity] = map[string]M{}
-		}
-		if _, existed := s.rows[entity][id]; !existed {
-			s.rowOrder[entity] = append(s.rowOrder[entity], id)
-		}
-		s.rows[entity][id] = rec
-		return
-	}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return
-	}
-	s.db.Exec(
-		"INSERT INTO records (entity, id, data) VALUES (?, ?, ?) ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data",
-		entity, id, string(data))
+	putJSON(s.db, "INSERT INTO records (entity, id, data) VALUES (?, ?, ?) "+
+		"ON CONFLICT (entity, id) DO UPDATE SET data = excluded.data", rec, entity, getStr(rec, "id"))
 }
 
 func (s *Store) deleteRecord(entity, recID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		if _, ok := s.rows[entity][recID]; !ok {
-			return false
-		}
-		delete(s.rows[entity], recID)
-		order := s.rowOrder[entity]
-		for i, id := range order {
-			if id == recID {
-				s.rowOrder[entity] = append(order[:i], order[i+1:]...)
-				break
-			}
-		}
-		return true
-	}
 	res, err := s.db.Exec("DELETE FROM records WHERE entity = ? AND id = ?", entity, recID)
-	if err != nil {
-		return false
-	}
-	n, _ := res.RowsAffected()
+	must(err)
+	n, err := res.RowsAffected()
+	must(err)
 	return n > 0
 }
 
 /* grants ---------------------------------------------------------------- */
-// Credentials, keyed by credentialId and found by the hash of their token.
+// Credentials, keyed by credentialId and found by the hash of their token. A
+// row without a token hash is a plaintext grant from 0.1, which is not loaded:
+// the host seeds its own again at boot, hashed.
 
-func decodeGrant(data []byte) *Grant {
-	var g Grant
-	if json.Unmarshal(data, &g) != nil || g.TokenHash == "" {
+func usableGrant(g Grant, found bool) *Grant {
+	if !found || g.TokenHash == "" {
 		return nil
 	}
 	return &g
@@ -1713,38 +2251,15 @@ func decodeGrant(data []byte) *Grant {
 
 // grantLocked is one grant by id; the caller holds s.mu.
 func (s *Store) grantLocked(credentialID string) *Grant {
-	if s.db == nil {
-		data, ok := s.memGrants.rows[credentialID]
-		if !ok {
-			return nil
-		}
-		return decodeGrant(data)
-	}
-	var data string
-	if s.db.QueryRow("SELECT data FROM grants WHERE credential_id = ?", credentialID).Scan(&data) != nil {
-		return nil
-	}
-	return decodeGrant([]byte(data))
+	var g Grant
+	return usableGrant(g, rowJSON(s.db, &g, "SELECT data FROM grants WHERE credential_id = ?", credentialID))
 }
 
 // putGrantLocked writes one grant; the caller holds s.mu.
 func (s *Store) putGrantLocked(g Grant) {
-	data, err := json.Marshal(g)
-	if err != nil {
-		return
-	}
-	if s.db == nil {
-		if previous := s.grantLocked(g.CredentialID); previous != nil && previous.TokenHash != g.TokenHash {
-			delete(s.tokenIndex, previous.TokenHash)
-		}
-		s.memGrants.put(g.CredentialID, data)
-		s.tokenIndex[g.TokenHash] = g.CredentialID
-		return
-	}
-	s.db.Exec(
-		"INSERT INTO grants (credential_id, token_hash, data) VALUES (?, ?, ?) "+
-			"ON CONFLICT (credential_id) DO UPDATE SET token_hash = excluded.token_hash, data = excluded.data",
-		g.CredentialID, g.TokenHash, string(data))
+	putJSON(s.db, "INSERT INTO grants (credential_id, token_hash, data) VALUES (?, ?, ?) "+
+		"ON CONFLICT (credential_id) DO UPDATE SET token_hash = excluded.token_hash, data = excluded.data",
+		g, g.CredentialID, g.TokenHash)
 }
 
 func (s *Store) putGrant(g Grant) {
@@ -1762,18 +2277,8 @@ func (s *Store) grantByID(credentialID string) *Grant {
 func (s *Store) grantByTokenHash(tokenHash string) *Grant {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		id, ok := s.tokenIndex[tokenHash]
-		if !ok {
-			return nil
-		}
-		return s.grantLocked(id)
-	}
-	var data string
-	if s.db.QueryRow("SELECT data FROM grants WHERE token_hash = ?", tokenHash).Scan(&data) != nil {
-		return nil
-	}
-	return decodeGrant([]byte(data))
+	var g Grant
+	return usableGrant(g, rowJSON(s.db, &g, "SELECT data FROM grants WHERE token_hash = ?", tokenHash))
 }
 
 // updateGrant changes one grant in a single step, so two requests touching the
@@ -1794,14 +2299,8 @@ func (s *Store) updateGrant(credentialID string, change func(*Grant)) bool {
 func (s *Store) deleteGrant(credentialID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		if g := s.grantLocked(credentialID); g != nil {
-			delete(s.tokenIndex, g.TokenHash)
-		}
-		s.memGrants.remove(credentialID)
-		return
-	}
-	s.db.Exec("DELETE FROM grants WHERE credential_id = ?", credentialID)
+	_, err := s.db.Exec("DELETE FROM grants WHERE credential_id = ?", credentialID)
+	must(err)
 }
 
 // listGrants is every grant, in the order they were first stored.
@@ -1809,26 +2308,9 @@ func (s *Store) listGrants() []Grant {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []Grant{}
-	if s.db == nil {
-		for _, id := range s.memGrants.order {
-			if g := decodeGrant(s.memGrants.rows[id]); g != nil {
-				out = append(out, *g)
-			}
-		}
-		return out
-	}
-	rows, err := s.db.Query("SELECT data FROM grants ORDER BY rowid")
-	if err != nil {
-		return out
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var data string
-		if rows.Scan(&data) != nil {
-			continue
-		}
-		if g := decodeGrant([]byte(data)); g != nil {
-			out = append(out, *g)
+	for _, g := range eachJSON[Grant](s.db, "SELECT data FROM grants ORDER BY rowid") {
+		if g.TokenHash != "" {
+			out = append(out, g)
 		}
 	}
 	return out
@@ -1837,60 +2319,25 @@ func (s *Store) listGrants() []Grant {
 /* auth tables ------------------------------------------------------------ */
 // users · sessions · invites · devices, each row JSON under its key.
 
-func (s *Store) memAuthTable(table string) *memTable {
-	t, ok := s.memAuth[table]
-	if !ok {
-		t = newMemTable()
-		s.memAuth[table] = t
-	}
-	return t
-}
-
 // authRow decodes one row into out; false when there is none.
 func (s *Store) authRow(table, key string, out any) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var data []byte
-	if s.db == nil {
-		raw, ok := s.memAuthTable(table).rows[key]
-		if !ok {
-			return false
-		}
-		data = raw
-	} else {
-		var text string
-		if s.db.QueryRow("SELECT data FROM auth WHERE tbl = ? AND key = ?", table, key).Scan(&text) != nil {
-			return false
-		}
-		data = []byte(text)
-	}
-	return json.Unmarshal(data, out) == nil
+	return rowJSON(s.db, out, "SELECT data FROM auth WHERE tbl = ? AND key = ?", table, key)
 }
 
 func (s *Store) putAuthRow(table, key string, row any) {
-	data, err := json.Marshal(row)
-	if err != nil {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		s.memAuthTable(table).put(key, data)
-		return
-	}
-	s.db.Exec(
-		"INSERT INTO auth (tbl, key, data) VALUES (?, ?, ?) ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data",
-		table, key, string(data))
+	putJSON(s.db, "INSERT INTO auth (tbl, key, data) VALUES (?, ?, ?) "+
+		"ON CONFLICT (tbl, key) DO UPDATE SET data = excluded.data", row, table, key)
 }
 
 func (s *Store) deleteAuthRow(table, key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		s.memAuthTable(table).remove(key)
-		return
-	}
-	s.db.Exec("DELETE FROM auth WHERE tbl = ? AND key = ?", table, key)
+	_, err := s.db.Exec("DELETE FROM auth WHERE tbl = ? AND key = ?", table, key)
+	must(err)
 }
 
 // keyedRow is one auth-table row with the key it is stored under.
@@ -1901,141 +2348,277 @@ type keyedRow[T any] struct {
 
 // authRows is every row of one auth table, decoded, in insertion order.
 func authRows[T any](s *Store, table string) []keyedRow[T] {
-	type raw struct {
-		key  string
-		data []byte
-	}
-	found := []raw{}
 	s.mu.Lock()
-	if s.db == nil {
-		t := s.memAuthTable(table)
-		for _, key := range t.order {
-			found = append(found, raw{key, t.rows[key]})
-		}
-	} else if rows, err := s.db.Query("SELECT key, data FROM auth WHERE tbl = ? ORDER BY rowid", table); err == nil {
-		for rows.Next() {
-			var key, data string
-			if rows.Scan(&key, &data) == nil {
-				found = append(found, raw{key, []byte(data)})
-			}
-		}
-		rows.Close()
-	}
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query("SELECT key, data FROM auth WHERE tbl = ? ORDER BY rowid", table)
+	must(err)
+	defer rows.Close()
 	out := []keyedRow[T]{}
-	for _, r := range found {
+	for rows.Next() {
+		var key, data string
+		must(rows.Scan(&key, &data))
 		var row T
-		if json.Unmarshal(r.data, &row) == nil {
-			out = append(out, keyedRow[T]{r.key, row})
+		if json.Unmarshal([]byte(data), &row) == nil {
+			out = append(out, keyedRow[T]{key, row})
 		}
 	}
+	must(rows.Err())
 	return out
 }
 
 /* idempotency / approvals ------------------------------------------------ */
 
-func (s *Store) idemGet(entity, key string) string {
+// idempotencyGet is what an idempotency key already produced in its scope,
+// while it is less than idempotencyTTL old.
+func (s *Store) idempotencyGet(scope, key string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return s.memIdem[entity+"\x00"+key]
+	var produced string
+	var at int64
+	err := s.db.QueryRow("SELECT rec_id, at FROM idem WHERE entity = ? AND key = ?", scope, key).Scan(&produced, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false
 	}
-	var recID string
-	if s.db.QueryRow("SELECT rec_id FROM idem WHERE entity = ? AND key = ?", entity, key).Scan(&recID) != nil {
-		return ""
+	must(err)
+	if s.now().UnixMilli()-at > idempotencyTTL.Milliseconds() {
+		_, err := s.db.Exec("DELETE FROM idem WHERE entity = ? AND key = ?", scope, key)
+		must(err)
+		return "", false
 	}
-	return recID
+	return produced, true
 }
 
-func (s *Store) idemPut(entity, key, recID string) {
+func (s *Store) idempotencyPut(scope, key, produced string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		s.memIdem[entity+"\x00"+key] = recID
-		return
-	}
-	s.db.Exec(
-		"INSERT INTO idem (entity, key, rec_id) VALUES (?, ?, ?) ON CONFLICT (entity, key) DO UPDATE SET rec_id = excluded.rec_id",
-		entity, key, recID)
+	_, err := s.db.Exec("INSERT INTO idem (entity, key, rec_id, at) VALUES (?, ?, ?, ?) "+
+		"ON CONFLICT (entity, key) DO UPDATE SET rec_id = excluded.rec_id, at = excluded.at",
+		scope, key, produced, s.now().UnixMilli())
+	must(err)
 }
 
+// approvalIssue records an approval key, usable for approvalTTL.
 func (s *Store) approvalIssue(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.approvals[key] = true
+	_, err := s.db.Exec("INSERT INTO approvals (key, expires_at) VALUES (?, ?) "+
+		"ON CONFLICT (key) DO UPDATE SET expires_at = excluded.expires_at",
+		key, s.now().Add(approvalTTL).UnixMilli())
+	must(err)
 }
 
+// approvalConsume uses up an approval key: true when it was issued and has
+// not expired. Single use either way.
 func (s *Store) approvalConsume(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.approvals[key] {
-		delete(s.approvals, key)
-		return true
+	var expiresAt int64
+	err := s.db.QueryRow("SELECT expires_at FROM approvals WHERE key = ?", key).Scan(&expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
 	}
-	return false
+	must(err)
+	_, err = s.db.Exec("DELETE FROM approvals WHERE key = ?", key)
+	must(err)
+	return expiresAt >= s.now().UnixMilli()
 }
 
-/* tasks / events ---------------------------------------------------------- */
+/* events ---------------------------------------------------------------- */
 
-func (s *Store) appendEvent(etype string, payload M) M {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.eventSeq++
-	ev := M{
-		"id": fmt.Sprintf("ev_%d", s.eventSeq), "app": nil, "type": etype,
-		"payload": payload, "createdAt": nowISO(), "seq": s.eventSeq,
-	}
-	s.events = append(s.events, ev)
+// Event is one entry in the app's event log. Seq orders it and is the cursor
+// an agent reads from; it is not on the wire.
+type Event struct {
+	Seq       int64  `json:"seq"`
+	ID        string `json:"id"`
+	App       string `json:"app"`
+	Type      string `json:"type"`
+	Payload   M      `json:"payload"`
+	CreatedAt string `json:"createdAt"`
+}
+
+func (s *Store) appendEvent(etype string, payload M) Event {
+	var ev Event
+	s.transaction(func(tx *sql.Tx) {
+		var seq int64
+		if err := tx.QueryRow("SELECT value FROM counters WHERE name = 'events'").Scan(&seq); !errors.Is(err, sql.ErrNoRows) {
+			must(err)
+		}
+		seq++
+		ev = Event{
+			Seq: seq, ID: newID("evt"), App: s.app, Type: etype,
+			Payload: jsonSafe(payload).(M), CreatedAt: isoOf(s.now()),
+		}
+		putJSON(tx, "INSERT INTO events (seq, data) VALUES (?, ?)", ev, seq)
+		_, err := tx.Exec("INSERT INTO counters (name, value) VALUES ('events', ?) "+
+			"ON CONFLICT (name) DO UPDATE SET value = excluded.value", seq)
+		must(err)
+		_, err = tx.Exec("DELETE FROM events WHERE seq <= ?", seq-eventRetention)
+		must(err)
+	})
 	return ev
 }
 
-func (s *Store) eventsSince(cursor string) M {
+// eventsSince is every retained event after a cursor, and the cursor to read
+// from next. A cursor that is not a number reads from the beginning
+// (`Number(cursor) || 0`, as the reference has it).
+func (s *Store) eventsSince(cursor string) ([]Event, string) {
+	from := 0.0
+	if n := jsNumber(cursor); cursor != "" && !math.IsNaN(n) {
+		from = n
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	after := 0
-	if cursor != "" {
-		if n, err := strconv.Atoi(cursor); err == nil && n >= 0 {
-			after = n
-		}
+	events := eachJSON[Event](s.db, "SELECT data FROM events WHERE seq > ? ORDER BY seq", from)
+	if len(events) > 0 {
+		return events, strconv.FormatInt(events[len(events)-1].Seq, 10)
 	}
-	fresh := []M{}
-	for _, e := range s.events {
-		if intOf(e["seq"]) > after {
-			fresh = append(fresh, e)
-		}
-	}
-	next := cursor
-	if next == "" {
-		next = "0"
-	}
-	if len(fresh) > 0 {
-		next = strconv.Itoa(intOf(fresh[len(fresh)-1]["seq"]))
-	}
-	return M{"events": fresh, "nextCursor": next}
+	return events, jsNumberString(from)
 }
 
-// enqueueTask queues one task. `principal` is who asked for the work
-// (spec/v0_2/auth.md §6.1); "" for work the app queues on its own, recorded as
-// null and run as the owner.
-func (s *Store) enqueueTask(eventID, capability string, payload M, principal, dedupKey string) M {
+/* tasks ------------------------------------------------------------------ */
+
+// Task is one unit of work on the app's queue (A2APP-SPEC 6), as stored.
+type Task struct {
+	ID       string       `json:"id"`
+	App      string       `json:"app"`
+	Event    string       `json:"event"`
+	Status   string       `json:"status"`
+	Request  TaskRequest  `json:"request"`
+	Claim    *TaskClaim   `json:"claim"`
+	Progress TaskProgress `json:"progress"`
+	Result   any          `json:"result"`
+	Reason   *string      `json:"reason"`
+	Ask      any          `json:"ask"`
+	// times, and how often the task has been handed out — not on the wire
+	CreatedAt  string  `json:"createdAt"`
+	UpdatedAt  string  `json:"updatedAt"`
+	DedupKey   *string `json:"dedupKey"`
+	Deliveries int     `json:"deliveries"`
+}
+
+type TaskRequest struct {
+	Capability string `json:"capability"`
+	Payload    M      `json:"payload"`
+	// who queued it (spec/v0_2/auth.md §6.1); nil for work the app queued on
+	// its own, which runs as the owner
+	Principal *string `json:"principal"`
+}
+
+type TaskClaim struct {
+	CredentialID string `json:"credentialId"`
+	Principal    string `json:"principal"`
+	ClaimedAt    string `json:"claimedAt"`
+}
+
+type TaskProgress struct {
+	Step    *string  `json:"step"`
+	Percent *float64 `json:"percent"`
+}
+
+func readTask(q queryer, id string) *Task {
+	var t Task
+	if !rowJSON(q, &t, "SELECT data FROM tasks WHERE id = ?", id) {
+		return nil
+	}
+	return &t
+}
+
+func writeTask(q queryer, t Task) {
+	putJSON(q, "INSERT INTO tasks (id, data) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET data = excluded.data", t, t.ID)
+}
+
+// enqueueTask queues one task, unless dedupKey already made one: then that
+// task is the answer, whatever its status. `principal` is who asked for the
+// work (spec/v0_2/auth.md §6.1); "" for work the app queues on its own.
+func (s *Store) enqueueTask(event, capability string, payload M, principal, dedupKey string) Task {
+	var task Task
+	s.transaction(func(tx *sql.Tx) {
+		if dedupKey != "" {
+			var existing string
+			err := tx.QueryRow("SELECT task_id FROM dedup WHERE key = ?", dedupKey).Scan(&existing)
+			if err == nil {
+				if t := readTask(tx, existing); t != nil {
+					task = *t
+					return
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				must(err)
+			}
+		}
+		created := isoOf(s.now())
+		zero := 0.0
+		task = Task{
+			ID: newID("tsk"), App: s.app, Event: event, Status: "submitted",
+			Request:   TaskRequest{Capability: capability, Payload: jsonSafe(payload).(M)},
+			Progress:  TaskProgress{Percent: &zero},
+			CreatedAt: created, UpdatedAt: created, Deliveries: 1,
+		}
+		if principal != "" {
+			task.Request.Principal = &principal
+		}
+		if dedupKey != "" {
+			task.DedupKey = &dedupKey
+			_, err := tx.Exec("INSERT INTO dedup (key, task_id) VALUES (?, ?) "+
+				"ON CONFLICT (key) DO UPDATE SET task_id = excluded.task_id", dedupKey, task.ID)
+			must(err)
+		}
+		writeTask(tx, task)
+	})
+	return task
+}
+
+func (s *Store) getTask(id string) *Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.tasks[s.dedup[dedupKey]]; ok && dedupKey != "" {
-		return existing
+	return readTask(s.db, id)
+}
+
+// listTasks is every task (with `status` only those), oldest first.
+func (s *Store) listTasks(status string) []Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []Task{}
+	for _, t := range eachJSON[Task](s.db, "SELECT data FROM tasks ORDER BY rowid") {
+		if status == "" || t.Status == status {
+			out = append(out, t)
+		}
 	}
-	s.taskSeq++
-	task := M{
-		"id": fmt.Sprintf("task_%d", s.taskSeq), "app": nil, "event": eventID, "status": "submitted",
-		"request": M{"capability": capability, "payload": payload, "principal": orNull(principal)}, "claim": nil,
-		"progress": M{}, "result": nil, "reason": nil, "ask": nil,
-		"createdAt": nowISO(), "updatedAt": nowISO(), "deliveries": 1,
-	}
-	s.tasks[getStr(task, "id")] = task
-	s.taskOrder = append(s.taskOrder, getStr(task, "id"))
-	if dedupKey != "" {
-		s.dedup[dedupKey] = getStr(task, "id")
-	}
-	return task
+	return out
+}
+
+// saveTask writes a changed task, stamping when it changed.
+func (s *Store) saveTask(t *Task) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t.UpdatedAt = isoOf(s.now())
+	writeTask(s.db, *t)
+}
+
+// sweep returns abandoned claims to the queue: a working task with no update
+// for timeout goes back to submitted so another agent can take it, and fails
+// with redelivery_exhausted once it has been handed out maxDeliveries times.
+// Never a silent drop.
+func (s *Store) sweep(timeout time.Duration, maxDeliveries int) {
+	s.transaction(func(tx *sql.Tx) {
+		now := s.now()
+		for _, task := range eachJSON[Task](tx, "SELECT data FROM tasks ORDER BY rowid") {
+			if task.Status != "working" {
+				continue
+			}
+			if updated, ok := parseISO(task.UpdatedAt); ok && now.Sub(updated) < timeout {
+				continue
+			}
+			if task.Deliveries >= maxDeliveries {
+				exhausted := "redelivery_exhausted"
+				task.Status, task.Reason = "failed", &exhausted
+			} else {
+				task.Status, task.Claim = "submitted", nil
+				task.Deliveries++
+			}
+			task.UpdatedAt = isoOf(now)
+			writeTask(tx, task)
+		}
+	})
 }
 
 // trigger emits a declared event and, when capability is non-empty, queues a
@@ -2048,103 +2631,114 @@ func (s *Store) enqueueTask(eventID, capability string, payload M, principal, de
 // was handed to, so the agent that takes it acts as that person (spec/v0_2/
 // auth.md §6). On the app's own store there is none — null, run as the owner.
 func (s *Store) trigger(etype string, payload M, capability string) (M, error) {
-	principal := s.caller
-	s.mu.Lock()
-	declared := len(s.eventTypes) == 0 || s.eventTypes[etype]
-	s.mu.Unlock()
-	if !declared {
+	// eventTypes is written once, by NewAdapter, before anything is served.
+	if len(s.eventTypes) > 0 && !s.eventTypes[etype] {
 		return nil, fmt.Errorf("event type %q is not declared", etype)
 	}
+	if payload == nil {
+		payload = M{}
+	}
+	principal := s.caller
 	ev := s.appendEvent(etype, payload)
 	var taskID any
 	if capability != "" {
 		// Dedup is keyed on the OCCURRENCE, not on the event record: the same
 		// trigger firing twice must make one task. The event id is fresh per
 		// emit, so keying on it would deduplicate nothing. The occurrence is what
-		// the app asked for (type, capability, payload), serialized with sorted
-		// keys so key order cannot tell two identical triggers apart. Who asked
-		// is part of it: the same request from two people is two tasks, each run
-		// as the person who asked.
+		// the app asked for (type, capability, payload) in canonical JSON, so key
+		// order cannot tell two identical triggers apart. Who asked is part of
+		// it: the same request from two people is two tasks, each run as the
+		// person who asked.
 		occurrence := M{"type": etype, "capability": capability, "payload": payload}
 		if principal != "" {
 			occurrence["principal"] = principal
 		}
-		sum := sha256.Sum256([]byte(stableJSON(occurrence)))
-		taskID = s.enqueueTask(getStr(ev, "id"), capability, payload, principal, "sha256:"+hex.EncodeToString(sum[:]))["id"]
+		dedupKey := "sha256:" + sha256Hex(canonicalize(occurrence))
+		taskID = s.enqueueTask(ev.ID, capability, payload, principal, dedupKey).ID
 	}
-	return M{"eventId": ev["id"], "taskId": taskID}, nil
+	return M{"eventId": ev.ID, "taskId": taskID}, nil
 }
 
-// sweep returns abandoned claims to the queue: a working task with no update
-// for taskTimeout goes back to submitted so another agent can take it, and
-// fails with redelivery_exhausted once it has been handed out taskMaxDeliveries
-// times. Never a silent drop.
-func (s *Store) sweep() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	for _, task := range s.tasks {
-		if getStr(task, "status") != "working" {
-			continue
-		}
-		updated, err := time.Parse("2006-01-02T15:04:05.000Z", getStr(task, "updatedAt"))
-		if err == nil && now.Sub(updated) < taskTimeout {
-			continue
-		}
-		if intOf(task["deliveries"]) >= taskMaxDeliveries {
-			task["status"] = "failed"
-			task["reason"] = "redelivery_exhausted"
-		} else {
-			task["status"] = "submitted"
-			task["claim"] = nil
-			task["deliveries"] = intOf(task["deliveries"]) + 1
-		}
-		task["updatedAt"] = nowISO()
-	}
+/* audit ------------------------------------------------------------------ */
+
+// AuditEntry is one row of the audit log: who did what to which target, and
+// how it ended. Kept in a ring of auditRetention rows; not served over HTTP.
+type AuditEntry struct {
+	At           string  `json:"at"`
+	CredentialID *string `json:"credentialId"`
+	AgentName    *string `json:"agentName"`
+	Principal    *string `json:"principal"`
+	Target       string  `json:"target"`
+	RecordID     *string `json:"recordId"`
+	Outcome      string  `json:"outcome"` // ok · rejected
+	Code         string  `json:"code,omitempty"`
 }
 
-func (s *Store) listTasks(status string) []M {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := []M{}
-	for _, id := range s.taskOrder {
-		t := s.tasks[id]
-		if status == "" || getStr(t, "status") == status {
-			out = append(out, t)
-		}
-	}
-	return out
+func (s *Store) appendAudit(entry AuditEntry) {
+	s.transaction(func(tx *sql.Tx) {
+		putJSON(tx, "INSERT INTO audit (data) VALUES (?)", entry)
+		_, err := tx.Exec("DELETE FROM audit WHERE seq <= (SELECT MAX(seq) FROM audit) - ?", auditRetention)
+		must(err)
+	})
 }
 
-func (s *Store) getTask(taskID string) M {
+// auditTail is the last n audit entries, oldest first.
+func (s *Store) auditTail(n int) []AuditEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.tasks[taskID]
-}
-
-func (s *Store) saveTask(task M) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	task["updatedAt"] = nowISO()
-	s.tasks[getStr(task, "id")] = task
+	entries := eachJSON[AuditEntry](s.db, "SELECT data FROM (SELECT seq, data FROM audit ORDER BY seq DESC LIMIT ?) ORDER BY seq", n)
+	return entries
 }
 
 /* ----------------------------------------------------------------- adapter */
 
-func approvalKeyFor(name string, args M) string {
-	canonical := stableJSON(M{"op": name, "args": args})
-	sum := sha256.Sum256([]byte(canonical))
-	return "ak_" + hex.EncodeToString(sum[:])[:32]
-}
-
 func randomHex(nBytes int) string { return hex.EncodeToString(randomBytes(nBytes)) }
 
 // OperationRunner is the signature schema.go implements: (args, ctx, store) ->
-// JSON-able result. Returning an error (or panicking) becomes operation_failed.
+// JSON-able result. Returning an *OperationError refuses the call with its own
+// status and code; any other error (or a panic) becomes operation_failed.
 // ctx is who is calling: {"credentialId", "agentName", "principal", "role"}.
 // An `owner` may touch every record; a `member` only the records it owns, and
 // a runner holds itself to the same rule for records it touches.
 type OperationRunner func(args M, ctx M, store *Store) (any, error)
+
+// OperationError is how a runner refuses a call in terms an agent can act on:
+// the reply is HTTPStatus (400 when unset) with {code, message} plus Extra,
+// instead of a 500 operation_failed. Parity oracle: adapter-core OperationError.
+type OperationError struct {
+	Code       string
+	Message    string
+	HTTPStatus int
+	Extra      M
+}
+
+func (e *OperationError) Error() string { return e.Message }
+
+// declaredEntities is an app's ENTITIES as the adapter takes them: a list of
+// entities, each naming itself with "name", in the order describe shows them.
+// An older schema.go declares a map instead, which still works, in name order.
+func declaredEntities[T map[string]M | []M](declared T) []M {
+	switch d := any(declared).(type) {
+	case []M:
+		return d
+	case map[string]M:
+		names := make([]string, 0, len(d))
+		for name := range d {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out := make([]M, 0, len(d))
+		for _, name := range names {
+			entity := M{"name": name}
+			for k, v := range d[name] {
+				entity[k] = v
+			}
+			out = append(out, entity)
+		}
+		return out
+	}
+	return nil
+}
 
 // The app's optional auth declarations (spec/v0_2/auth.md §3, §6.2), passed
 // to the adapter by main.go. They are declared here, empty, so a schema.go
@@ -2157,9 +2751,11 @@ var (
 
 // AdapterConfig is everything the wiring (main.go) hands the adapter.
 type AdapterConfig struct {
-	AppID      string
-	AppName    any // string, or nil for an unnamed app
-	Entities   map[string]M
+	AppID   string
+	AppName any // string, or nil for an unnamed app
+	// Entities is the model, one {"name", "module", "fields", ...} per entity,
+	// in declaration order (see declaredEntities).
+	Entities   []M
 	Operations []M
 	Store      *Store
 	// Token is the app's own .agent-token: its admin credential (spec/v0_2/
@@ -2182,8 +2778,8 @@ type AdapterConfig struct {
 	// PublicURL is the origin people and agents reach the app at
 	// (A2APP_PUBLIC_URL, resolved by NetworkPolicy), or "" for loopback only.
 	// It is one more of the app's own origins, and its host is answered.
-	PublicURL      string
-	Runners        map[string]OperationRunner
+	PublicURL string
+	Runners   map[string]OperationRunner
 	// Events are the event types this app may emit ({"type": ...} each). A
 	// runner's store.trigger refuses a type that is not declared here.
 	Events         []M
@@ -2197,9 +2793,12 @@ type AdapterConfig struct {
 }
 
 type Adapter struct {
-	appID          string
-	appName        any
+	appID   string
+	appName any
+	// the entities as declared, and by name in that order
+	entityList     []M
 	entityDefs     map[string]M
+	entityOrder    []string
 	operations     []M
 	modules        []M
 	opByName       map[string]M
@@ -2240,7 +2839,19 @@ type Adapter struct {
 	// a restart count as a change.
 	bootMark   string
 	dataWrites atomic.Int64
+
+	// Open tabs, by the opaque per-tab id their update watcher sends with its
+	// identity poll, and when each was last heard from. A COUNT is all this
+	// answers — "is anyone looking at this app?", so the CLI knows whether to
+	// open a browser — never who: held in memory only, never published.
+	viewersMu sync.Mutex
+	viewers   map[string]time.Time
 }
+
+const (
+	viewerTTL = 60 * time.Second
+	viewerCap = 1000
+)
 
 // NewAdapter builds the adapter or reports every declaration problem. A model
 // whose entities or operations name a module that was never declared cannot be
@@ -2250,7 +2861,8 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 	a := &Adapter{
 		appID:          cfg.AppID,
 		appName:        cfg.AppName,
-		entityDefs:     cfg.Entities,
+		entityList:     cfg.Entities,
+		entityDefs:     map[string]M{},
 		operations:     cfg.Operations,
 		modules:        cfg.Modules,
 		opByName:       map[string]M{},
@@ -2268,6 +2880,7 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		limiter:        newRateLimiter(defaultRateLimits, func() int64 { return time.Now().UnixMilli() }),
 		now:            time.Now,
 		bootMark:       strconv.FormatInt(time.Now().UnixMilli(), 36),
+		viewers:        map[string]time.Time{},
 	}
 	if a.authMode != "multi-user" {
 		a.authMode = "none"
@@ -2276,11 +2889,21 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 	a.sessionCookieName = "a2app_session_" + a.appID
 	a.secureCookies = strings.HasPrefix(cfg.PublicURL, "https://")
 	a.signInFailures = newFailureLimiter(signInFailureMax, signInWindow, func() time.Time { return a.now() })
+	// App text is bounded before it is forwarded to an agent; the framework's
+	// own sentence is the fallback.
+	a.credentialHint = boundAppText(cfg.CredentialHint)
 	if a.credentialHint == "" {
-		a.credentialHint = "Read the app's .agent-token file (mode 0600) in the project directory."
+		a.credentialHint = defaultCredentialHint
 	}
 	if a.runners == nil {
 		a.runners = map[string]OperationRunner{}
+	}
+	for _, e := range cfg.Entities {
+		name := getStr(e, "name")
+		if _, taken := a.entityDefs[name]; !taken {
+			a.entityOrder = append(a.entityOrder, name)
+		}
+		a.entityDefs[name] = e
 	}
 	for _, o := range cfg.Operations {
 		a.opByName[getStr(o, "name")] = o
@@ -2303,9 +2926,10 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 		// app reached at its public URL answers there and nowhere new.
 		if u, err := url.Parse(origin); err == nil && u.Host != "" {
 			a.allowedHosts[strings.ToLower(u.Host)] = true
-			a.allowedHosts[hostnameOf(u.Host)] = true
 		}
 	}
+	// Every task and event names the app it came from.
+	cfg.Store.app = cfg.AppID
 	// The declared event types are what keep the app->agent queue from being an
 	// open channel: store.trigger refuses a type that is not declared, so the set
 	// of things this app can ever ask an agent to react to is fixed by its author
@@ -2358,8 +2982,8 @@ func NewAdapter(cfg AdapterConfig) (*Adapter, error) {
 
 // modelProblems is everything wrong with the app part's module/operation
 // declarations. Parity oracle: `modelProblems` in
-// adapters/adapter-core/src/describe.ts. Entity names are visited sorted so a
-// broken model prints the same report every time.
+// adapters/adapter-core/src/describe.ts, plus the two a declared list can get
+// wrong that an object cannot (a missing or repeated entity name).
 func (a *Adapter) modelProblems() []string {
 	problems := []string{}
 	declared := map[string]bool{}
@@ -2377,6 +3001,16 @@ func (a *Adapter) modelProblems() []string {
 			problems = append(problems, `duplicate module "`+name+`"`)
 		}
 		seen[name] = true
+	}
+	named := map[string]bool{}
+	for _, e := range a.entityList {
+		name := getStr(e, "name")
+		if name == "" {
+			problems = append(problems, `an entity declares no "name"`)
+		} else if named[name] {
+			problems = append(problems, `duplicate entity "`+name+`"`)
+		}
+		named[name] = true
 	}
 
 	for _, name := range a.entityNames() {
@@ -2482,17 +3116,10 @@ func scopeList(v any) []string {
 
 /* -- schema helpers ------------------------------------------------------- */
 
-// entityNames is the deterministic walk order over entityDefs — a Go map has
-// no declaration order to preserve, and describe output must not shuffle
-// between requests.
-func (a *Adapter) entityNames() []string {
-	names := make([]string, 0, len(a.entityDefs))
-	for name := range a.entityDefs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
+// entityNames is every entity in declaration order — the order describe lists
+// them in, as the app's author chose it (the most-used first), and the order a
+// budget-trimmed list keeps.
+func (a *Adapter) entityNames() []string { return a.entityOrder }
 
 func (a *Adapter) fields(entity string) []M {
 	d, ok := a.entityDefs[entity]
@@ -2514,7 +3141,7 @@ func (a *Adapter) materialize(entity string, body M) M {
 		if v, ok := body[name]; ok && v != nil && v != "" {
 			rec[name] = coerce(f, v)
 		} else if getBool(f, "readOnly") && name == "created" {
-			rec[name] = nowISO()
+			rec[name] = isoOf(a.store.now())
 		}
 	}
 	return rec
@@ -2547,15 +3174,19 @@ func errEnv(status int, code, message string, extra M) (int, M) {
 /* -- identity / describe ---------------------------------------------------- */
 
 func (a *Adapter) identity() M {
+	now := a.now()
+	_, offsetSeconds := now.Zone()
 	doc := M{
 		"a2app": true, "protocol": PROTOCOL_VERSION, "adapterVersion": ADAPTER_VERSION,
 		"app": M{"id": a.appID, "name": a.appName}, "schemaVersion": a.schemaVersion(),
 		// Moves on every record write. A View watcher compares this separately
 		// from appVersion/schemaVersion so it can re-read data without reloading.
 		"dataVersion": a.dataVersion(),
-		"serverNow":   nowISO(), "serverTzOffsetMinutes": 0,
-		"authMode":   a.authMode,
-		"accountUrl": accountURL,
+		"serverNow":   isoOf(now),
+		// The server's own UTC offset, so a client can say "today" as it does.
+		"serverTzOffsetMinutes": offsetSeconds / 60,
+		"authMode":              a.authMode,
+		"accountUrl":            accountURL,
 	}
 	if a.env != "" {
 		doc["env"] = a.env
@@ -2619,16 +3250,22 @@ func readableFields(d M) []M {
 	return out
 }
 
-// fitList trims a list until the level fits, always reporting what was dropped.
+// levelSize is a level's serialized size in the units the budget is stated
+// in: characters of its JSON, as JavaScript counts them.
+func levelSize(level M) int { return jsLength(stableJSON(level)) }
+
+// fitList trims a list until the level fits, always reporting what was
+// dropped. Entries are dropped from the end, so the declared order — the
+// author's, most-used first — decides what survives.
 func fitList(build func(items []M, truncated int) M, items []M) M {
 	whole := build(append([]M{}, items...), 0)
-	if len(stableJSON(whole)) <= describeBudgetChars {
+	if levelSize(whole) <= describeBudgetChars {
 		return whole
 	}
 	lo, hi := 0, len(items)
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if len(stableJSON(build(items[:mid], len(items)-mid))) <= describeBudgetChars {
+		if levelSize(build(items[:mid], len(items)-mid)) <= describeBudgetChars {
 			lo = mid
 		} else {
 			hi = mid - 1
@@ -2647,7 +3284,7 @@ func (a *Adapter) entitiesOf(module string) []string {
 	return out
 }
 
-func (a *Adapter) describeRoot(access accessView) M {
+func (a *Adapter) describeRoot(access accessView, showAll bool) M {
 	modules := []M{}
 	for _, m := range a.modules {
 		name := getStr(m, "name")
@@ -2692,13 +3329,45 @@ func (a *Adapter) describeRoot(access accessView) M {
 		}
 		modules = append(modules, row)
 	}
-	return M{
-		"level":       "root",
-		"app":         M{"id": a.appID, "name": a.appName},
-		"modules":     modules,
-		"conventions": conventions(),
-		"next":        []string{"describe/{module}", "describe?find={term}"},
+
+	build := func(rows []M, truncated int, summaries bool) M {
+		listed := rows
+		if !summaries {
+			listed = make([]M, len(rows))
+			for i, row := range rows {
+				listed[i] = M{"name": row["name"], "entities": row["entities"], "operations": row["operations"], "access": row["access"]}
+			}
+		}
+		next := []string{"describe/{module}", "describe?find={term}"}
+		if truncated > 0 {
+			next = append(next, "describe?all=true")
+		}
+		level := M{
+			"level":       "root",
+			"app":         M{"id": a.appID, "name": a.appName},
+			"modules":     listed,
+			"conventions": conventions(),
+			"next":        next,
+		}
+		if truncated > 0 {
+			level["truncated"] = truncated
+		}
+		return level
 	}
+	if showAll {
+		return build(modules, 0, true)
+	}
+	// Shed DETAIL before EXISTENCE: a module's summary is prose, its name,
+	// counts and access are what make it reachable, so summaries go first and
+	// every module stays named. Only if bare names still do not fit are rows
+	// dropped — counted, and `?all=true` returns them.
+	if whole := build(modules, 0, true); levelSize(whole) <= describeBudgetChars {
+		return whole
+	}
+	if bare := build(modules, 0, false); levelSize(bare) <= describeBudgetChars {
+		return bare
+	}
+	return fitList(func(rows []M, truncated int) M { return build(rows, truncated, false) }, modules)
 }
 
 func (a *Adapter) describeModule(module M, access accessView, showAll bool) M {
@@ -2761,7 +3430,7 @@ func (a *Adapter) describeModule(module M, access accessView, showAll bool) M {
 	return fitList(build, owned)
 }
 
-func (a *Adapter) describeEntity(module, name string, d M, access accessView) M {
+func (a *Adapter) describeEntity(module, name string, d M, access accessView, showAll bool) M {
 	fields := M{}
 	for _, f := range readableFields(d) {
 		fields[getStr(f, "name")] = fieldDoc(f)
@@ -2784,22 +3453,60 @@ func (a *Adapter) describeEntity(module, name string, d M, access accessView) M 
 		decl["entity"] = name
 		ops = append(ops, decl)
 	}
-	level := M{
-		"level":      "entity",
-		"path":       module + "/" + name,
-		"label":      labelFieldOf(fieldsOf(d)),
-		"records":    "/api/collections/" + name + "/records",
-		"fields":     fields,
-		"operations": ops,
-		"next":       []string{"describe/" + module + "/" + name + "/{id}", "data " + name + " list"},
+	path := module + "/" + name
+	build := func(operations []M, truncated int) M {
+		next := []string{"describe/" + path + "/{id}", "data " + name + " list"}
+		if truncated > 0 {
+			next = append(next, "describe/"+path+"?all=true")
+		}
+		level := M{
+			"level":      "entity",
+			"path":       path,
+			"label":      labelFieldOf(fieldsOf(d)),
+			"records":    "/api/collections/" + name + "/records",
+			"fields":     fields,
+			"operations": operations,
+			"next":       next,
+		}
+		if getBool(d, "auth") {
+			level["auth"] = true
+		}
+		if ownedBy := getStr(d, "ownedBy"); ownedBy != "" {
+			level["ownedBy"] = ownedBy
+		}
+		if truncated > 0 {
+			level["truncated"] = truncated
+		}
+		return level
 	}
-	if getBool(d, "auth") {
-		level["auth"] = true
+	// FIELDS ARE NEVER TRIMMED: a client treats a field absent from describe as
+	// write-only and exempts it from the read-back check. Operations can be —
+	// they are reachable from the module screen and from search too, and the
+	// count is always reported.
+	if showAll {
+		return build(ops, 0)
 	}
-	if ownedBy := getStr(d, "ownedBy"); ownedBy != "" {
-		level["ownedBy"] = ownedBy
+	return fitList(build, ops)
+}
+
+// targetParamOf is the parameter that takes THIS record, when an operation
+// names exactly one: a single required `ref` to this entity. The record screen
+// invites a call at the record's own path, but the wire call cannot see the
+// path, so naming the parameter lets a client fill it in; with two candidates
+// nothing is named and the caller passes it explicitly.
+func targetParamOf(o M, entity string) string {
+	params, _ := o["params"].(M)
+	candidates := []string{}
+	for name, p := range params {
+		param, _ := p.(M)
+		if getStr(param, "type") == "ref" && getStr(param, "entity") == entity && param["required"] == true {
+			candidates = append(candidates, name)
+		}
 	}
-	return level
+	if len(candidates) != 1 {
+		return ""
+	}
+	return candidates[0]
 }
 
 func (a *Adapter) describeRecord(module, name string, d M, record M, access accessView) M {
@@ -2824,7 +3531,10 @@ func (a *Adapter) describeRecord(module, name string, d M, record M, access acce
 		if getBool(o, "destructive") {
 			row["destructive"] = true
 		}
-		if when, ok := o["appliesWhen"].(M); ok && len(when) > 0 && !evaluatePredicate(when, record, fields) {
+		if target := targetParamOf(o, name); target != "" {
+			row["targetParam"] = target
+		}
+		if when, ok := o["appliesWhen"].(M); ok && !evaluatePredicate(when, record, fields) {
 			row["available"] = false
 			row["blocked"] = explainPredicate(when, record, fields)
 		}
@@ -2906,9 +3616,9 @@ func (a *Adapter) describeFind(term string, access accessView) M {
 
 func conventions() M {
 	return M{
-		"writes": "Prefer a declared operation over a raw write where one exists.",
-		"labels": "Resolve a label to an id by a filtered read on the entity's label field; on multi-match, ask or fail — never pick.",
-		"dates":  `Relative words ("tomorrow") are rejected by the app; resolve them to ISO 8601 client-side.`,
+		"writes":  "Prefer a declared operation over a raw write where one exists.",
+		"labels":  "Resolve a label to an id by a filtered read on the entity's label field; on multi-match, ask or fail — never pick.",
+		"dates":   `Relative words ("tomorrow") are rejected by the app; resolve them to ISO 8601 client-side.`,
 		"honesty": "If the app cannot express what was asked, say so instead of approximating into a wrong field.",
 	}
 }
@@ -2931,6 +3641,35 @@ const (
 // expired, or its person deactivated): a new one is the person's to give.
 // Like the credential hint, it states a fact and never an instruction.
 const renewHint = "Ask the person this agent acts for to approve it again (a2app <app> login), or the app's owner for a new credential."
+
+// defaultCredentialHint is the `how` on a 401 agent_token_required. It
+// describes a file on the app's own host, so it is an answer only the app's
+// owner can act on; an app served to others sets AdapterConfig.CredentialHint.
+const defaultCredentialHint = "Read the app's .agent-token file (mode 0600) in the project directory."
+
+// appTextMax is the cap on app-supplied text forwarded into an agent's
+// context: long enough for a hint, far too short to carry instructions.
+const appTextMax = 300
+
+// boundAppText is text the APP supplied, made safe to forward to an agent: one
+// line (runs of whitespace become one space, so it cannot impersonate a new
+// section) and at most appTextMax characters, with a marker saying how much
+// was cut. "" for blank input. Parity oracle: adapter-core agentText.ts.
+func boundAppText(value string) string {
+	single := strings.Join(strings.FieldsFunc(value, isJSSpace), " ")
+	length := jsLength(single)
+	if length <= appTextMax {
+		return single
+	}
+	// The suffix counts toward the cap and its own length changes the count it
+	// reports; three passes reach the fixed point.
+	suffix := ""
+	for i := 0; i < 3; i++ {
+		suffix = fmt.Sprintf(" [truncated by adapter, %d chars cut]", length-appTextMax+jsLength(suffix))
+	}
+	units := utf16.Encode([]rune(single))
+	return string(utf16.Decode(units[:max(0, appTextMax-jsLength(suffix))])) + suffix
+}
 
 // ownerPrincipal is the app's administrator: the admin credential, and the
 // only principal of an `authMode: none` app.
@@ -3022,10 +3761,7 @@ type presented struct {
 // the person it acts for may still act. Nil, with no refusal, when none was
 // presented.
 func (a *Adapter) credentialOf(headers map[string]string) (*presented, int, M) {
-	token := headers["x-a2app-token"]
-	if token == "" {
-		token = headers["x-lui-token"]
-	}
+	token := firstHeader(headers, "x-a2app-token", "x-lui-token")
 	if token == "" {
 		return nil, 0, nil
 	}
@@ -3038,7 +3774,7 @@ func (a *Adapter) credentialOf(headers map[string]string) (*presented, int, M) {
 	taskOver := false
 	if grant.Task != "" {
 		task := a.store.getTask(grant.Task)
-		taskOver = task == nil || terminalTask[getStr(task, "status")]
+		taskOver = task == nil || terminalTask[task.Status]
 	}
 	if grant.RevokedAt != "" || taskOver {
 		status, body := errEnv(401, "credential_revoked", "This credential was revoked.", M{"how": renewHint})
@@ -3059,6 +3795,17 @@ func (a *Adapter) credentialOf(headers map[string]string) (*presented, int, M) {
 		a.store.updateGrant(grant.CredentialID, func(g *Grant) { g.LastUsedAt = stamp })
 	}
 	return &presented{grant: *grant, info: *info, held: intersect(a.expandScopes(grant.Scopes), allowed)}, 0, nil
+}
+
+// firstHeader is the first of these headers the request carries, even an empty
+// one (JavaScript's `a ?? b`), or "".
+func firstHeader(headers map[string]string, names ...string) string {
+	for _, name := range names {
+		if value, present := headers[name]; present {
+			return value
+		}
+	}
+	return ""
 }
 
 // sessionOf is the signed-in account behind this request's session cookie
@@ -3099,11 +3846,11 @@ func (a *Adapter) isAllowedHost(raw string) bool {
 }
 
 // hostRefusal is the `403 forbidden_host` reply for a request under a Host
-// this app does not answer to, else a nil body. Checked before every adapter
-// route and before the system pages main.go serves (the account page, the
-// update watcher), which are otherwise a free fingerprint of the app for a
-// rebound page: binding loopback does not stop a page on evil.com whose DNS
-// re-resolves to 127.0.0.1, but its Host header still says evil.com.
+// this app does not answer to, else a nil body. Handle checks it before every
+// path — adapter routes, the View and the system pages alike — since any of
+// them is a free fingerprint of the app for a rebound page: binding loopback
+// does not stop a page on evil.com whose DNS re-resolves to 127.0.0.1, but its
+// Host header still says evil.com.
 func (a *Adapter) hostRefusal(host string) (int, M) {
 	if a.isAllowedHost(host) {
 		return 0, nil
@@ -3152,7 +3899,13 @@ func NetworkPolicy(hostEnv, publicURLEnv string) (host string, publicURL string,
 			return "", "", fmt.Errorf("A2APP_PUBLIC_URL must be https: %q would send the agent token across a network in clear. "+
 				"Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address", raw)
 		}
-		publicURL = scheme + "://" + strings.ToLower(u.Host)
+		// The origin, as a browser writes it in the Origin header: a default port
+		// is not part of it.
+		host := strings.ToLower(u.Host)
+		if port := u.Port(); port == "" || (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+			host = strings.TrimSuffix(strings.TrimSuffix(host, port), ":")
+		}
+		publicURL = scheme + "://" + host
 	}
 	if !isLoopbackName(strings.ToLower(host)) && scheme != "https" {
 		return "", "", fmt.Errorf("A2APP_HOST=%s exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "+
@@ -3337,22 +4090,61 @@ func (a *Adapter) visible(d M, ctx M, rec M) M {
 	return rec
 }
 
+// rateGate counts one request against the caller's budget for a route class:
+// keyed by the credential presented, else the page's Origin, else "anon".
+// Over the limit answers 429 before any work, and the refusal is audited so a
+// flood is visible afterwards. A token is a secret and the audit log is
+// persisted, so a caller is keyed by its token's hash, never the token.
 func (a *Adapter) rateGate(headers map[string]string, cls string) (int, M) {
-	caller := headers["x-a2app-token"]
-	if caller == "" {
-		if origin, ok := headers["origin"]; ok {
-			caller = "origin:" + origin
-		} else {
-			caller = "anon"
-		}
+	caller := "anon"
+	if token := firstHeader(headers, "x-a2app-token", "x-lui-token"); token != "" {
+		caller = "token:" + hashSecret(token)
+	} else if origin := headers["origin"]; origin != "" {
+		caller = "origin:" + origin
 	}
 	decision := a.limiter.check(caller, cls)
 	if decision.allowed {
 		return 0, nil
 	}
+	a.writeAudit(&auditActor{credentialID: caller}, "rate:"+cls, "", "rejected", codeRateLimited)
 	return errEnv(429, codeRateLimited,
 		fmt.Sprintf("Rate limit exceeded (%d per window). Slow down and retry.", decision.limit),
 		M{"retryAfterSeconds": decision.retryAfterSeconds})
+}
+
+// auditActor is who an audit entry names: a call context, or for a refusal
+// that came before anyone was resolved, just the key it was counted under.
+type auditActor struct {
+	credentialID string
+	agentName    any
+	principal    string
+}
+
+func actorOf(ctx M) *auditActor {
+	if ctx == nil {
+		return nil
+	}
+	return &auditActor{credentialID: getStr(ctx, "credentialId"), agentName: ctx["agentName"], principal: getStr(ctx, "principal")}
+}
+
+// writeAudit appends one entry to the audit log: who (nil when the request
+// was refused before anyone was resolved), the target (`data:<entity>`,
+// `op:<name>`, `task:<action>`, `rate:<class>`), the record, and how it ended.
+func (a *Adapter) writeAudit(actor *auditActor, target, recordID, outcome, code string) {
+	entry := AuditEntry{At: isoOf(a.now()), Target: target, Outcome: outcome, Code: code}
+	if recordID != "" {
+		entry.RecordID = &recordID
+	}
+	if actor != nil {
+		entry.CredentialID = &actor.credentialID
+		if name, ok := actor.agentName.(string); ok {
+			entry.AgentName = &name
+		}
+		if actor.principal != "" {
+			entry.Principal = &actor.principal
+		}
+	}
+	a.store.appendAudit(entry)
 }
 
 /* -- dispatch ---------------------------------------------------------------- */
@@ -3424,7 +4216,7 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 	}
 
 	if len(segments) == 0 {
-		return 200, a.describeRoot(access)
+		return 200, a.describeRoot(access, q["all"] == "true")
 	}
 
 	moduleName := segments[0]
@@ -3461,7 +4253,7 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 				"This credential does not hold data:"+entity+":read.",
 				M{"required": "data:" + entity + ":read"})
 		}
-		return 200, a.describeEntity(moduleName, entity, d, access)
+		return 200, a.describeEntity(moduleName, entity, d, access, q["all"] == "true")
 	}
 
 	if status, body := a.rateGate(headers, "data"); body != nil {
@@ -3491,7 +4283,13 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 		}
 	}
 	if field == nil {
-		return errEnv(404, "unknown_relation", `"`+relation+`" is not a sub-resource of `+entity+".", nil)
+		relations := []string{}
+		for _, f := range fieldsOf(d) {
+			if getStr(f, "type") == "list<ref>" && !getBool(f, "writeOnly") {
+				relations = append(relations, getStr(f, "name"))
+			}
+		}
+		return errEnv(404, "unknown_relation", `"`+relation+`" is not a sub-resource of `+entity+".", M{"relations": relations})
 	}
 	target := getStr(field, "entity")
 	if !access.read(target) {
@@ -3505,7 +4303,7 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 	}
 	items := []M{}
 	for _, rid := range toAnyList(record[relation]) {
-		id := toStr(rid)
+		id := jsString(rid)
 		referenced := a.store.getRecord(target, id)
 		var label any
 		if lf, ok := targetLabel.(string); ok && referenced != nil {
@@ -3536,168 +4334,284 @@ func (a *Adapter) handleDescribe(headers map[string]string, segments []string, q
 // A miss is usually a guessed route, so it names the routes that answer.
 const unknownRouteMessage = "No such route. Operations are invoked with POST /api/ops/<name>; GET /api/_a2app/describe lists them."
 
+// The path prefixes the adapter owns outright: a miss under one is the
+// adapter's 404. Any other path is the host app's — here, the View.
+var adapterNamespaces = []string{"/api/_a2app", "/api/ops", "/api/collections"}
+
+func isAdapterNamespace(path string) bool {
+	for _, ns := range adapterNamespaces {
+		if path == ns || strings.HasPrefix(path, ns+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 var recordsRe = regexp.MustCompile(`^/api/collections/([^/]+)/records(?:/([^/]+))?$`)
 var opsRe = regexp.MustCompile(`^/api/ops/([^/]+)$`)
 var trailingSlashRe = regexp.MustCompile(`/+$`)
 
-// dispatch routes one protocol request: method, path, lower-cased headers,
-// parsed JSON body, query. It returns the status, the JSON payload, and the
-// headers the reply carries beyond its content type (a session's Set-Cookie).
-func (a *Adapter) dispatch(method, path string, headers map[string]string, body M, query map[string]string) (int, M, map[string]string) {
-	lowered := map[string]string{}
-	for k, v := range headers {
-		lowered[strings.ToLower(k)] = v
+// Request is one HTTP request as the adapter routes it (the reference's
+// A2AppRequest).
+type Request struct {
+	Method string
+	// The path as sent, still percent-encoded: routing splits it first and
+	// decodes each segment after, so an escaped "/" inside a record id cannot
+	// split it. A query string on it is read too.
+	Path  string
+	Query map[string]string
+	// Lower-cased names. A header sent twice is its values joined by ", ".
+	Headers map[string]string
+	// The body as ParseBody read it (nil when there is none), and a top-level
+	// object's keys in the order they were written.
+	Body     any
+	BodyKeys []string
+}
+
+// request is a Request as the routes read it.
+type request struct {
+	method  string
+	path    string
+	headers map[string]string
+	query   map[string]string
+	body    bodyView
+}
+
+// Handle answers one request. handled is false for a path that is not the
+// adapter's (outside identity and its namespaces): the host app answers it —
+// here, the static View. The Host check comes first, on every path, so the
+// View is refused under a foreign Host exactly as the API is. The reply
+// headers are the ones beyond its content type (a session's Set-Cookie). A
+// panic inside — a database failure, a malformed escape in a path segment —
+// answers 500 adapter_error, as an exception escaping the reference's router
+// does.
+func (a *Adapter) Handle(req Request) (status int, payload M, replyHeaders map[string]string, handled bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			status, payload, replyHeaders, handled = 500, M{"a2app": true, "ok": false, "code": "adapter_error", "message": panicMessage(p)}, nil, true
+		}
+	}()
+	r := &request{method: strings.ToUpper(req.Method), headers: map[string]string{}, query: map[string]string{}}
+	for k, v := range req.Headers {
+		r.headers[strings.ToLower(k)] = v
 	}
-	headers = lowered
-	method = strings.ToUpper(method)
-	q := map[string]string{}
-	for k, v := range query {
-		q[k] = v
+	for k, v := range req.Query {
+		r.query[k] = v
 	}
+	path := req.Path
 	if i := strings.Index(path, "?"); i >= 0 {
-		if values, err := url.ParseQuery(path[i+1:]); err == nil {
-			for k, v := range values {
-				if len(v) > 0 {
-					q[k] = v[len(v)-1]
-				}
-			}
+		for k, v := range parseQuery(path[i+1:]) {
+			r.query[k] = v
 		}
 		path = path[:i]
 	}
-	path = trailingSlashRe.ReplaceAllString(path, "")
-	if path == "" {
-		path = "/"
+	r.path = trailingSlashRe.ReplaceAllString(path, "")
+	if r.path == "" {
+		r.path = "/"
 	}
+	r.body = viewBody(req.Body, req.BodyKeys)
 
 	// Before any route, including the unauthenticated identity document, which
 	// is otherwise a free fingerprint of the app for a rebound page: binding
 	// loopback does not stop a page on evil.com whose DNS re-resolves to
-	// 127.0.0.1, but its Host header still says evil.com.
-	if host, ok := headers["host"]; ok {
+	// 127.0.0.1, but its Host header still says evil.com. A request with no
+	// Host at all (HTTP/1.0) names no other host, and is answered.
+	if host, present := r.headers["host"]; present {
 		if status, refusal := a.hostRefusal(host); refusal != nil {
-			return status, refusal, nil
+			return status, refusal, nil, true
 		}
 	}
-	// Accounts, sessions and invites — the routes whose replies set the
-	// session cookie. They exist only on a multi-user app.
-	for _, prefix := range []string{"/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"} {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			if !a.multiUser {
-				status, refusal := errEnv(404, "not_multi_user", "This app has no accounts: its authMode is none.", nil)
-				return status, refusal, nil
-			}
-			return a.handleAccounts(method, path, headers, body)
-		}
-	}
-	status, payload := a.route(method, path, headers, body, q)
-	return status, payload, nil
+	status, payload, replyHeaders = a.route(r)
+	return status, payload, replyHeaders, payload != nil
 }
 
-// route answers every protocol path but the account routes.
-func (a *Adapter) route(method, path string, headers map[string]string, body M, q map[string]string) (int, M) {
+func panicMessage(p any) string {
+	if err, ok := p.(error); ok {
+		return err.Error()
+	}
+	return fmt.Sprint(p)
+}
+
+// route answers every adapter path; a nil payload means the path is not one.
+func (a *Adapter) route(r *request) (int, M, map[string]string) {
+	method, path, headers, q, body := r.method, r.path, r.headers, r.query, r.body.fields
+
 	if path == "/.well-known/a2app.json" || path == "/api/_a2app" {
-		return 200, a.identity()
+		// The update watcher polls identity anyway, so its "I am still here"
+		// rides along rather than doubling every open tab's requests.
+		a.noteViewer(headers, q)
+		return plain(200, a.identity())
+	}
+	// How many people have this app open: a COUNT only, and behind the same
+	// check as any read — "how many are using this now" is not for anyone who
+	// asks.
+	if path == "/api/_a2app/viewers" {
+		if _, status, refusal := a.authorize(headers, "", false); refusal != nil {
+			return plain(status, refusal)
+		}
+		return plain(200, M{"a2app": true, "viewers": a.countViewers(), "ttlMs": viewerTTL.Milliseconds()})
 	}
 	// Describe is navigational: the bare path is the root level, and each
 	// extra segment moves one level inward (A2APP-SPEC 3).
 	if path == "/api/_a2app/describe" {
-		return a.handleDescribe(headers, nil, q)
+		return plain(a.handleDescribe(headers, nil, q))
 	}
 	if strings.HasPrefix(path, "/api/_a2app/describe/") {
 		raw := strings.Split(path[len("/api/_a2app/describe/"):], "/")
-		segments := make([]string, 0, len(raw))
-		for _, s := range raw {
-			if u, err := url.PathUnescape(s); err == nil {
-				segments = append(segments, u)
-			} else {
-				segments = append(segments, s)
-			}
+		segments := make([]string, len(raw))
+		for i, s := range raw {
+			segments[i] = mustDecode(s)
 		}
 		if len(segments) > 4 {
-			return errEnv(404, "usage", "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.", nil)
+			return plain(errEnv(404, "usage", "describe goes at most four levels deep: {module}/{entity}/{id}/{relation}.", nil))
 		}
 		for _, s := range segments {
 			if s == "" {
-				return errEnv(404, "usage", "describe path has an empty segment.", nil)
+				return plain(errEnv(404, "usage", "describe path has an empty segment.", nil))
 			}
 		}
-		return a.handleDescribe(headers, segments, q)
+		return plain(a.handleDescribe(headers, segments, q))
 	}
 	if path == "/api/_a2app/whoami" {
-		// whoami answers whoever this app will actually serve, which is what
-		// authorize decides — so it asks the same question. The 401 that
-		// remains is the honest one: on a multi-user app with nothing
-		// presented, authorize really would refuse.
-		c, status, refusal := a.resolve(headers, false)
-		if refusal != nil {
-			return status, refusal
-		}
-		var principalName, expiresAt any
-		if info := a.principalInfo(getStr(c.ctx, "principal")); info != nil {
-			principalName = info.Name
-		}
-		if c.grant != nil {
-			expiresAt = orNull(c.grant.ExpiresAt)
-		}
-		// The reach the request was given: a credential's scopes intersected
-		// with what its person may do now, or a person's own. An anonymous read
-		// on a single-user app was never scope-checked, so it reports the reach
-		// describe renders for it — one source, so the two cannot disagree.
-		scopes := sortedKeys(c.held)
-		if c.anonymous {
-			scopes = a.reachAsScopes(a.accessFor(headers))
-		}
-		return 200, M{
-			"a2app": true, "credentialId": c.ctx["credentialId"], "agentName": c.ctx["agentName"],
-			"principal": c.ctx["principal"], "principalName": principalName, "role": c.ctx["role"],
-			"expiresAt": expiresAt, "scopes": scopes,
-		}
+		return plain(a.whoami(headers))
 	}
 	if strings.HasPrefix(path, "/api/_a2app/auth/") {
 		// Unauthenticated by design (an agent starts here with nothing), so it
 		// is metered like an operation before anything is looked up.
 		if status, limited := a.rateGate(headers, "ops"); limited != nil {
-			return status, limited
+			return plain(status, limited)
 		}
 		if status, reply, ok := a.handleDevice(method, path, headers, body); ok {
-			return status, reply
+			return plain(status, reply)
 		}
 	}
 	if path == "/api/_a2app/credentials" || strings.HasPrefix(path, "/api/_a2app/credentials/") {
-		return a.handleCredentials(method, path, headers, body)
+		return plain(a.handleCredentials(method, path, headers, body))
+	}
+	// Accounts, sessions and invites — the routes whose replies set the session
+	// cookie. They exist only on a multi-user app.
+	for _, prefix := range []string{"/api/_a2app/session", "/api/_a2app/invites", "/api/_a2app/users"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			if !a.multiUser {
+				return plain(errEnv(404, "not_multi_user", "This app has no accounts: its authMode is none.", nil))
+			}
+			return a.handleAccounts(method, path, headers, body)
+		}
 	}
 	if path == "/api/_a2app/context" {
-		if _, status, errBody := a.authorize(headers, "", false); errBody != nil {
-			return status, errBody
+		if _, status, refusal := a.authorize(headers, "", false); refusal != nil {
+			return plain(status, refusal)
 		}
-		return 200, M{"a2app": true, "view": nil, "selected": []any{}}
+		return plain(200, M{"a2app": true, "view": nil, "selected": []any{}})
 	}
 	if path == "/api/_a2app/events" {
-		return a.handleEvents(method, headers, q)
+		return plain(a.handleEvents(headers, q))
 	}
 	if path == "/api/_a2app/tasks" || strings.HasPrefix(path, "/api/_a2app/tasks/") {
 		rest := []string{}
 		if path != "/api/_a2app/tasks" {
 			rest = strings.Split(path[len("/api/_a2app/tasks/"):], "/")
 		}
-		return a.handleTasks(method, headers, rest, body, q)
+		return plain(a.handleTasks(method, headers, rest, body, q))
 	}
-
 	if m := recordsRe.FindStringSubmatch(path); m != nil {
-		return a.handleRecords(method, headers, m[1], m[2], body, q)
+		recID := ""
+		if m[2] != "" {
+			recID = mustDecode(m[2])
+		}
+		return plain(a.handleRecords(method, headers, mustDecode(m[1]), recID, r.body, q))
 	}
-
 	if m := opsRe.FindStringSubmatch(path); m != nil {
 		if method != "POST" {
-			return errEnv(405, "usage", "Operations are POST-only.", nil)
+			return plain(errEnv(405, "usage", "Operations are POST-only.", nil))
 		}
-		if body == nil {
-			body = M{}
-		}
-		return a.handleOperation(headers, m[1], body)
+		return plain(a.handleOperation(headers, mustDecode(m[1]), r.body))
 	}
+	// A miss in the adapter's own namespaces is the adapter's to answer; the
+	// rest is the host app's.
+	if isAdapterNamespace(path) {
+		return plain(errEnv(404, "not_found", unknownRouteMessage, nil))
+	}
+	return 0, nil, nil
+}
 
-	return errEnv(404, "not_found", unknownRouteMessage, nil)
+// whoami answers whoever this app will actually serve, which is what
+// authorize decides — so it asks the same question. The 401 that remains is
+// the honest one: on a multi-user app with nothing presented, authorize really
+// would refuse.
+func (a *Adapter) whoami(headers map[string]string) (int, M) {
+	c, status, refusal := a.resolve(headers, false)
+	if refusal != nil {
+		return status, refusal
+	}
+	var principalName, expiresAt any
+	if info := a.principalInfo(getStr(c.ctx, "principal")); info != nil {
+		principalName = info.Name
+	}
+	if c.grant != nil {
+		expiresAt = orNull(c.grant.ExpiresAt)
+	}
+	// The reach the request was given: a credential's scopes intersected with
+	// what its person may do now, or a person's own. An anonymous read on a
+	// single-user app was never scope-checked, so it reports the reach describe
+	// renders for it — one source, so the two cannot disagree.
+	scopes := sortedKeys(c.held)
+	if c.anonymous {
+		scopes = a.reachAsScopes(a.accessFor(headers))
+	}
+	return 200, M{
+		"a2app": true, "credentialId": c.ctx["credentialId"], "agentName": c.ctx["agentName"],
+		"principal": c.ctx["principal"], "principalName": principalName, "role": c.ctx["role"],
+		"expiresAt": expiresAt, "scopes": scopes,
+	}
+}
+
+// noteViewer records an open tab's heartbeat, if this request carries one:
+// the id in the x-a2app-viewer header, or ?viewer= on the goodbye a closing
+// tab sends with sendBeacon (which cannot set headers). A goodbye
+// (x-a2app-viewer-leaving, or ?leaving) drops the tab at once rather than at
+// the end of the TTL.
+func (a *Adapter) noteViewer(headers, query map[string]string) {
+	id, present := headers["x-a2app-viewer"]
+	if !present {
+		id, present = query["viewer"]
+	}
+	if !present || id == "" || jsLength(id) > 64 {
+		return
+	}
+	a.viewersMu.Lock()
+	defer a.viewersMu.Unlock()
+	_, leavingHeader := headers["x-a2app-viewer-leaving"]
+	_, leavingQuery := query["leaving"]
+	if leavingHeader || leavingQuery {
+		delete(a.viewers, id)
+		return
+	}
+	a.viewers[id] = a.now()
+	// A reloaded page gets a fresh id, so the map would otherwise grow with
+	// every reload until the process restarts.
+	if len(a.viewers) > viewerCap {
+		a.liveViewersLocked()
+	}
+}
+
+// countViewers is how many tabs were heard from within the TTL.
+func (a *Adapter) countViewers() int {
+	a.viewersMu.Lock()
+	defer a.viewersMu.Unlock()
+	return a.liveViewersLocked()
+}
+
+// liveViewersLocked prunes the expired and counts the rest; the caller holds
+// viewersMu.
+func (a *Adapter) liveViewersLocked() int {
+	cutoff := a.now().Add(-viewerTTL)
+	for id, seen := range a.viewers {
+		if seen.Before(cutoff) {
+			delete(a.viewers, id)
+		}
+	}
+	return len(a.viewers)
 }
 
 /* -- records ------------------------------------------------------------------ */
@@ -3784,15 +4698,23 @@ func (a *Adapter) referencesTo(entity, recID string) []M {
 	return blockers
 }
 
-func queryToM(query map[string]string) M {
-	out := M{}
-	for k, v := range query {
-		out[k] = v
+// guardEnvelope is the 400 a guard refusal answers: the first violation up
+// front, every one listed.
+func guardEnvelope(violations []M, serverNow string) (int, M) {
+	first := violations[0]
+	listed := make([]M, len(violations))
+	for i, v := range violations {
+		listed[i] = M{"code": v["code"], "field": v["field"], "expected": v["expected"], "got": v["got"]}
 	}
-	return out
+	return 400, M{
+		"a2app": true, "ok": false, "code": first["code"], "field": first["field"],
+		"expected": first["expected"], "got": first["got"],
+		"message":    describeViolation(first, serverNow),
+		"violations": listed,
+	}
 }
 
-func (a *Adapter) handleRecords(method string, headers map[string]string, entity, recID string, body M, query map[string]string) (int, M) {
+func (a *Adapter) handleRecords(method string, headers map[string]string, entity, recID string, body bodyView, query map[string]string) (int, M) {
 	if status, limited := a.rateGate(headers, "data"); limited != nil {
 		return status, limited
 	}
@@ -3801,47 +4723,63 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		return errEnv(404, "unknown_entity", `No such entity "`+entity+`".`, nil)
 	}
 	fields := fieldsOf(d)
-	serverNow := nowISO()
+	serverNow := isoOf(a.now())
+	notFound := func() (int, M) {
+		return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
+	}
 
 	if method == "GET" {
-		ctx, status, errBody := a.authorize(headers, "data:"+entity+":read", false)
-		if errBody != nil {
-			return status, errBody
+		ctx, status, refusal := a.authorize(headers, "data:"+entity+":read", false)
+		if refusal != nil {
+			return status, refusal
 		}
 		if recID != "" {
 			rec := a.visible(d, ctx, a.store.getRecord(entity, recID))
 			if rec == nil {
-				return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
+				return notFound()
 			}
 			return 200, rec
 		}
-		listQuery := queryToM(query)
+		listQuery := M{}
 		if a.ownedOnly(d, ctx) {
 			listQuery["where"] = map[string]string{getStr(d, "ownedBy"): getStr(ctx, "principal")}
 		}
+		for _, name := range []string{"filter", "sort"} {
+			if v, present := query[name]; present {
+				listQuery[name] = v
+			}
+		}
+		// Paging arrives as text and is read as Number() reads it, edge cases
+		// and all (see Store.listRecords).
+		for _, name := range []string{"perPage", "page"} {
+			if v, present := query[name]; present {
+				listQuery[name] = jsNumber(v)
+			}
+		}
 		result, err := a.store.listRecords(entity, listQuery)
-		if err != nil {
-			// Refuse, never ignore: unfiltered rows under a filter would be a
-			// 200 with the wrong records (see the grammar's comment).
-			return errEnv(400, "invalid_filter", err.Error(), nil)
+		var unsupported *UnsupportedFilter
+		if errors.As(err, &unsupported) {
+			// Refuse, never ignore: unfiltered rows under a filter would be a 200
+			// with the wrong records (see the grammar's comment).
+			return errEnv(400, codeInvalidFilter, err.Error(), M{"got": unsupported.Expression})
 		}
 		return 200, result
 	}
 
-	ctx, status, errBody := a.authorize(headers, "data:"+entity+":write", true)
-	if errBody != nil {
-		return status, errBody
+	target := "data:" + entity
+	ctx, status, refusal := a.authorize(headers, target+":write", true)
+	if refusal != nil {
+		a.writeAudit(nil, target, recID, "rejected", getStr(refusal, "code"))
+		return status, refusal
 	}
-	if body == nil {
-		body = M{}
-	}
+	actor := actorOf(ctx)
 
 	if method == "DELETE" {
 		if recID == "" {
 			return errEnv(400, "usage", "DELETE requires a record id.", nil)
 		}
 		if a.ownedOnly(d, ctx) && a.visible(d, ctx, a.store.getRecord(entity, recID)) == nil {
-			return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
+			return notFound()
 		}
 
 		// The app's referential rules bind THIS door too.
@@ -3866,6 +4804,7 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 			if total != 1 {
 				said = fmt.Sprintf("%d records still reference", total)
 			}
+			a.writeAudit(actor, target, recID, "rejected", codeRecordReferenced)
 			return errEnv(409, codeRecordReferenced,
 				"Cannot delete "+entity+` "`+recID+`": `+said+" it ("+strings.Join(where, ", ")+").",
 				M{
@@ -3876,8 +4815,14 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 				})
 		}
 
-		if !a.store.deleteRecord(entity, recID) {
-			return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
+		deleted := a.store.deleteRecord(entity, recID)
+		outcome := "ok"
+		if !deleted {
+			outcome = "rejected"
+		}
+		a.writeAudit(actor, target, recID, outcome, "")
+		if !deleted {
+			return notFound()
 		}
 		a.markDataChanged()
 		return 200, M{"a2app": true, "ok": true, "deleted": recID}
@@ -3887,38 +4832,42 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		return errEnv(405, "usage", method+" not allowed on records.", nil)
 	}
 
+	// Idempotency: a replayed key answers 409 naming the record. A create's key
+	// is scoped to the entity, an update's to the row it targeted, so the two
+	// can never collide; checked before the guard, recorded only after a write
+	// that read back whole.
 	idem := headers["idempotency-key"]
-	if idem != "" && method == "POST" {
-		if prior := a.store.idemGet(entity, idem); prior != "" {
-			return errEnv(409, codeDuplicateRequest, "This idempotency key already produced a record.", M{"id": prior})
+	idemActive := idem != "" && (method == "POST" || recID != "")
+	idemScope := entity
+	if method == "PATCH" {
+		idemScope = entity + "#" + recID
+	}
+	if idemActive {
+		if prior, found := a.store.idempotencyGet(idemScope, idem); found {
+			return errEnv(409, codeDuplicateRequest, "This idempotency key was already applied.", M{"id": prior})
 		}
 	}
 
+	// Guard the RAW body before any coercion. Required fields left out are
+	// enforced on a create only — a PATCH is a legitimate partial write.
 	allow := map[string]bool{}
 	for _, k := range toAnyList(d["writeAllow"]) {
 		allow[toStr(k)] = true
 	}
-	violations := validate(fields, body, allow)
-	if len(violations) > 0 {
-		first := violations[0]
-		return 400, M{
-			"a2app": true, "ok": false, "code": first["code"], "field": first["field"],
-			"expected": first["expected"], "got": first["got"],
-			"message":    describeViolation(first, serverNow),
-			"violations": violations,
-		}
+	if violations := validate(fields, body.keys, body.fields, allow, method == "POST"); len(violations) > 0 {
+		a.writeAudit(actor, target, recID, "rejected", getStr(violations[0], "code"))
+		return guardEnvelope(violations, serverNow)
 	}
 
 	// Backend write. The owner field is the adapter's to set: the guard has
 	// already refused a client that tried, because it is read-only.
 	var stored M
 	if method == "POST" {
-		create := body
+		create := M{}
+		for k, v := range body.fields {
+			create[k] = v
+		}
 		if ownedBy := getStr(d, "ownedBy"); ownedBy != "" {
-			create = M{}
-			for k, v := range body {
-				create[k] = v
-			}
 			create[ownedBy] = ctx["principal"]
 		}
 		stored = a.materialize(entity, create)
@@ -3929,15 +4878,14 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		}
 		existing := a.visible(d, ctx, a.store.getRecord(entity, recID))
 		if existing == nil {
-			return errEnv(404, "record_not_found", "No "+entity+` record "`+recID+`".`, nil)
+			return notFound()
 		}
 		for _, f := range fields {
 			name := getStr(f, "name")
-			if getBool(f, "readOnly") || !hasKey(body, name) {
+			if getBool(f, "readOnly") || !hasKey(body.fields, name) {
 				continue
 			}
-			v := body[name]
-			if v == nil || v == "" {
+			if v := body.fields[name]; v == nil || v == "" {
 				delete(existing, name)
 			} else {
 				existing[name] = coerce(f, v)
@@ -3947,12 +4895,14 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		stored = existing
 	}
 
-	lost := divergences(fields, body, func(n string) any { return stored[n] })
+	// Read-back: did every non-blank requested value land?
+	lost := divergences(fields, body.keys, body.fields, func(n string) any { return stored[n] })
 	if len(lost) > 0 {
 		lostViolations := []M{}
 		for _, l := range lost {
 			lostViolations = append(lostViolations, M{"code": codeNotStored, "field": l["field"]})
 		}
+		a.writeAudit(actor, target, getStr(stored, "id"), "rejected", codeNotStored)
 		return 422, M{
 			"a2app": true, "ok": false, "code": codeNotStored,
 			"message":    describeIncomplete(lost),
@@ -3961,16 +4911,42 @@ func (a *Adapter) handleRecords(method string, headers map[string]string, entity
 		}
 	}
 
-	if idem != "" && method == "POST" {
-		a.store.idemPut(entity, idem, getStr(stored, "id"))
+	if idemActive {
+		a.store.idempotencyPut(idemScope, idem, getStr(stored, "id"))
 	}
+	a.writeAudit(actor, target, getStr(stored, "id"), "ok", "")
 	a.markDataChanged()
 	return 200, stored
 }
 
 /* -- operations ----------------------------------------------------------------- */
 
-func (a *Adapter) handleOperation(headers map[string]string, name string, args M) (int, M) {
+// paramFields is an operation's parameters in the shape the guard validates.
+// An operation IS a write, often a destructive one, so its arguments meet the
+// same rules as a record write — before anything acts on them, and before an
+// approval key is minted for a call that could never run.
+func paramFields(decl M) []M {
+	params, _ := decl["params"].(M)
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names) // a Go map keeps no declaration order
+	out := make([]M, 0, len(names))
+	for _, name := range names {
+		p, _ := params[name].(M)
+		field := M{"name": name, "type": getStr(p, "type")}
+		for _, attr := range []string{"required", "max", "values", "entity"} {
+			if v, present := p[attr]; present {
+				field[attr] = v
+			}
+		}
+		out = append(out, field)
+	}
+	return out
+}
+
+func (a *Adapter) handleOperation(headers map[string]string, name string, body bodyView) (int, M) {
 	if status, limited := a.rateGate(headers, "ops"); limited != nil {
 		return status, limited
 	}
@@ -3978,17 +4954,37 @@ func (a *Adapter) handleOperation(headers map[string]string, name string, args M
 	if !known {
 		return errEnv(404, "unknown_operation", `No declared operation "`+name+`".`, nil)
 	}
-	ctx, status, errBody := a.authorize(headers, "op:"+name, !getBool(decl, "readOnly"))
-	if errBody != nil {
-		return status, errBody
+	ctx, status, refusal := a.authorize(headers, "op:"+name, !getBool(decl, "readOnly"))
+	if refusal != nil {
+		return status, refusal
+	}
+	target := "op:" + name
+	actor := actorOf(ctx)
+	args := body.fields
+
+	// Every parameter is supplied fresh on each call — there is no partial
+	// update here — so a declared `required` is always enforced.
+	if violations := validate(paramFields(decl), body.keys, args, nil, true); len(violations) > 0 {
+		a.writeAudit(actor, target, "", "rejected", getStr(violations[0], "code"))
+		return guardEnvelope(violations, isoOf(a.now()))
 	}
 
-	if getBool(decl, "destructive") {
-		key := approvalKeyFor(name, args)
-		provided := headers["x-a2app-approval"]
-		if provided == "" {
-			provided = headers["x-lui-approval"]
+	// Idempotency: a retried call carrying the same key must not run twice. Its
+	// scope is `op:<name>`, apart from every record key; it is checked before
+	// approval and recorded only after a success, so a first call that needed
+	// approval or failed leaves the retry free to run.
+	idem := headers["idempotency-key"]
+	if idem != "" {
+		if _, found := a.store.idempotencyGet(target, idem); found {
+			return errEnv(409, codeDuplicateRequest, "This idempotency key already ran this operation.", M{"operation": name})
 		}
+	}
+
+	// Approval: a destructive op needs the content-addressed key of this exact
+	// call, issued by a first call and used once.
+	if getBool(decl, "destructive") {
+		key := approvalKey(name, body.raw)
+		provided := firstHeader(headers, "x-a2app-approval", "x-lui-approval")
 		if provided == "" {
 			a.store.approvalIssue(key)
 			return errEnv(428, codeApprovalRequired,
@@ -4006,22 +5002,43 @@ func (a *Adapter) handleOperation(headers map[string]string, name string, args M
 	}
 	result, err := a.runOperation(runner, args, ctx)
 	if err != nil {
+		var refused *OperationError
+		if errors.As(err, &refused) {
+			a.writeAudit(actor, target, "", "rejected", refused.Code)
+			status := refused.HTTPStatus
+			if status == 0 {
+				status = 400
+			}
+			return errEnv(status, refused.Code, refused.Message, refused.Extra)
+		}
+		a.writeAudit(actor, target, "", "rejected", "operation_failed")
 		return errEnv(500, "operation_failed", `Operation "`+name+`" threw: `+err.Error(), nil)
 	}
+	if idem != "" {
+		a.store.idempotencyPut(target, idem, name)
+	}
+	// A declared read-only operation promises no side effects; anything else is
+	// assumed to have touched data, since the adapter cannot see inside it.
 	if !getBool(decl, "readOnly") {
 		a.markDataChanged()
 	}
+	a.writeAudit(actor, target, "", "ok", "")
 	return 200, M{"a2app": true, "ok": true, "operation": name, "result": result}
 }
 
 // runOperation shields the surface from a runner that panics: app code failing
-// must answer operation_failed, never take the process down mid-request. The
-// runner's store is bound to its caller, so a task it queues is done by an
-// agent acting as whoever called it.
+// must answer operation_failed, never take the process down mid-request (a
+// panic carrying an *OperationError still refuses as one). The runner's store
+// is bound to its caller, so a task it queues is done by an agent acting as
+// whoever called it.
 func (a *Adapter) runOperation(runner OperationRunner, args M, ctx M) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
+			if e, isError := r.(error); isError {
+				err = e
+			} else {
+				err = fmt.Errorf("%v", r)
+			}
 		}
 	}()
 	return runner(args, ctx, a.store.forCaller(getStr(ctx, "principal")))
@@ -4029,34 +5046,32 @@ func (a *Adapter) runOperation(runner OperationRunner, args M, ctx M) (result an
 
 /* -- tasks / events ---------------------------------------------------------------- */
 
-func (a *Adapter) handleEvents(method string, headers map[string]string, query map[string]string) (int, M) {
+func (a *Adapter) handleEvents(headers map[string]string, query map[string]string) (int, M) {
 	if status, limited := a.rateGate(headers, "data"); limited != nil {
 		return status, limited
 	}
-	if _, status, errBody := a.authorize(headers, "", false); errBody != nil {
-		return status, errBody
+	if _, status, refusal := a.authorize(headers, "", false); refusal != nil {
+		return status, refusal
 	}
-	res := a.store.eventsSince(query["since"])
-	events := []M{}
-	for _, e := range toMList(res["events"]) {
-		events = append(events, M{
-			"id": e["id"], "app": e["app"], "type": e["type"],
-			"payload": e["payload"], "createdAt": e["createdAt"],
-		})
+	events, next := a.store.eventsSince(query["since"])
+	wire := make([]M, len(events))
+	for i, e := range events {
+		wire[i] = M{"id": e.ID, "app": e.App, "type": e.Type, "payload": e.Payload, "createdAt": e.CreatedAt}
 	}
-	return 200, M{"a2app": true, "events": events, "nextCursor": res["nextCursor"], "pollAfterMs": 3000}
+	return 200, M{"a2app": true, "events": wire, "nextCursor": next, "pollAfterMs": 3000}
 }
 
 func (a *Adapter) handleTasks(method string, headers map[string]string, rest []string, body M, query map[string]string) (int, M) {
 	if status, limited := a.rateGate(headers, "data"); limited != nil {
 		return status, limited
 	}
-	ctx, status, errBody := a.authorize(headers, "", method != "GET")
-	if errBody != nil {
-		return status, errBody
+	ctx, status, refusal := a.authorize(headers, "", method != "GET")
+	if refusal != nil {
+		return status, refusal
 	}
+	actor := actorOf(ctx)
 
-	a.store.sweep()
+	a.store.sweep(taskTimeout, taskMaxDeliveries)
 
 	if len(rest) == 0 && method == "GET" {
 		tasks := []M{}
@@ -4082,84 +5097,98 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		return errEnv(404, codeTaskNotFound, `No task "`+taskID+`".`, nil)
 	}
 	if !hasAction && method == "GET" {
-		return 200, taskWire(task)
+		return 200, taskWire(*task)
 	}
 	if method != "POST" {
 		return errEnv(405, "usage", method+" not allowed here.", nil)
 	}
-	if body == nil {
-		body = M{}
-	}
 
 	switch action {
 	case "claim":
-		if getStr(task, "status") != "submitted" {
-			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+getStr(task, "status")+", not claimable.", nil)
+		if task.Status != "submitted" {
+			a.writeAudit(actor, "task:claim", taskID, "rejected", codeTaskNotClaimable)
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+task.Status+", not claimable.", nil)
 		}
-		task["status"] = "working"
-		task["claim"] = M{"credentialId": ctx["credentialId"], "principal": ctx["principal"], "claimedAt": nowISO()}
+		// An agent may name itself in the body ({agent: <credentialId>}), but only
+		// as the credential it presented: claiming as someone else is refused
+		// rather than recorded under a name that is not the caller's.
+		if requested, _ := body["agent"].(string); requested != "" &&
+			requested != getStr(ctx, "credentialId") && requested != ctx["agentName"] {
+			a.writeAudit(actor, "task:claim", taskID, "rejected", "principal_mismatch")
+			return errEnv(403, "principal_mismatch",
+				"Cannot claim task "+taskID+` as "`+requested+`": the credential presented is `+getStr(ctx, "credentialId")+".",
+				M{"requested": requested, "actual": ctx["credentialId"]})
+		}
+		task.Status = "working"
+		task.Claim = &TaskClaim{CredentialID: getStr(ctx, "credentialId"), Principal: getStr(ctx, "principal"), ClaimedAt: isoOf(a.now())}
 		a.store.saveTask(task)
-		return 200, taskWire(task)
+		a.writeAudit(actor, "task:claim", taskID, "ok", "")
+		return 200, taskWire(*task)
 	case "progress":
-		if getStr(task, "status") == "canceled" {
+		if task.Status == "canceled" {
 			return errEnv(409, codeTaskCanceled, "Task "+taskID+" was canceled.", nil)
 		}
-		if getStr(task, "status") != "working" && getStr(task, "status") != "input-required" {
-			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+getStr(task, "status")+".", nil)
-		}
-		progress, _ := task["progress"].(M)
-		if progress == nil {
-			progress = M{}
-			task["progress"] = progress
+		if task.Status != "working" && task.Status != "input-required" {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+task.Status+".", nil)
 		}
 		if step, ok := body["step"].(string); ok {
-			progress["step"] = step
+			task.Progress.Step = &step
 		}
-		if percent, ok := asFloat(body["percent"]); ok {
-			progress["percent"] = percent
+		if percent, ok := body["percent"].(float64); ok {
+			task.Progress.Percent = &percent
+			if math.IsNaN(percent) || math.IsInf(percent, 0) {
+				task.Progress.Percent = nil // what JSON.stringify writes for it
+			}
 		}
-		if body["ask"] != nil {
-			task["ask"] = body["ask"]
-			task["status"] = "input-required"
-		} else if getStr(task, "status") == "input-required" {
-			task["status"] = "working"
+		if ask, asked := body["ask"]; asked {
+			task.Ask = jsonSafe(ask)
+			task.Status = "input-required"
+		} else if task.Status == "input-required" {
+			task.Status = "working"
 		}
 		a.store.saveTask(task)
-		return 200, taskWire(task)
+		a.writeAudit(actor, "task:progress", taskID, "ok", "")
+		return 200, taskWire(*task)
 	case "complete":
-		if getStr(task, "status") == "canceled" {
+		if task.Status == "canceled" {
 			return errEnv(409, codeTaskCanceled, "Task "+taskID+" was canceled.", nil)
 		}
 		// A terminal write belongs to a live claim. Once the sweeper has returned
 		// a task to the queue, a late completion from the run that abandoned it
 		// must not close work someone else may now be doing.
-		if getStr(task, "status") != "working" && getStr(task, "status") != "input-required" {
-			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+getStr(task, "status")+", not in progress.", nil)
+		if task.Status != "working" && task.Status != "input-required" {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+task.Status+", not in progress.", nil)
 		}
-		switch getStr(body, "status") {
+		code := ""
+		switch body["status"] {
 		case "completed":
-			task["status"] = "completed"
-			if truthy(body["result"]) {
-				task["result"] = body["result"]
-			} else {
-				task["result"] = M{}
+			task.Status = "completed"
+			task.Result = jsonSafe(body["result"])
+			if task.Result == nil {
+				task.Result = M{}
 			}
 		case "failed":
-			task["status"] = "failed"
-			if reason, ok := body["reason"].(string); ok {
-				task["reason"] = reason
-			} else {
-				task["reason"] = "unspecified"
+			reason, ok := body["reason"].(string)
+			if !ok {
+				reason = "unspecified"
 			}
+			task.Status, task.Reason, code = "failed", &reason, "failed"
 		default:
 			return errEnv(400, "usage", `complete requires status "completed" or "failed".`, nil)
 		}
 		a.store.saveTask(task)
-		return 200, taskWire(task)
+		a.writeAudit(actor, "task:complete", taskID, "ok", code)
+		return 200, taskWire(*task)
 	case "cancel":
-		task["status"] = "canceled"
+		// Terminal is terminal: relabelling finished work as canceled would move
+		// it backwards and rewrite the outcome of work that already happened.
+		if terminalTask[task.Status] {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" already reached "+task.Status+".", nil)
+		}
+		task.Status = "canceled"
 		a.store.saveTask(task)
-		return 200, taskWire(task)
+		a.writeAudit(actor, "task:cancel", taskID, "ok", "")
+		return 200, taskWire(*task)
 	case "credential":
 		// What the bridge runs the task's harness with (spec §6.2): the person
 		// who queued it, the capability's scopes, and no life past the task.
@@ -4170,13 +5199,12 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		if mgr.role != "owner" {
 			return errEnv(403, "not_a_manager", "Only an owner issues a task's credential.", nil)
 		}
-		if terminalTask[getStr(task, "status")] {
-			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" already reached "+getStr(task, "status")+".", nil)
+		if terminalTask[task.Status] {
+			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" already reached "+task.Status+".", nil)
 		}
-		request, _ := task["request"].(M)
-		principal := getStr(request, "principal")
-		if principal == "" {
-			principal = ownerPrincipal.ID
+		principal := ownerPrincipal.ID
+		if task.Request.Principal != nil {
+			principal = *task.Request.Principal
 		}
 		info := a.principalInfo(principal)
 		if info == nil || !info.Active {
@@ -4187,29 +5215,37 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 			return errEnv(400, "usage", problem, nil)
 		}
 		scopes := []string{"*"}
-		if declared, ok := a.capabilities[getStr(request, "capability")]["scopes"]; ok && declared != nil {
+		if declared, ok := a.capabilities[task.Request.Capability]["scopes"]; ok && declared != nil {
 			scopes = scopeList(declared)
 		}
 		token, grant := a.mintCredential(principal, agentName, scopes, taskCredentialSeconds, taskID)
+		a.writeAudit(actor, "task:credential", taskID, "ok", "")
 		return 201, M{"a2app": true, "token": token, "credential": credentialWire(grant, info.Name)}
 	}
 	return errEnv(404, "usage", `Unknown task action "`+action+`".`, nil)
 }
 
-func taskWire(t M) M {
+// taskWire is a task as served: its delivery count, dedup key and question
+// are the queue's own business.
+func taskWire(t Task) M {
 	// `principal` is who queued the task (null for the app's own work) — the
 	// person its agent acts as.
-	request := M{"principal": nil}
-	if r, ok := t["request"].(M); ok {
-		for k, v := range r {
-			request[k] = v
-		}
+	request := M{"capability": t.Request.Capability, "payload": t.Request.Payload, "principal": nil}
+	if t.Request.Principal != nil {
+		request["principal"] = *t.Request.Principal
+	}
+	var claim, reason any
+	if t.Claim != nil {
+		claim = t.Claim
+	}
+	if t.Reason != nil {
+		reason = *t.Reason
 	}
 	return M{
-		"id": t["id"], "app": t["app"], "event": t["event"], "status": t["status"],
-		"request": request, "claim": t["claim"], "progress": t["progress"],
-		"result": t["result"], "reason": t["reason"], "createdAt": t["createdAt"],
-		"updatedAt": t["updatedAt"], "pollAfterMs": 2000,
+		"id": t.ID, "app": t.App, "event": t.Event, "status": t.Status,
+		"request": request, "claim": claim, "progress": t.Progress,
+		"result": t.Result, "reason": reason, "createdAt": t.CreatedAt,
+		"updatedAt": t.UpdatedAt, "pollAfterMs": 2000,
 	}
 }
 
@@ -4303,11 +5339,11 @@ func (a *Adapter) handleAccounts(method, path string, headers map[string]string,
 	case path == "/api/_a2app/invites":
 		return plain(a.createInvite(method, headers, body))
 	case strings.HasPrefix(path, "/api/_a2app/invites/"):
-		return a.handleInvite(method, strings.TrimPrefix(path, "/api/_a2app/invites/"), headers, body)
+		return a.handleInvite(method, mustDecode(strings.TrimPrefix(path, "/api/_a2app/invites/")), headers, body)
 	case path == "/api/_a2app/users":
 		return plain(a.handleUsers(method, "", headers, body))
 	case strings.HasPrefix(path, "/api/_a2app/users/"):
-		return plain(a.handleUsers(method, strings.TrimPrefix(path, "/api/_a2app/users/"), headers, body))
+		return plain(a.handleUsers(method, mustDecode(strings.TrimPrefix(path, "/api/_a2app/users/")), headers, body))
 	}
 	return plain(errEnv(404, "not_found", unknownRouteMessage, nil))
 }
@@ -4643,7 +5679,7 @@ func (a *Adapter) liveGrant(g Grant) bool {
 	}
 	if g.Task != "" {
 		task := a.store.getTask(g.Task)
-		if task == nil || terminalTask[getStr(task, "status")] {
+		if task == nil || terminalTask[task.Status] {
 			return false
 		}
 	}
@@ -4666,7 +5702,7 @@ func (a *Adapter) handleCredentials(method, path string, headers map[string]stri
 	if method != "DELETE" {
 		return errEnv(405, "usage", "A credential is revoked with DELETE.", nil)
 	}
-	return a.revokeCredential(headers, strings.TrimPrefix(path, "/api/_a2app/credentials/"))
+	return a.revokeCredential(headers, mustDecode(strings.TrimPrefix(path, "/api/_a2app/credentials/")))
 }
 
 func (a *Adapter) listCredentials(headers map[string]string) (int, M) {
@@ -4762,11 +5798,23 @@ func (a *Adapter) revokeCredential(headers map[string]string, id string) (int, M
 // password or session ever reaches the agent. Codes live 10 minutes, are single
 // use, and the device code is stored only as its hash. Every transition runs
 // under authMu, so a code is approved, denied or redeemed exactly once.
+//
+// Approving is not enough on its own: anyone can start a request and send the
+// person its link. So approval issues a one-time confirmation code, and the
+// credential goes only to whoever presents it. An agent on the person's own
+// computer receives it on a loopback port (RFC 8252) when the page returns the
+// browser there; an agent elsewhere is given it by the person.
 
 const (
 	deviceCodeTTLSeconds      = 600
 	devicePollIntervalSeconds = 5
 	deviceSlowDownStepSeconds = 5
+	// Wrong confirmation codes a request survives before it is void.
+	deviceConfirmAttempts = 5
+	// Where an agent on the person's computer waits for the confirmation.
+	loopbackCallback = "/a2app/callback"
+	loopbackPortMin  = 1024
+	loopbackPortMax  = 65535
 )
 
 // handleDevice routes one request under /api/_a2app/auth/; handled is false
@@ -4788,7 +5836,7 @@ func (a *Adapter) handleDevice(method, path string, headers map[string]string, b
 		}
 		return routed(a.pollDevice(body))
 	case strings.HasPrefix(path, "/api/_a2app/auth/device/"):
-		code := strings.TrimPrefix(path, "/api/_a2app/auth/device/")
+		code := mustDecode(strings.TrimPrefix(path, "/api/_a2app/auth/device/"))
 		switch method {
 		case "GET":
 			return routed(a.reviewDevice(headers, code))
@@ -4842,6 +5890,16 @@ func (a *Adapter) startDevice(headers map[string]string, body M) (int, M) {
 		}
 		agentName = strings.TrimSpace(s)
 	}
+	var loopbackPort *int
+	if v := body["loopbackPort"]; v != nil {
+		n, isNumber := v.(float64)
+		if !isNumber || n != math.Trunc(n) || n < loopbackPortMin || n > loopbackPortMax {
+			return errEnv(400, "usage", fmt.Sprintf("loopbackPort is the port, %d to %d, where the agent waits on 127.0.0.1.",
+				loopbackPortMin, loopbackPortMax), nil)
+		}
+		port := int(n)
+		loopbackPort = &port
+	}
 	a.authMu.Lock()
 	defer a.authMu.Unlock()
 	taken := map[string]bool{}
@@ -4857,7 +5915,7 @@ func (a *Adapter) startDevice(headers map[string]string, body M) (int, M) {
 	a.store.putAuthRow(tableDevices, hashSecret(deviceCode), deviceRow{
 		UserCode: userCode, AgentName: agentName, Scopes: scopes, ExpiresInSeconds: expiresIn,
 		CreatedAt: isoOf(now), ExpiresAt: isoOf(now.Add(deviceCodeTTLSeconds * time.Second)),
-		Interval: devicePollIntervalSeconds, Status: "pending",
+		Interval: devicePollIntervalSeconds, Status: "pending", LoopbackPort: loopbackPort,
 	})
 	approve := a.publicOrigin(headers) + accountURL + "#approve"
 	return 200, M{
@@ -4888,7 +5946,27 @@ func (a *Adapter) pollDevice(body M) (int, M) {
 		a.store.deleteAuthRow(tableDevices, key)
 		return errEnv(400, "access_denied", "The person declined this agent's request.", nil)
 	}
-	if row.Status == "approved" && row.ApprovedBy != "" && row.ApprovedScopes != nil {
+	if row.Status == "approved" && row.ApprovedBy != "" && row.ApprovedScopes != nil && row.ConfirmationHash != "" {
+		// Answered at once, whatever the interval: wrong guesses are bounded by
+		// deviceConfirmAttempts instead.
+		confirmation := ""
+		if typed, ok := body["confirmation"].(string); ok {
+			confirmation = normalizeUserCode(typed)
+		}
+		if confirmation == "" {
+			return errEnv(400, "confirmation_required", "Approved. Present the confirmation code the approval produced.",
+				M{"interval": row.Interval})
+		}
+		if subtle.ConstantTimeCompare([]byte(hashSecret(confirmation)), []byte(row.ConfirmationHash)) != 1 {
+			row.ConfirmAttempts++
+			if row.ConfirmAttempts >= deviceConfirmAttempts {
+				a.store.deleteAuthRow(tableDevices, key)
+				return errEnv(400, "access_denied", "Too many wrong confirmation codes: this request is void. Start again.", nil)
+			}
+			a.store.putAuthRow(tableDevices, key, row)
+			return errEnv(400, "confirmation_invalid", fmt.Sprintf("That is not this request's confirmation code (%d tries left).",
+				deviceConfirmAttempts-row.ConfirmAttempts), nil)
+		}
 		// Single use: the row goes before the credential is handed out.
 		a.store.deleteAuthRow(tableDevices, key)
 		info := a.principalInfo(row.ApprovedBy)
@@ -4925,6 +6003,9 @@ func (a *Adapter) reviewDevice(headers map[string]string, userCode string) (int,
 	return 200, M{
 		"a2app": true, "userCode": row.UserCode, "agentName": orNull(row.AgentName), "scopes": row.Scopes,
 		"expiresIn": row.ExpiresInSeconds, "expiresAt": row.ExpiresAt,
+		// when the agent asked, and whether it waits on this computer: what the
+		// person checks against the request their own agent just showed them
+		"requestedAt": row.CreatedAt, "loopback": row.LoopbackPort != nil,
 	}
 }
 
@@ -4969,18 +6050,28 @@ func (a *Adapter) decideDevice(headers map[string]string, userCode string, body 
 		}
 		scopes = approved
 	}
+	// Approval hands over nothing by itself: the credential goes to whoever
+	// presents this code, which reaches the agent through the person.
+	confirmation := newUserCode()
 	row.Status = "approved"
 	row.ApprovedBy = mgr.principal
 	row.ApprovedScopes = scopes
+	row.ConfirmationHash = hashSecret(confirmation)
 	a.store.putAuthRow(tableDevices, found.key, row)
-	return 200, M{"a2app": true, "ok": true, "status": "approved"}
+	var redirect any
+	if row.LoopbackPort != nil {
+		redirect = fmt.Sprintf("http://127.0.0.1:%d%s?confirmation=%s", *row.LoopbackPort, loopbackCallback, url.QueryEscape(confirmation))
+	}
+	return 200, M{"a2app": true, "ok": true, "status": "approved", "confirmation": confirmation, "redirect": redirect}
 }
 
 /* ------------------------------------------------------------------ self-test */
 // Rules-parity oracle, run by the toolkit gate (`go run . --selftest`). Its job
-// is to prove this port, the Python port and `@a2app/rules` agree, so a Go app
-// and a Node app reject identical payloads identically and block identical
-// operations for identical stated reasons.
+// is to prove this port and adapter-core agree, so a Go app and a Node app
+// reject identical payloads identically, block identical operations for
+// identical stated reasons, compute identical approval keys, and keep what
+// they keep across a restart. The fixed vectors below were produced by
+// adapter-core itself.
 //
 // Until the Python original existed, that gate step ran, imported the module,
 // and exited 0 without asserting anything — a vacuously passing check, which is
@@ -4994,6 +6085,29 @@ func selftest() int {
 			failures = append(failures, fmt.Sprintf("%s\n    expected: %#v\n    actual:   %#v", label, expected, actual))
 		}
 	}
+	codesOf := func(violations []M) []string {
+		codes := []string{}
+		for _, v := range violations {
+			codes = append(codes, getStr(v, "code"))
+		}
+		return codes
+	}
+	// call answers one request through Handle, the way main.go does.
+	call := func(app *Adapter, method, path string, headers map[string]string, body any) (int, M) {
+		if body == nil && (method == "POST" || method == "PATCH") {
+			body = M{}
+		}
+		status, reply, _, _ := app.Handle(Request{Method: method, Path: path, Headers: headers, Body: body})
+		return status, reply
+	}
+	codeOf := func(_ int, reply M) any { return reply["code"] }
+	firstOf := func(list []M) M {
+		if len(list) == 0 {
+			return M{}
+		}
+		return list[0]
+	}
+	statusOf := func(status int, _ M) int { return status }
 
 	fields := []M{
 		{"name": "title", "type": "string", "required": true, "max": 200},
@@ -5001,19 +6115,53 @@ func selftest() int {
 		{"name": "due", "type": "string", "max": 10, "dayKey": true},
 		{"name": "created", "type": "datetime", "readOnly": true},
 	}
-
-	// 1. Guard: every violation, by code, sorted.
-	bad := M{"nope": 1, "created": "x", "status": "nonsense", "due": "31-12-2026"}
-	codes := []string{}
-	for _, v := range validate(fields, bad, nil) {
-		codes = append(codes, getStr(v, "code"))
+	guard := func(body M, create bool) []M {
+		view := viewBody(body, nil)
+		return validate(fields, view.keys, view.fields, nil, create)
 	}
+
+	// 1. Guard: every violation, in the body's own order, by the current rules.
+	codes := codesOf(guard(M{"nope": 1, "created": "x", "status": "nonsense", "due": "31-12-2026"}, false))
 	sort.Strings(codes)
 	check("guard reports every violation", codes,
 		[]string{"invalid_daykey", "invalid_enum", "read_only_field", "unknown_field"})
-	check("a good body yields no violations",
-		len(validate(fields, M{"title": "ok", "status": "todo"}, nil)), 0)
+	check("a good body yields no violations", len(guard(M{"title": "ok", "status": "todo"}, true)), 0)
 	check("label field resolution", labelFieldOf(fields), any("title"))
+	parsed, written := ParseBody([]byte(`{"status":"nonsense","2":1,"title":5,"1":0}`))
+	view := viewBody(parsed, written)
+	order := []string{}
+	for _, v := range validate(fields, view.keys, view.fields, nil, false) {
+		order = append(order, getStr(v, "field"))
+	}
+	check("violations follow the body's order, array-index keys first", order, []string{"1", "2", "status", "title"})
+	check("a create needs every required field", codesOf(guard(M{"status": "todo"}, true)), []string{codeMissingRequired})
+	check("…which an update may leave out", len(guard(M{"status": "todo"}, false)), 0)
+	check("…but not blank", codesOf(guard(M{"title": ""}, false)), []string{codeMissingRequired})
+	long := guard(M{"title": strings.Repeat("x", 201)}, false)
+	check("text past its max is refused", []any{codesOf(long), firstOf(long)["expected"]},
+		[]any{[]string{codeInvalidString}, "text of at most 200 characters"})
+	check("…counted in characters", len(guard(M{"title": strings.Repeat("é", 200)}, false)), 0)
+	tags := []M{{"name": "tags", "type": "list<enum>", "values": []string{"a", "b"}}}
+	check("a list takes an array, not a bare value", firstOf(validate(tags, []string{"tags"}, M{"tags": "a"}, nil, false))["expected"], "an array of: a | b")
+	check("…of declared values", firstOf(validate(tags, []string{"tags"}, M{"tags": []any{"a", "c"}}, nil, false))["expected"], "each of: a | b")
+	check("with nothing writable, an unknown field says so",
+		firstOf(validate([]M{{"name": "id", "type": "string", "readOnly": true}}, []string{"x"}, M{"x": 1.0}, nil, false))["expected"],
+		"nothing — no writable fields are declared")
+	numberField := []M{{"name": "n", "type": "number"}}
+	numberCode := func(v any) any {
+		if out := validate(numberField, []string{"n"}, M{"n": v}, nil, false); len(out) > 0 {
+			return out[0]["code"]
+		}
+		return nil
+	}
+	check("a number sent as text is read as Number() reads it",
+		[]any{numberCode("1e3"), numberCode("0x1A"), numberCode("Infinity"), numberCode("NaN"), numberCode("inf"), numberCode(" "), numberCode(true)},
+		[]any{nil, nil, nil, codeInvalidNumber, codeInvalidNumber, codeInvalidNumber, codeInvalidNumber})
+	check("…and stored as that number", []any{coerce(numberField[0], "0x1A"), coerce(numberField[0], "1e3")}, []any{26.0, 1000.0})
+	check("…with Infinity stored as JSON holds it", stableJSON(M{"n": coerce(numberField[0], "Infinity")}), `{"n":null}`)
+	secret := []M{{"name": "password", "type": "string", "writeOnly": true}}
+	check("a write-only field is never expected back",
+		len(divergences(secret, []string{"password"}, M{"password": "x"}, func(string) any { return nil })), 0)
 
 	// 2. Predicates: availability AND the stated reason. Both are contractual —
 	//    a blocked operation must say the same thing on every stack.
@@ -5021,31 +6169,26 @@ func selftest() int {
 	check("ne holds", evaluatePredicate(M{"field": "status", "ne": "done"}, record, fields), true)
 	check("eq fails", evaluatePredicate(M{"field": "status", "eq": "done"}, record, fields), false)
 	check("eq explains with both values",
-		explainPredicate(M{"field": "status", "eq": "done"}, record, fields),
-		`status is "doing", not "done"`)
+		explainPredicate(M{"field": "status", "eq": "done"}, record, fields), `status is "doing", not "done"`)
 	check("in explains with the full set",
-		explainPredicate(M{"field": "status", "in": []any{"todo", "done"}}, record, fields),
-		`status is "doing", not "todo" or "done"`)
+		explainPredicate(M{"field": "status", "in": []any{"todo", "done"}}, record, fields), `status is "doing", not "todo" or "done"`)
 	check("all reports the first failing branch",
-		explainPredicate(
-			M{"all": []any{M{"field": "status", "ne": "done"}, M{"field": "title", "eq": "Other"}}},
-			record, fields),
+		explainPredicate(M{"all": []any{M{"field": "status", "ne": "done"}, M{"field": "title", "eq": "Other"}}}, record, fields),
 		`title is "Ship it", not "Other"`)
-	check("isBlank on an absent field",
-		evaluatePredicate(M{"field": "due", "isBlank": true}, record, fields), true)
-	// A backend may store a boolean as text; both are the same boolean.
+	check("a negated leaf names its field",
+		explainPredicate(M{"not": M{"field": "status", "in": []any{"doing"}}}, record, fields), "the condition on status is not met")
+	check("a negated compound names the record",
+		explainPredicate(M{"not": M{"all": []any{M{"field": "status", "ne": "done"}}}}, record, fields), "the condition on the record is not met")
+	check("isBlank on an absent field", evaluatePredicate(M{"field": "due", "isBlank": true}, record, fields), true)
 	boolFields := []M{{"name": "done", "type": "boolean"}}
 	check("boolean compares by declared type, not storage shape",
 		evaluatePredicate(M{"field": "done", "eq": true}, M{"id": "x", "done": "true"}, boolFields), true)
-	// An unrecognised form must refuse, never default to available.
-	check("unknown predicate form refuses",
-		evaluatePredicate(M{"field": "status"}, record, fields), false)
+	check("unknown predicate form refuses", evaluatePredicate(M{"field": "status"}, record, fields), false)
 
 	// 3. Fingerprint: stable, and moved by anything describe publishes.
 	base := map[string]M{"tasks": {"fields": fields, "module": "planning"}}
 	check("fingerprint is deterministic", schemaFingerprint(base, nil), schemaFingerprint(base, nil))
-	moved := map[string]M{"tasks": {"fields": fields, "module": "other"}}
-	if schemaFingerprint(base, nil) == schemaFingerprint(moved, nil) {
+	if schemaFingerprint(base, nil) == schemaFingerprint(map[string]M{"tasks": {"fields": fields, "module": "other"}}, nil) {
 		failures = append(failures, "fingerprint ignores an entity's module")
 	}
 	if schemaFingerprint(base, []M{{"name": "op", "params": M{}}}) ==
@@ -5053,67 +6196,107 @@ func selftest() int {
 		failures = append(failures, "fingerprint ignores operation params")
 	}
 
-	// 4. Referential deletes: the rule an app declares with a `ref` binds the
-	//    generic record route, not just whatever operation the app wrote. This
-	//    checks the scan itself — the thing a delete consults before it commits.
+	// 4. JavaScript semantics: what the reference's language decides.
+	numbers := []string{}
+	for _, s := range []string{"", " 12 ", "0x1A", "0b101", "0o17", "1e3", "Infinity", "-Infinity", "+Infinity", "inf",
+		"NaN", "1_000", ".5", "5.", "-0x1A", "\u00a012\ufeff", "1e400", "0x", "abc"} {
+		numbers = append(numbers, jsNumberString(jsNumber(s)))
+	}
+	check("Number() reads text as JavaScript does", numbers, []string{"0", "12", "26", "5", "15", "1000", "Infinity",
+		"-Infinity", "Infinity", "NaN", "NaN", "NaN", "0.5", "5", "NaN", "12", "Infinity", "NaN", "NaN"})
+	tenth, fifth := 0.1, 0.2
+	printed := []string{}
+	for _, f := range []float64{1e21, 1e-7, 0.000001, math.Copysign(0, -1), 123.456, 5e-324, 100, tenth + fifth, 1e20, -1.5e-10, math.MaxFloat64} {
+		printed = append(printed, jsNumberString(f))
+	}
+	check("a number prints as JavaScript prints it", printed, []string{"1e+21", "1e-7", "0.000001", "0", "123.456", "5e-324",
+		"100", "0.30000000000000004", "100000000000000000000", "-1.5e-10", "1.7976931348623157e+308"})
+	jcsArgs := M{
+		"title":  "Ship \"it\"\n\u0001é😀",
+		"n":      []any{1e21, 1e-7, 0.000001, math.Copysign(0, -1), 123.456, 5e-324, 100.0, tenth + fifth},
+		"nested": M{"b": true, "a": nil, "é": 1.0, "Z": 2.0, "10": 3.0, "9": 4.0},
+	}
+	check("RFC 8785 canonical JSON, as adapter-core writes it", canonicalize(jcsArgs),
+		`{"n":[1e+21,1e-7,0.000001,0,123.456,5e-324,100,0.30000000000000004],"nested":{"10":3,"9":4,"Z":2,"a":null,"b":true,"é":1},"title":"Ship \"it\"\n\u0001é😀"}`)
+	check("the approval key is adapter-core's", approvalKey("clear-done", jcsArgs), "050ee01259323efe2d3ab3ea30ff98c09f7d8327bb518fa498f7f2f9b8083845")
+	check("…with no arguments too", approvalKey("clear-done", nil), "7d745c845ebc004f343ea667d5b6e711ae3a8b842858cb0e79e4d3026519c00c")
+	check("an occurrence's dedup key is adapter-core's",
+		"sha256:"+sha256Hex(canonicalize(M{"type": "task.needs_triage", "capability": "triage", "payload": M{"task": "t1"}, "principal": "usr_a"})),
+		"sha256:2d0816034520f2e325a3dc59dc62a9d7716359739eacabb8076d992db9e4ca9e")
+	nullBody, _ := ParseBody([]byte("null"))
+	blankBody, _ := ParseBody([]byte(" \n"))
+	arrayBody, _ := ParseBody([]byte(`["x"]`))
+	junkBody, _ := ParseBody([]byte("{nope"))
+	trailingBody, _ := ParseBody([]byte("{} x"))
+	hugeBody, _ := ParseBody([]byte(`{"n":1e400}`))
+	check("a body reads as JSON.parse reads it",
+		[]any{nullBody == nil, blankBody == nil, viewBody(arrayBody, nil).keys, junkBody, hasKey(trailingBody.(M), "__unparsed__"), math.IsInf(numberOf(hugeBody.(M)["n"]), 1)},
+		[]any{true, true, []string{"0"}, M{"__unparsed__": "{nope"}, true, true})
+	decoded, _ := decodeURIComponent("a%2Fb%20c")
+	_, badUTF8 := decodeURIComponent("%FF")
+	_, badEscape := decodeURIComponent("%zz")
+	check("decodeURIComponent decodes every escape and refuses a malformed one",
+		[]any{decoded, badUTF8 != nil, badEscape != nil}, []any{"a/b c", true, true})
+	check("a query reads as URLSearchParams reads it", parseQuery("a=1&a=2&b=x+y&c=%zz&d"),
+		map[string]string{"a": "2", "b": "x y", "c": "%zz", "d": ""})
+	check("JSON.stringify writes a non-finite number as null", stableJSON(M{"x": math.Inf(1), "y": []any{math.NaN()}}), `{"x":null,"y":[null]}`)
+	bounded := boundAppText(strings.Repeat("x", 400))
+	check("text an app forwards to an agent is one bounded line",
+		[]any{boundAppText("a\n\n  b "), jsLength(bounded), strings.HasSuffix(bounded, " [truncated by adapter, 138 chars cut]")},
+		[]any{"a b", 300, true})
+
+	// 5. Referential deletes: the rule an app declares with a `ref` binds the
+	//    generic record route, not just whatever operation the app wrote.
 	invoiceFields := []M{
 		{"name": "client", "type": "ref", "entity": "clients"},
 		{"name": "projects", "type": "list<ref>", "entity": "projects"},
 	}
-	defs := map[string]M{
-		"clients":  {"fields": []M{{"name": "name", "type": "string"}}, "module": "sales"},
-		"projects": {"fields": []M{{"name": "title", "type": "string"}}, "module": "sales"},
-		"invoices": {"fields": invoiceFields, "module": "sales"},
+	scanApp := func(invoices []M) *Adapter {
+		app, err := NewAdapter(AdapterConfig{AppID: "scan", Store: NewStore(nil), Modules: []M{{"name": "sales"}}, Entities: []M{
+			{"name": "clients", "module": "sales", "fields": []M{{"name": "name", "type": "string"}}},
+			{"name": "projects", "module": "sales", "fields": []M{{"name": "title", "type": "string"}}},
+			{"name": "invoices", "module": "sales", "fields": invoices},
+		}})
+		if err != nil {
+			panic(err)
+		}
+		app.store.putRecord("clients", M{"id": "c_acme"})
+		app.store.putRecord("clients", M{"id": "c_unused"})
+		app.store.putRecord("projects", M{"id": "p_one"})
+		app.store.putRecord("invoices", M{"id": "inv_1", "client": "c_acme", "projects": []any{"p_one"}})
+		return app
 	}
-	scanStore := NewStore(nil)
-	scanStore.putRecord("clients", M{"id": "c_acme"})
-	scanStore.putRecord("clients", M{"id": "c_unused"})
-	scanStore.putRecord("projects", M{"id": "p_one"})
-	scanStore.putRecord("invoices", M{"id": "inv_1", "client": "c_acme", "projects": []any{"p_one"}})
-	ad := &Adapter{entityDefs: defs, store: scanStore}
-
-	check("a referenced record reports who blocks it",
-		ad.referencesTo("clients", "c_acme"),
+	ad := scanApp(invoiceFields)
+	check("a referenced record reports who blocks it", ad.referencesTo("clients", "c_acme"),
 		[]M{{"entity": "invoices", "field": "client", "ids": []string{"inv_1"}}})
 	check("an unreferenced record blocks nothing", ad.referencesTo("clients", "c_unused"), []M{})
-	check("a reference held in a list counts too",
-		ad.referencesTo("projects", "p_one"),
+	check("a reference held in a list counts too", ad.referencesTo("projects", "p_one"),
 		[]M{{"entity": "invoices", "field": "projects", "ids": []string{"inv_1"}}})
-
-	// The opt-out is per field, and it is the only way to allow orphaning.
-	ignoring := map[string]M{}
-	for k, v := range defs {
-		ignoring[k] = v
-	}
-	ignoring["invoices"] = M{"fields": []M{
-		{"name": "client", "type": "ref", "entity": "clients", "onDelete": "ignore"},
-		invoiceFields[1],
-	}, "module": "sales"}
-	adIgnoring := &Adapter{entityDefs: ignoring, store: scanStore}
+	adIgnoring := scanApp([]M{{"name": "client", "type": "ref", "entity": "clients", "onDelete": "ignore"}, invoiceFields[1]})
 	check(`onDelete "ignore" removes the block`, adIgnoring.referencesTo("clients", "c_acme"), []M{})
-	check("and leaves the other ref guarded",
-		adIgnoring.referencesTo("projects", "p_one"),
+	check("and leaves the other ref guarded", adIgnoring.referencesTo("projects", "p_one"),
 		[]M{{"entity": "invoices", "field": "projects", "ids": []string{"inv_1"}}})
 
-	// 5. Filter grammar: filtered reads filter, and anything outside the
-	//    grammar is refused, never ignored.
+	// 6. Listing: the filter grammar (refused, never ignored, outside it), and
+	//    sorting and paging exactly as the reference binding does them.
 	fltStore := NewStore(nil)
 	fltStore.putRecord("tasks", M{"id": "a", "title": "Ship it", "status": "todo"})
 	fltStore.putRecord("tasks", M{"id": "b", "title": "Other work", "status": "done"})
-	listIDs := func(filter string) []string {
-		result, err := fltStore.listRecords("tasks", M{"filter": filter})
+	fltStore.putRecord("tasks", M{"id": "c", "title": "Unsorted"})
+	listed := func(query M) []any {
+		result, err := fltStore.listRecords("tasks", query)
 		if err != nil {
-			return []string{"<error: " + err.Error() + ">"}
+			return []any{"<error: " + err.Error() + ">"}
 		}
 		ids := []string{}
 		for _, r := range toMList(result["items"]) {
 			ids = append(ids, getStr(r, "id"))
 		}
-		return ids
+		return []any{ids, stableJSON(result["page"]), stableJSON(result["perPage"]), result["totalItems"]}
 	}
-	check("filter: equality", listIDs(`status = "todo"`), []string{"a"})
-	check("filter: negation", listIDs(`status != "todo"`), []string{"b"})
-	check("filter: contains", listIDs(`title ~ "Ship"`), []string{"a"})
+	check("filter: equality", listed(M{"filter": `status = "todo"`})[0], []string{"a"})
+	check("filter: negation", listed(M{"filter": `status != "todo"`})[0], []string{"b", "c"})
+	check("filter: contains", listed(M{"filter": `title ~ "Ship"`})[0], []string{"a"})
 	if _, err := fltStore.listRecords("tasks", M{"filter": `status = "todo" && title ~ "x"`}); err == nil {
 		failures = append(failures, "an unsupported filter expression was silently accepted")
 	} else {
@@ -5122,9 +6305,17 @@ func selftest() int {
 			failures = append(failures, "an unsupported filter raised the wrong error: "+err.Error())
 		}
 	}
+	check("a missing value sorts first", listed(M{"sort": "status"})[0], []string{"c", "b", "a"})
+	check("…and last descending", listed(M{"sort": "-status"})[0], []string{"a", "b", "c"})
+	check("no paging asked: every record, one page", listed(M{}), []any{[]string{"a", "b", "c"}, "1", "3", 3})
+	check("perPage=0 is an empty page", listed(M{"perPage": 0.0}), []any{[]string{}, "1", "0", 3})
+	check("perPage that is not a number is an empty page", listed(M{"perPage": math.NaN()}), []any{[]string{}, "1", "null", 3})
+	check("page=0 is an empty page", listed(M{"page": 0.0, "perPage": 2.0}), []any{[]string{}, "0", "2", 3})
+	check("a fractional page size pages as slice() does", listed(M{"page": 2.0, "perPage": 1.5})[0], []string{"b", "c"})
 
-	// 6. SQLite store: durable records + idempotency keys, and seed-once
-	//    semantics across a restart (reopening the same file).
+	// 7. The SQLite store: records, credentials, accounts, idempotency keys,
+	//    approvals, tasks, events and the audit log all survive a restart
+	//    (reopening the same file), and keys expire when they should.
 	tmp, err := os.MkdirTemp("", "a2app-selftest-")
 	if err != nil {
 		failures = append(failures, "could not create a temp dir: "+err.Error())
@@ -5137,17 +6328,15 @@ func selftest() int {
 		} else {
 			check("a fresh database file wants the seed", first.WantsSeed, true)
 			first.putRecord("tasks", M{"id": "t1", "title": "persisted", "status": "todo"})
-			first.idemPut("tasks", "key-1", "t1")
+			first.idempotencyPut("tasks", "key-1", "t1")
 			first.putGrant(Grant{CredentialID: "cred_a", TokenHash: hashSecret("token-a"), Principal: "owner", Scopes: []string{"*"}})
 			first.putAuthRow(tableUsers, "usr_a", Account{ID: "usr_a", Login: "a", Role: "member", Active: true})
+			first.approvalIssue("approval-1")
+			fired, _ := first.trigger("task.review", M{"task": "t1"}, "review")
+			first.appendAudit(AuditEntry{At: nowISO(), Target: "data:tasks", Outcome: "ok"})
 			check("sqlite get returns what was put", getStr(first.getRecord("tasks", "t1"), "title"), "persisted")
-			ids := []string{}
-			if result, err := first.listRecords("tasks", M{"filter": `status = "todo"`}); err == nil {
-				for _, r := range toMList(result["items"]) {
-					ids = append(ids, getStr(r, "id"))
-				}
-			}
-			check("sqlite list flows through the shared filter/sort/page", ids, []string{"t1"})
+			check("a task gets a random id", regexp.MustCompile(`^tsk_[0-9a-f]{16}$`).MatchString(toStr(fired["taskId"])), true)
+			check("…and an event too", regexp.MustCompile(`^evt_[0-9a-f]{16}$`).MatchString(toStr(fired["eventId"])), true)
 			first.Close()
 
 			second, err := NewSqliteStore(dbPath, nil)
@@ -5156,28 +6345,59 @@ func selftest() int {
 			} else {
 				check("an existing database refuses the seed", second.WantsSeed, false)
 				check("records survive a restart", getStr(second.getRecord("tasks", "t1"), "title"), "persisted")
-				check("idempotency keys survive a restart", second.idemGet("tasks", "key-1"), "t1")
+				produced, found := second.idempotencyGet("tasks", "key-1")
+				check("idempotency keys survive a restart", []any{produced, found}, []any{"t1", true})
 				restored := second.grantByTokenHash(hashSecret("token-a"))
 				check("credentials survive a restart, found by their token's hash", restored != nil && restored.CredentialID == "cred_a", true)
 				var account Account
 				check("accounts survive a restart", second.authRow(tableUsers, "usr_a", &account) && account.Login == "a", true)
+				check("tasks survive a restart", second.getTask(toStr(fired["taskId"])) != nil, true)
+				events, cursor := second.eventsSince("")
+				check("events survive a restart", []any{len(events), cursor}, []any{1, "1"})
+				refired, _ := second.trigger("task.review", M{"task": "t1"}, "review")
+				check("…and so does dedup: the same occurrence is the same task", refired["taskId"], fired["taskId"])
+				newer, next := second.eventsSince(cursor)
+				check("…and the sequence: a saved cursor reads only what is newer", []any{len(newer), next}, []any{1, "2"})
+				check("approval keys survive a restart", second.approvalConsume("approval-1"), true)
+				check("…and are used once", second.approvalConsume("approval-1"), false)
+				check("the audit log survives a restart", len(second.auditTail(10)), 1)
 				second.putGrant(Grant{CredentialID: "cred_a", TokenHash: hashSecret("token-b"), Principal: "owner", Scopes: []string{"*"}})
 				check("a rotated token replaces the old one", second.grantByTokenHash(hashSecret("token-a")) == nil, true)
 				check("…with the new one in force", second.grantByTokenHash(hashSecret("token-b")) != nil, true)
 				check("an updated grant keeps one row", len(second.listGrants()), 1)
 				check("delete removes the row", second.deleteRecord("tasks", "t1"), true)
 				check("a second delete reports not-found", second.deleteRecord("tasks", "t1"), false)
+
+				clock := time.Now()
+				second.now = func() time.Time { return clock }
+				second.approvalIssue("approval-2")
+				clock = clock.Add(approvalTTL + time.Second)
+				check("an approval key expires after ten minutes", second.approvalConsume("approval-2"), false)
+				second.idempotencyPut("tasks", "key-2", "t2")
+				clock = clock.Add(idempotencyTTL + time.Second)
+				_, found = second.idempotencyGet("tasks", "key-2")
+				check("an idempotency key expires after a day", found, false)
 				second.Close()
 			}
 		}
 	}
+	rings := NewStore(nil)
+	for i := 0; i < eventRetention+3; i++ {
+		rings.appendEvent("tick", M{})
+		rings.appendAudit(AuditEntry{At: nowISO(), Target: "rate:data", Outcome: "rejected"})
+	}
+	ringEvents, ringCursor := rings.eventsSince("0")
+	check("the event log keeps the last 5000, numbering on", []any{len(ringEvents), ringEvents[0].Seq, ringCursor},
+		[]any{eventRetention, int64(4), strconv.Itoa(eventRetention + 3)})
+	check("the audit log keeps the last 5000", len(rings.auditTail(2*auditRetention)), auditRetention)
+	stillThere, _ := rings.eventsSince("abc")
+	check("a cursor that is not one reads from the beginning", len(stillThere), eventRetention)
 
-	// 7. Host and network policy: the app answers only to loopback and its own
-	//    origins (the public URL among them), and refuses to listen where the
-	//    agent token would cross a network in clear.
+	// 8. Host and network policy: the app answers only to loopback and its own
+	//    origins (the public URL among them), on every path, and refuses to
+	//    listen where the agent token would cross a network in clear.
 	if hostApp, err := NewAdapter(AdapterConfig{
 		AppID: "selftest", Store: NewStore(nil), Token: "t", Modules: []M{{"name": "core"}},
-		Entities:       map[string]M{},
 		AllowedOrigins: []string{"http://127.0.0.1:9931"},
 		PublicURL:      "https://crm.example.com",
 	}); err != nil {
@@ -5189,12 +6409,14 @@ func selftest() int {
 		check("an IPv6 loopback literal is answered", hostApp.isAllowedHost("[::1]:9931"), true)
 		check("a rebound host is refused", hostApp.isAllowedHost("evil.example.com"), false)
 		check("a lookalike host is refused", hostApp.isAllowedHost("localhost.evil.example.com"), false)
-		status, _, _ := hostApp.dispatch("GET", "/api/_a2app", map[string]string{"host": "evil.example.com"}, nil, nil)
-		check("dispatch refuses a foreign host before identity", status, 403)
-		_, refusal := hostApp.hostRefusal("evil.example.com")
-		check("the system pages refuse it the same way", refusal["code"], "forbidden_host")
-		_, refusal = hostApp.hostRefusal("127.0.0.1:9931")
-		check("…and answer on the app's own", refusal == nil, true)
+		foreign := map[string]string{"host": "evil.example.com"}
+		for _, path := range []string{"/api/_a2app", "/", "/_a2app/account", "/no-such-page"} {
+			status, reply, _, handled := hostApp.Handle(Request{Method: "GET", Path: path, Headers: foreign})
+			check("a foreign host is refused on "+path, []any{status, reply["code"], handled}, []any{403, "forbidden_host", true})
+		}
+		_, _, _, handled := hostApp.Handle(Request{Method: "GET", Path: "/index.html", Headers: map[string]string{"host": "127.0.0.1:9931"}})
+		check("a path that is not the adapter's is left to the View", handled, false)
+		check("a request naming no host is answered", statusOf(call(hostApp, "GET", "/api/_a2app", nil, nil)), 200)
 		check("the public origin is the app's own", hostApp.allowedOrigins["https://crm.example.com"], true)
 	}
 	policy := func(host, public string) string {
@@ -5206,6 +6428,8 @@ func selftest() int {
 	}
 	check("loopback by default", policy("", ""), "127.0.0.1 ")
 	check("an https public URL is reduced to its origin", policy("", "https://CRM.example.com/x"), "127.0.0.1 https://crm.example.com")
+	check("…without a default port", policy("", "https://crm.example.com:443/x"), "127.0.0.1 https://crm.example.com")
+	check("…keeping any other", policy("", "https://crm.example.com:8443"), "127.0.0.1 https://crm.example.com:8443")
 	check("a non-loopback bind needs a public URL", policy("0.0.0.0", ""), "refused")
 	check("…an https one", policy("0.0.0.0", "http://localhost:8080"), "refused")
 	check("a non-loopback bind behind https is allowed", policy("0.0.0.0", "https://crm.example.com"), "0.0.0.0 https://crm.example.com")
@@ -5213,7 +6437,7 @@ func selftest() int {
 	check("a plain-http tunnel to loopback is allowed", policy("", "http://localhost:9000"), "127.0.0.1 http://localhost:9000")
 	check("a public URL that is not a URL is refused", policy("", "crm.example.com"), "refused")
 
-	// 8. Auth primitives (spec/v0_2/auth.md): what a secret looks like, how a
+	// 9. Auth primitives (spec/v0_2/auth.md): what a secret looks like, how a
 	//    password is stored and checked, user codes, cookies, the sign-in limit.
 	//    The vector below was written by adapter-core's hashPassword, so a hash
 	//    stored by either stack verifies on the other.
@@ -5248,6 +6472,11 @@ func selftest() int {
 	check("the tenth locks it for the window", limiter.retryAfter("bob"), 900)
 	clock = clock.Add(15 * time.Minute)
 	check("…which ends", limiter.retryAfter("bob"), 0)
+	rateClock := int64(0)
+	rates := newRateLimiter(map[string]int{"data": 1}, func() int64 { return rateClock })
+	rates.check("anon", "data")
+	rateClock = 500
+	check("a rate refusal rounds its wait up", rates.check("anon", "data").retryAfterSeconds, 60)
 	declaredSet := map[string]bool{"data:notes:read": true, "data:notes:write": true}
 	grantScopes, grantExpires, grantProblem := parseGrantRequest(M{}, declaredSet)
 	check("a grant request defaults to * for 30 days", []any{grantScopes, grantExpires, grantProblem},
@@ -5259,10 +6488,10 @@ func selftest() int {
 	_, _, grantProblem = parseGrantRequest(M{"expiresIn": 59.0}, declaredSet)
 	check("…and a lifetime under a minute", grantProblem != "", true)
 
-	// 9. The resolution order and the ceiling, through dispatch on a
-	//    multi-user app: each refusal, effective scopes, ownership through a
-	//    credential and a session, CSRF, task credentials.
-	notes := map[string]M{"notes": {"module": "core", "ownedBy": "owner", "fields": []M{
+	// 10. The resolution order and the ceiling, through Handle on a multi-user
+	//     app: each refusal, effective scopes, ownership through a credential
+	//     and a session, CSRF, task credentials, and device sign-in.
+	notes := []M{{"name": "notes", "module": "core", "ownedBy": "owner", "fields": []M{
 		{"name": "title", "type": "string"},
 		{"name": "owner", "type": "string", "readOnly": true},
 	}}}
@@ -5288,13 +6517,7 @@ func selftest() int {
 	if err != nil {
 		failures = append(failures, "could not build a multi-user adapter: "+err.Error())
 	} else {
-		call := func(method, path string, headers map[string]string, body M) (int, M) {
-			status, reply, _ := authApp.dispatch(method, path, headers, body, nil)
-			return status, reply
-		}
 		as := func(token string) map[string]string { return map[string]string{"x-a2app-token": token} }
-		codeOf := func(_ int, reply M) any { return reply["code"] }
-		statusOf := func(status int, _ M) int { return status }
 		alice := Account{ID: "usr_alice", Name: "Alice", Login: "alice", Role: "owner", Active: true, CreatedAt: nowISO()}
 		bob := Account{ID: "usr_bob", Name: "Bob", Login: "bob", Role: "member", Active: true, CreatedAt: nowISO()}
 		authApp.store.putAuthRow(tableUsers, alice.ID, alice)
@@ -5302,86 +6525,140 @@ func selftest() int {
 		aliceToken, _ := authApp.mintCredential(alice.ID, "", []string{"*"}, 3600, "")
 		bobToken, bobGrant := authApp.mintCredential(bob.ID, "suite", []string{"*"}, 3600, "")
 
-		_, identity := call("GET", "/api/_a2app", nil, nil)
+		_, identity := call(authApp, "GET", "/api/_a2app", nil, nil)
 		check("identity speaks 0.2 and says how people sign in",
 			[]any{identity["protocol"], identity["authMode"], identity["accountUrl"]}, []any{"0.2", "multi-user", "/_a2app/account"})
-		_, admin := call("GET", "/api/_a2app/whoami", as("admin-token"), nil)
+		_, admin := call(authApp, "GET", "/api/_a2app/whoami", as("admin-token"), nil)
 		check("the admin credential acts as the owner", []any{admin["principal"], admin["role"], admin["scopes"]},
 			[]any{"owner", "owner", []string{"data:notes:read", "data:notes:write", "op:review-note"}})
-		_, who := call("GET", "/api/_a2app/whoami", as(bobToken), nil)
+		_, who := call(authApp, "GET", "/api/_a2app/whoami", as(bobToken), nil)
 		check("a `*` credential is held to its person's permissions",
 			[]any{who["principal"], who["principalName"], who["role"], who["scopes"]},
 			[]any{"usr_bob", "Bob", "member", []string{"data:notes:read", "op:review-note"}})
-		check("…so it cannot write", codeOf(call("POST", "/api/collections/notes/records", as(bobToken), M{"title": "x"})), codeInsufficientScope)
-		_, created := call("POST", "/api/collections/notes/records", as(aliceToken), M{"title": "Alice's"})
+		check("…so it cannot write", codeOf(call(authApp, "POST", "/api/collections/notes/records", as(bobToken), M{"title": "x"})), codeInsufficientScope)
+		_, created := call(authApp, "POST", "/api/collections/notes/records", as(aliceToken), M{"title": "Alice's"})
 		check("a record is owned by whoever created it", created["owner"], "usr_alice")
 		check("the owner field is the adapter's to write",
-			codeOf(call("POST", "/api/collections/notes/records", as(aliceToken), M{"title": "x", "owner": "usr_bob"})), codeReadOnlyField)
-		_, listed := call("GET", "/api/collections/notes/records", as(bobToken), nil)
-		check("a member does not list another's records", len(toMList(listed["items"])), 0)
-		check("…nor read one by id", statusOf(call("GET", "/api/collections/notes/records/"+getStr(created, "id"), as(bobToken), nil)), 404)
-		check("an unknown token is refused", codeOf(call("GET", "/api/_a2app/whoami", as("a2a_nonsense"), nil)), "credential_invalid")
-		check("an agent's credential manages nothing", codeOf(call("GET", "/api/_a2app/credentials", as(bobToken), nil)), "not_a_manager")
+			codeOf(call(authApp, "POST", "/api/collections/notes/records", as(aliceToken), M{"title": "x", "owner": "usr_bob"})), codeReadOnlyField)
+		_, listedNotes := call(authApp, "GET", "/api/collections/notes/records", as(bobToken), nil)
+		check("a member does not list another's records", len(toMList(listedNotes["items"])), 0)
+		check("…nor read one by id", statusOf(call(authApp, "GET", "/api/collections/notes/records/"+getStr(created, "id"), as(bobToken), nil)), 404)
+		check("an unknown token is refused", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as("a2a_nonsense"), nil)), "credential_invalid")
+		check("an agent's credential manages nothing", codeOf(call(authApp, "GET", "/api/_a2app/credentials", as(bobToken), nil)), "not_a_manager")
 
 		bob.Active = false
 		authApp.store.putAuthRow(tableUsers, bob.ID, bob)
-		check("deactivating a person stops their agents", codeOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), "principal_inactive")
+		check("deactivating a person stops their agents", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as(bobToken), nil)), "principal_inactive")
 		bob.Active = true
 		authApp.store.putAuthRow(tableUsers, bob.ID, bob)
-		check("…and reactivating restores them", statusOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), 200)
+		check("…and reactivating restores them", statusOf(call(authApp, "GET", "/api/_a2app/whoami", as(bobToken), nil)), 200)
 
 		authApp.store.putAuthRow(tableSessions, hashSecret("bob-session"), sessionRow{
 			Principal: bob.ID, CreatedAt: nowISO(), ExpiresAt: isoOf(time.Now().Add(time.Hour)),
 		})
 		session := map[string]string{"cookie": "a2app_session_selftest=bob-session", "origin": "http://127.0.0.1:9931"}
-		_, sessionWho := call("GET", "/api/_a2app/whoami", session, nil)
+		_, sessionWho := call(authApp, "GET", "/api/_a2app/whoami", session, nil)
 		check("a session acts as its person, within their permissions",
 			[]any{sessionWho["credentialId"], sessionWho["principal"], sessionWho["scopes"]},
 			[]any{"session", "usr_bob", []string{"data:notes:read", "op:review-note"}})
 		check("a signed-in change needs the app's own Origin",
-			codeOf(call("POST", "/api/collections/notes/records", map[string]string{"cookie": session["cookie"]}, M{"title": "x"})), "forbidden_origin")
+			codeOf(call(authApp, "POST", "/api/collections/notes/records", map[string]string{"cookie": session["cookie"]}, M{"title": "x"})), "forbidden_origin")
 		check("a stranger is told to bring a credential",
-			codeOf(call("GET", "/api/collections/notes/records", nil, nil)), codeAgentTokenRequired)
+			codeOf(call(authApp, "GET", "/api/collections/notes/records", nil, nil)), codeAgentTokenRequired)
 		check("…and the app's own page to sign in",
-			codeOf(call("GET", "/api/collections/notes/records", map[string]string{"sec-fetch-site": "same-origin"}, nil)), "sign_in_required")
+			codeOf(call(authApp, "GET", "/api/collections/notes/records", map[string]string{"sec-fetch-site": "same-origin"}, nil)), "sign_in_required")
 
-		_, ran := call("POST", "/api/ops/review-note", session, M{"note": getStr(created, "id")})
+		_, ran := call(authApp, "POST", "/api/ops/review-note", session, M{"note": getStr(created, "id")})
 		fired, _ := ran["result"].(M)
 		taskID := toStr(fired["taskId"])
-		_, task := call("GET", "/api/_a2app/tasks/"+taskID, as("admin-token"), nil)
+		_, task := call(authApp, "GET", "/api/_a2app/tasks/"+taskID, as("admin-token"), nil)
 		request, _ := task["request"].(M)
 		check("a task records who called the runner that queued it", request["principal"], "usr_bob")
 		appFired, _ := authApp.trigger("note.review", M{"note": "app"}, "review")
-		_, appTask := call("GET", "/api/_a2app/tasks/"+toStr(appFired["taskId"]), as("admin-token"), nil)
+		_, appTask := call(authApp, "GET", "/api/_a2app/tasks/"+toStr(appFired["taskId"]), as("admin-token"), nil)
 		appRequest, _ := appTask["request"].(M)
 		check("work the app queues itself records nobody", hasKey(appRequest, "principal") && appRequest["principal"] == nil, true)
 		check("a member cannot issue a task's credential",
-			codeOf(call("POST", "/api/_a2app/tasks/"+taskID+"/credential", session, nil)), "not_a_manager")
-		taskStatus, taskCred := call("POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), M{"agentName": "bridge"})
+			codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+taskID+"/credential", session, nil)), "not_a_manager")
+		taskStatus, taskCred := call(authApp, "POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), M{"agentName": "bridge"})
 		credential, _ := taskCred["credential"].(M)
 		check("the admin credential issues it, for that person, the capability's scopes, and that task",
 			[]any{taskStatus, credential["principal"], credential["scopes"], credential["task"]},
 			[]any{201, "usr_bob", []string{"data:notes:read"}, taskID})
 		taskToken := getStr(taskCred, "token")
-		check("…and it works while the task is open", statusOf(call("GET", "/api/_a2app/whoami", as(taskToken), nil)), 200)
+		check("…and it works while the task is open", statusOf(call(authApp, "GET", "/api/_a2app/whoami", as(taskToken), nil)), 200)
 		openTask := authApp.store.getTask(taskID)
-		openTask["status"] = "completed"
+		openTask.Status = "completed"
 		authApp.store.saveTask(openTask)
-		check("…and is dead once the task is over", codeOf(call("GET", "/api/_a2app/whoami", as(taskToken), nil)), "credential_revoked")
+		check("…and is dead once the task is over", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as(taskToken), nil)), "credential_revoked")
 		check("…and none is issued for a finished task",
-			codeOf(call("POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), nil)), codeTaskNotClaimable)
+			codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), nil)), codeTaskNotClaimable)
+
+		// Device sign-in (spec §7): approving hands over nothing by itself.
+		start := func(body M) M {
+			_, reply := call(authApp, "POST", "/api/_a2app/auth/device", nil, body)
+			return reply
+		}
+		poll := func(deviceCode string, confirmation any) any {
+			body := M{"deviceCode": deviceCode}
+			if confirmation != nil {
+				body["confirmation"] = confirmation
+			}
+			return codeOf(call(authApp, "POST", "/api/_a2app/auth/token", nil, body))
+		}
+		approve := func(userCode string) M {
+			_, reply := call(authApp, "POST", "/api/_a2app/auth/device/"+userCode, session, M{"approve": true})
+			return reply
+		}
+		started := start(M{"agentName": "device", "scopes": []any{"data:notes:read"}})
+		deviceCode, userCode := getStr(started, "deviceCode"), getStr(started, "userCode")
+		check("polling waits for the person", poll(deviceCode, nil), "authorization_pending")
+		_, review := call(authApp, "GET", "/api/_a2app/auth/device/"+userCode, session, nil)
+		check("the review says when it was asked, and that no agent waits on this computer",
+			[]any{review["agentName"], regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T`).MatchString(getStr(review, "requestedAt")), review["loopback"]},
+			[]any{"device", true, false})
+		approval := approve(userCode)
+		confirmation := getStr(approval, "confirmation")
+		check("approval answers a confirmation code, with nowhere to send it",
+			[]any{approval["status"], regexp.MustCompile(`^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$`).MatchString(confirmation), approval["redirect"]},
+			[]any{"approved", true, nil})
+		check("approval alone hands nothing over", poll(deviceCode, nil), "confirmation_required")
+		check("…nor does a wrong code", poll(deviceCode, "BBBB-BBBB"), "confirmation_invalid")
+		_, granted := call(authApp, "POST", "/api/_a2app/auth/token", nil,
+			M{"deviceCode": deviceCode, "confirmation": strings.ToLower(strings.ReplaceAll(confirmation, "-", ""))})
+		grantedCredential, _ := granted["credential"].(M)
+		check("the right code, in any case, dash optional, gets the credential",
+			[]any{grantedCredential["principal"], grantedCredential["scopes"]}, []any{"usr_bob", []string{"data:notes:read"}})
+		check("…once", poll(deviceCode, confirmation), "expired_token")
+		guessed := start(M{})
+		approve(getStr(guessed, "userCode"))
+		for i := 0; i < deviceConfirmAttempts-1; i++ {
+			poll(getStr(guessed, "deviceCode"), "BBBB-BBBB")
+		}
+		check("five wrong codes void the request", poll(getStr(guessed, "deviceCode"), "BBBB-BBBB"), "access_denied")
+		check("a loopback port must be a real one",
+			[]any{codeOf(call(authApp, "POST", "/api/_a2app/auth/device", nil, M{"loopbackPort": 80.0})),
+				codeOf(call(authApp, "POST", "/api/_a2app/auth/device", nil, M{"loopbackPort": 8080.5})),
+				codeOf(call(authApp, "POST", "/api/_a2app/auth/device", nil, M{"loopbackPort": "8080"}))},
+			[]any{"usage", "usage", "usage"})
+		local := start(M{"loopbackPort": 53682.0})
+		_, localReview := call(authApp, "GET", "/api/_a2app/auth/device/"+getStr(local, "userCode"), session, nil)
+		check("an agent on the person's computer is shown as such", localReview["loopback"], true)
+		sent := approve(getStr(local, "userCode"))
+		check("approval sends the browser back to the agent's port with the code", sent["redirect"],
+			"http://127.0.0.1:53682/a2app/callback?confirmation="+getStr(sent, "confirmation"))
 
 		authApp.store.updateGrant(bobGrant.CredentialID, func(g *Grant) { g.ExpiresAt = isoOf(time.Now().Add(-time.Second)) })
-		check("an expired credential says so", codeOf(call("GET", "/api/_a2app/whoami", as(bobToken), nil)), "token_expired")
+		check("an expired credential says so", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as(bobToken), nil)), "token_expired")
 		aliceGrant := authApp.store.grantByTokenHash(hashSecret(aliceToken))
-		check("a credential revokes itself", statusOf(call("DELETE", "/api/_a2app/credentials/"+aliceGrant.CredentialID, as(aliceToken), nil)), 200)
-		check("…and is told so after", codeOf(call("GET", "/api/_a2app/whoami", as(aliceToken), nil)), "credential_revoked")
+		check("a credential revokes itself", statusOf(call(authApp, "DELETE", "/api/_a2app/credentials/"+aliceGrant.CredentialID, as(aliceToken), nil)), 200)
+		check("…and is told so after", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as(aliceToken), nil)), "credential_revoked")
 		check("the admin credential cannot be revoked through the API",
-			codeOf(call("DELETE", "/api/_a2app/credentials/cred_local", as("admin-token"), nil)), "not_a_manager")
+			codeOf(call(authApp, "DELETE", "/api/_a2app/credentials/cred_local", as("admin-token"), nil)), "not_a_manager")
 	}
 
-	// 10. Declarations the auth layer depends on are checked at construction,
-	//     and a single-user app has one principal and no accounts.
+	// 11. Declarations are checked at construction, and a single-user app has
+	//     one principal and no accounts.
 	_, err = NewAdapter(AdapterConfig{
 		AppID: "selftest", Store: NewStore(nil), Modules: []M{{"name": "core"}}, Entities: notes,
 		Capabilities: map[string]M{"review": {"scopes": []string{"data:other:read"}}},
@@ -5389,30 +6666,245 @@ func selftest() int {
 	check("a capability's undeclared scope is refused at boot", err != nil && strings.Contains(err.Error(), `capability "review"`), true)
 	_, err = NewAdapter(AdapterConfig{
 		AppID: "selftest", Store: NewStore(nil), Modules: []M{{"name": "core"}},
-		Entities: map[string]M{"notes": {"module": "core", "ownedBy": "owner", "fields": []M{{"name": "owner", "type": "string"}}}},
+		Entities: []M{{"name": "notes", "module": "core", "ownedBy": "owner", "fields": []M{{"name": "owner", "type": "string"}}}},
 	})
 	check("ownedBy must name a readOnly string field", err != nil && strings.Contains(err.Error(), "must be a readOnly string field"), true)
-	if soloApp, err := NewAdapter(AdapterConfig{
-		AppID: "solo", Store: NewStore(nil), Token: "admin-token", Modules: []M{{"name": "core"}}, Entities: notes,
-	}); err != nil {
+	_, err = NewAdapter(AdapterConfig{
+		AppID: "selftest", Store: NewStore(nil), Modules: []M{{"name": "core"}},
+		Entities: []M{{"name": "notes", "module": "core"}, {"name": "notes", "module": "core"}, {"module": "core"}},
+	})
+	check("an entity is named once", err != nil && strings.Contains(err.Error(), `duplicate entity "notes"`) &&
+		strings.Contains(err.Error(), `an entity declares no "name"`), true)
+	check("an older schema.go's map of entities still declares them, by name",
+		declaredEntities(map[string]M{"b": {"module": "core"}, "a": {"module": "core"}}),
+		[]M{{"name": "a", "module": "core"}, {"name": "b", "module": "core"}})
+
+	// 12. The single-user surface: operations (the argument guard, approval,
+	//     idempotency, typed refusals), records (update idempotency, filters,
+	//     escaped ids), the task lifecycle, events, viewers and describe — each
+	//     as the reference answers it.
+	soloStore := NewStore(map[string][]M{"notes": {{"id": "a/b", "title": "slash"}}})
+	solo, err := NewAdapter(AdapterConfig{
+		AppID: "solo", Store: soloStore, Token: "admin-token", Modules: []M{{"name": "core"}},
+		// Declared out of name order: describe lists them as declared.
+		Entities: []M{
+			{"name": "notes", "module": "core", "ownedBy": "owner", "fields": []M{
+				{"name": "title", "type": "string", "required": true},
+				{"name": "tags", "type": "list<ref>", "entity": "labels"},
+				{"name": "owner", "type": "string", "readOnly": true},
+			}},
+			{"name": "labels", "module": "core", "fields": []M{{"name": "name", "type": "string"}}},
+		},
+		Operations: []M{
+			{"name": "wipe", "module": "core", "destructive": true, "params": M{}},
+			{"name": "count", "module": "core", "readOnly": true, "params": M{}},
+			{"name": "refuse", "module": "core", "params": M{}},
+			{"name": "boom", "module": "core", "params": M{}},
+			{"name": "queue", "module": "core", "params": M{}},
+			{"name": "touch", "module": "core", "entity": "notes", "appliesWhen": M{"field": "title", "ne": "done"},
+				"params": M{"note": M{"type": "ref", "entity": "notes", "required": true}}},
+		},
+		Runners: map[string]OperationRunner{
+			"wipe":  func(M, M, *Store) (any, error) { return M{"wiped": true}, nil },
+			"count": func(M, M, *Store) (any, error) { return M{"count": 1}, nil },
+			"refuse": func(M, M, *Store) (any, error) {
+				return nil, &OperationError{Code: "not_now", Message: "Not now.", HTTPStatus: 409, Extra: M{"retryAfter": 5}}
+			},
+			"boom":  func(M, M, *Store) (any, error) { panic("it broke") },
+			"queue": func(_ M, _ M, store *Store) (any, error) { return store.trigger("work", M{"n": 1}, "work") },
+			"touch": func(M, M, *Store) (any, error) { return M{"ok": true}, nil },
+		},
+		Events: []M{{"type": "work"}},
+	})
+	if err != nil {
 		failures = append(failures, "could not build a single-user adapter: "+err.Error())
 	} else {
-		status, anonymous, _ := soloApp.dispatch("GET", "/api/_a2app/whoami", nil, nil, nil)
+		adminHeaders := map[string]string{"x-a2app-token": "admin-token"}
+		with := func(extra map[string]string) map[string]string {
+			out := map[string]string{"x-a2app-token": "admin-token"}
+			for k, v := range extra {
+				out[k] = v
+			}
+			return out
+		}
+		status, anonymous := call(solo, "GET", "/api/_a2app/whoami", nil, nil)
 		check("a single-user app reads anonymously as the owner, read-only",
-			[]any{status, anonymous["principal"], anonymous["scopes"]}, []any{200, "owner", []string{"data:notes:read"}})
-		status, _, _ = soloApp.dispatch("POST", "/api/collections/notes/records", nil, M{"title": "x"}, nil)
-		check("…and needs a credential to write", status, 401)
-		_, stored, _ := soloApp.dispatch("POST", "/api/collections/notes/records", map[string]string{"x-a2app-token": "admin-token"}, M{"title": "x"}, nil)
+			[]any{status, anonymous["principal"], anonymous["scopes"]},
+			[]any{200, "owner", []string{"data:labels:read", "data:notes:read", "op:count"}})
+		check("…and needs a credential to write", statusOf(call(solo, "POST", "/api/collections/notes/records", nil, M{"title": "x"})), 401)
+		_, stored := call(solo, "POST", "/api/collections/notes/records", adminHeaders, M{"title": "x"})
 		check("…where every record is the owner's", stored["owner"], "owner")
-		_, refusal, _ := soloApp.dispatch("GET", "/api/_a2app/session", nil, nil, nil)
+		_, refusal := call(solo, "GET", "/api/_a2app/session", nil, nil)
 		check("…and there are no accounts", refusal["code"], "not_multi_user")
+
+		check("an operation's required parameter is enforced", codeOf(call(solo, "POST", "/api/ops/touch", adminHeaders, M{})), codeMissingRequired)
+		check("…and an undeclared one refused", codeOf(call(solo, "POST", "/api/ops/touch", adminHeaders, M{"note": "a/b", "extra": 1.0})), codeUnknownField)
+		check("…and one with none takes nothing", codeOf(call(solo, "POST", "/api/ops/wipe", adminHeaders, M{"x": 1.0})), codeUnknownField)
+		asked, askedReply := call(solo, "POST", "/api/ops/wipe", adminHeaders, M{})
+		check("a destructive operation asks for approval with the JCS key",
+			[]any{asked, askedReply["approvalKey"]}, []any{428, sha256Hex(`{"args":{},"operation":"wipe"}`)})
+		approved := with(map[string]string{"x-a2app-approval": getStr(askedReply, "approvalKey")})
+		check("…which runs it once", []any{statusOf(call(solo, "POST", "/api/ops/wipe", approved, M{})), statusOf(call(solo, "POST", "/api/ops/wipe", approved, M{}))}, []any{200, 428})
+		_, refused := call(solo, "POST", "/api/ops/refuse", adminHeaders, M{})
+		check("a runner refuses in its own terms", []any{codeOf(call(solo, "POST", "/api/ops/refuse", adminHeaders, M{})), refused["retryAfter"], refused["message"]},
+			[]any{"not_now", 5, "Not now."})
+		check("…with its own status", statusOf(call(solo, "POST", "/api/ops/refuse", adminHeaders, M{})), 409)
+		boomStatus, boomReply := call(solo, "POST", "/api/ops/boom", adminHeaders, M{})
+		check("a runner that panics is operation_failed", []any{boomStatus, boomReply["code"], boomReply["message"]},
+			[]any{500, "operation_failed", `Operation "boom" threw: it broke`})
+		once := with(map[string]string{"idempotency-key": "op-1"})
+		call(solo, "POST", "/api/ops/count", once, M{})
+		_, again := call(solo, "POST", "/api/ops/count", once, M{})
+		check("a repeated operation is duplicate_request", []any{again["code"], again["operation"]}, []any{codeDuplicateRequest, "count"})
+		check("an escaped operation name is decoded", statusOf(call(solo, "POST", "/api/ops/co%75nt", adminHeaders, M{})), 200)
+
+		patchOnce := with(map[string]string{"idempotency-key": "patch-1"})
+		call(solo, "PATCH", "/api/collections/notes/records/"+getStr(stored, "id"), patchOnce, M{"title": "y"})
+		_, patchAgain := call(solo, "PATCH", "/api/collections/notes/records/"+getStr(stored, "id"), patchOnce, M{"title": "y"})
+		check("a repeated update is duplicate_request, naming the record", []any{patchAgain["code"], patchAgain["id"]},
+			[]any{codeDuplicateRequest, stored["id"]})
+		_, badFilter := call(solo, "GET", "/api/collections/notes/records?filter=title%20~~%20x", adminHeaders, nil)
+		check("a filter it cannot honour is invalid_filter, naming it", []any{badFilter["code"], badFilter["got"]}, []any{codeInvalidFilter, "title ~~ x"})
+		_, slashed := call(solo, "GET", "/api/collections/notes/records/a%2Fb", adminHeaders, nil)
+		check("an escaped id is decoded after routing", slashed["title"], "slash")
+		check("a malformed escape answers as the reference's does", codeOf(call(solo, "GET", "/api/collections/notes/records/%FF", adminHeaders, nil)), "adapter_error")
+		nullStatus, nullReply := call(solo, "POST", "/api/collections/notes/records", adminHeaders, func() any { b, _ := ParseBody([]byte("null")); return b }())
+		check("a null body is no body", []any{nullStatus, nullReply["code"]}, []any{400, codeMissingRequired})
+		arrayStatus, _ := call(solo, "POST", "/api/collections/notes/records", adminHeaders, []any{})
+		check("an array body is refused", arrayStatus, 400)
+
+		_, queued := call(solo, "POST", "/api/ops/queue", adminHeaders, M{})
+		result, _ := queued["result"].(M)
+		taskID := toStr(result["taskId"])
+		_, task := call(solo, "GET", "/api/_a2app/tasks/"+taskID, adminHeaders, nil)
+		check("a task names its app, and starts with no progress", []any{task["app"], stableJSON(task["progress"])},
+			[]any{"solo", `{"step":null,"percent":0}`})
+		check("claiming as someone else is principal_mismatch",
+			codeOf(call(solo, "POST", "/api/_a2app/tasks/"+taskID+"/claim", adminHeaders, M{"agent": "someone-else"})), "principal_mismatch")
+		_, claimed := call(solo, "POST", "/api/_a2app/tasks/"+taskID+"/claim", adminHeaders, M{"agent": "cred_local"})
+		check("…and as itself works", claimed["status"], "working")
+		_, asking := call(solo, "POST", "/api/_a2app/tasks/"+taskID+"/progress", adminHeaders, M{"ask": nil})
+		check("an ask, even null, waits for input", asking["status"], "input-required")
+		_, done := call(solo, "POST", "/api/_a2app/tasks/"+taskID+"/complete", adminHeaders, M{"status": "completed", "result": false})
+		check("a result is kept as given, false included", []any{done["status"], done["result"]}, []any{"completed", false})
+		check("a finished task cannot be canceled", codeOf(call(solo, "POST", "/api/_a2app/tasks/"+taskID+"/cancel", adminHeaders, M{})), codeTaskNotClaimable)
+		_, fromStart := call(solo, "GET", "/api/_a2app/events", adminHeaders, nil)
+		_, fromJunk := call(solo, "GET", "/api/_a2app/events?since=abc", adminHeaders, nil)
+		check("events name their app, and a junk cursor reads from the beginning",
+			[]any{firstOf(toMList(fromStart["events"]))["app"], len(toMList(fromJunk["events"])), fromJunk["nextCursor"]},
+			[]any{"solo", len(toMList(fromStart["events"])), fromStart["nextCursor"]})
+		tail := solo.store.auditTail(50)
+		targets := map[string]bool{}
+		for _, entry := range tail {
+			targets[entry.Target+" "+entry.Outcome] = true
+		}
+		check("writes, operations and task actions are audited",
+			[]bool{targets["data:notes ok"], targets["op:wipe ok"], targets["op:refuse rejected"], targets["task:claim rejected"], targets["task:complete ok"]},
+			[]bool{true, true, true, true, true})
+
+		call(solo, "GET", "/api/_a2app", map[string]string{"x-a2app-viewer": "tab-1"}, nil)
+		_, watching := call(solo, "GET", "/api/_a2app/viewers", adminHeaders, nil)
+		call(solo, "POST", "/api/_a2app?viewer=tab-1&leaving=1", nil, nil)
+		_, left := call(solo, "GET", "/api/_a2app/viewers", adminHeaders, nil)
+		check("an open tab is counted until it says goodbye", []any{watching["viewers"], watching["ttlMs"], left["viewers"]}, []any{1, int64(60000), 0})
+
+		_, module := call(solo, "GET", "/api/_a2app/describe/core", nil, nil)
+		names := []string{}
+		for _, e := range toMList(module["entities"]) {
+			names = append(names, getStr(e, "name"))
+		}
+		check("describe lists entities in declaration order", names, []string{"notes", "labels"})
+		_, recordLevel := call(solo, "GET", "/api/_a2app/describe/core/notes/a%2Fb", adminHeaders, nil)
+		check("a record's operation names the parameter that takes the record", firstOf(toMList(recordLevel["operations"]))["targetParam"], "note")
+		_, relation := call(solo, "GET", "/api/_a2app/describe/core/notes/a%2Fb/nope", adminHeaders, nil)
+		check("an unknown relation lists the real ones", []any{relation["code"], relation["relations"]}, []any{"unknown_relation", []string{"tags"}})
+
+		solo.limiter = newRateLimiter(map[string]int{"data": 1, "ops": 1}, func() int64 { return 0 })
+		call(solo, "GET", "/api/collections/notes/records", adminHeaders, nil)
+		limitedStatus, limitedReply := call(solo, "GET", "/api/collections/notes/records", adminHeaders, nil)
+		check("over the limit is 429, with a whole number of seconds to wait",
+			[]any{limitedStatus, limitedReply["code"], limitedReply["retryAfterSeconds"]}, []any{429, codeRateLimited, 60})
+		target, recorded := "", ""
+		if refusals := solo.store.auditTail(1); len(refusals) == 1 && refusals[0].CredentialID != nil {
+			target, recorded = refusals[0].Target, *refusals[0].CredentialID
+		}
+		check("…audited under the token's hash, never the token", []any{target, recorded},
+			[]any{"rate:data", "token:" + hashSecret("admin-token")})
+	}
+
+	// 13. The root screen fits its budget: summaries go first, then rows, with
+	//     the count reported and ?all=true returning everything.
+	wide := []M{}
+	for i := 0; i < 40; i++ {
+		wide = append(wide, M{"name": fmt.Sprintf("module-%02d", i), "summary": strings.Repeat("a long summary ", 7)})
+	}
+	if wideApp, err := NewAdapter(AdapterConfig{AppID: "wide", Store: NewStore(nil), Modules: wide}); err != nil {
+		failures = append(failures, "could not build a wide adapter: "+err.Error())
+	} else {
+		_, trimmed := call(wideApp, "GET", "/api/_a2app/describe", nil, nil)
+		_, everything := call(wideApp, "GET", "/api/_a2app/describe?all=true", nil, nil)
+		rows := toMList(trimmed["modules"])
+		check("an overflowing root drops summaries, then rows, and says so",
+			[]any{len(rows)+intOf(trimmed["truncated"]) == 40, hasKey(firstOf(rows), "summary"), levelSize(trimmed) <= describeBudgetChars,
+				contains(scopeList(trimmed["next"]), "describe?all=true"), len(toMList(everything["modules"]))},
+			[]any{true, false, true, true, 40})
+	}
+
+	// 14. A restart, end to end: a task and its credential, an event cursor and
+	//     an approval key issued before it all hold after it, and a new task
+	//     gets a new id.
+	if restartDir, err := os.MkdirTemp("", "a2app-restart-"); err == nil {
+		defer os.RemoveAll(restartDir)
+		boot := func() (*Adapter, *Store) {
+			store, err := NewSqliteStore(filepath.Join(restartDir, "db.sqlite"), nil)
+			if err != nil {
+				panic(err)
+			}
+			app, err := NewAdapter(AdapterConfig{
+				AppID: "restart", Store: store, Token: "admin-token", Modules: []M{{"name": "core"}},
+				Operations: []M{
+					{"name": "queue", "module": "core", "params": M{"n": M{"type": "number"}}},
+					{"name": "wipe", "module": "core", "destructive": true, "params": M{}},
+				},
+				Runners: map[string]OperationRunner{
+					"queue": func(args M, _ M, store *Store) (any, error) { return store.trigger("work", args, "work") },
+					"wipe":  func(M, M, *Store) (any, error) { return M{"wiped": true}, nil },
+				},
+				Events: []M{{"type": "work"}},
+			})
+			if err != nil {
+				panic(err)
+			}
+			return app, store
+		}
+		admin := map[string]string{"x-a2app-token": "admin-token"}
+		before, store := boot()
+		_, queued := call(before, "POST", "/api/ops/queue", admin, M{"n": 1.0})
+		taskID := toStr(queued["result"].(M)["taskId"])
+		_, minted := call(before, "POST", "/api/_a2app/tasks/"+taskID+"/credential", admin, M{})
+		_, events := call(before, "GET", "/api/_a2app/events", admin, nil)
+		_, asked := call(before, "POST", "/api/ops/wipe", admin, M{})
+		store.Close()
+
+		after, store := boot()
+		check("after a restart the task is still there", statusOf(call(after, "GET", "/api/_a2app/tasks/"+taskID, admin, nil)), 200)
+		check("…and its credential still works", statusOf(call(after, "GET", "/api/_a2app/whoami", map[string]string{"x-a2app-token": getStr(minted, "token")}, nil)), 200)
+		_, requeued := call(after, "POST", "/api/ops/queue", admin, M{"n": 2.0})
+		newID := toStr(requeued["result"].(M)["taskId"])
+		check("…a new task gets a fresh id", newID != taskID && newID != "", true)
+		_, newer := call(after, "GET", "/api/_a2app/events?since="+getStr(events, "nextCursor"), admin, nil)
+		check("…a saved cursor reads only newer events", len(toMList(newer["events"])), 1)
+		check("…and the approval key issued before it still runs",
+			statusOf(call(after, "POST", "/api/ops/wipe", map[string]string{"x-a2app-token": "admin-token", "x-a2app-approval": getStr(asked, "approvalKey")}, M{})), 200)
+		store.Close()
 	}
 
 	if len(failures) > 0 {
 		fmt.Println("a2app_adapter selftest FAILED:\n  - " + strings.Join(failures, "\n  - "))
 		return 1
 	}
-	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, " +
-		"host and network policy, auth primitives, resolution order and ceiling)")
+	fmt.Println("a2app_adapter selftest ok (guard, predicates, fingerprint, JavaScript semantics and the approval key, " +
+		"referential deletes, listing, sqlite store and persistence, host and network policy, auth primitives, " +
+		"resolution order and ceiling, device confirmation, operations, records, tasks, events, viewers, describe, restart)")
 	return 0
 }

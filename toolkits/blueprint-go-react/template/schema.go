@@ -24,11 +24,15 @@
 // owner's. Operation runners get the caller as `ctx` ({"principal", "role"})
 // and hold themselves to the same rule — see `mine` below.
 //
+// ENTITIES is a list, each entity naming itself with "name": describe lists
+// them in this order, so put the most-used first.
+//
 // This starter models a to-do list. Replace it with your own entities.
 package main
 
-var ENTITIES = map[string]M{
-	"tasks": {
+var ENTITIES = []M{
+	{
+		"name":    "tasks",
 		"module":  "planning",
 		"summary": "what needs doing, and what is done",
 		"fields": []M{
@@ -141,7 +145,10 @@ func init() {
 }
 
 // Operation runners: (args, ctx, store) -> JSON-able result. The adapter calls
-// these for a declared operation; a destructive op is gated by approval first.
+// these for a declared operation, after checking `args` against its `params`;
+// a destructive op is gated by approval first. To refuse a call, return
+// &OperationError{Code, Message, HTTPStatus, Extra}; any other error answers
+// operation_failed.
 // `ctx` is who is calling: {"credentialId", "agentName", "principal", "role"}.
 // `store` is the live SQLite-backed store — read with store.getRecord /
 // store.listRecords, write with store.putRecord / store.deleteRecord.

@@ -995,7 +995,12 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
       return err(405, "usage", `${req.method} not allowed on records.`);
     }
 
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    // A body that is not a JSON object carries no fields, so it is read as an
+    // empty one: a create then misses its required fields, and an update
+    // changes nothing. Passing it on would hand the binding a number or a
+    // string where it expects a record.
+    const body =
+      req.body !== null && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
 
     // Idempotency: a replayed key returns 409 naming the record. Applied to both
     // creates (POST) and updates (PATCH) — a retried non-idempotent PATCH would

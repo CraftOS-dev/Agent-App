@@ -1,6 +1,6 @@
 {
  "name": "@a2app/reverse-proxy",
- "version": "0.1.0",
+ "version": "0.2.0",
  "description": "Sidecar A2App adapter for foreign apps adopted as-is: starts the app from a declarative sidecar.json, serves the A2App surface on the app's port, and forwards declared operations to the app's own routes; operate-only, entities:{} by design",
  "license": "MIT",
  "repository": { "type": "git", "url": "git+https://github.com/CraftOS-dev/Agent-App.git", "directory": "adapters/reverse-proxy" },

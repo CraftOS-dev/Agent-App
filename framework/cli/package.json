@@ -1,6 +1,6 @@
 {
   "name": "agent-app-framework",
-  "version": "0.1.0-alpha.0",
+  "version": "0.2.0",
   "description": "The Agent App Framework CLI — `agent-app` builds and evolves Agent Apps; `a2app` operates them over the A2App protocol",
   "license": "MIT",
   "repository": {
@@ -36,7 +36,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node test/copy-tree.test.mjs && node test/manifest-merge.test.mjs && node test/containment.test.mjs && node test/connect.test.mjs && node test/bridge.test.mjs && node test/delivery.test.mjs && node test/accounts.test.mjs && node test/login.test.mjs && node test/resolution.test.mjs && node test/bridge-credential.test.mjs && node test/access-gate.test.mjs && node test/describe-cache.test.mjs && node test/zip.test.mjs && node test/package.test.mjs && node test/install.test.mjs",
+    "test": "tsc -p tsconfig.json && node test/copy-tree.test.mjs && node test/manifest-merge.test.mjs && node test/containment.test.mjs && node test/connect.test.mjs && node test/bridge.test.mjs && node test/delivery.test.mjs && node test/accounts.test.mjs && node test/login.test.mjs && node test/resolution.test.mjs && node test/bridge-credential.test.mjs && node test/access-gate.test.mjs && node test/describe-cache.test.mjs && node test/zip.test.mjs && node test/package.test.mjs && node test/install.test.mjs && node test/scaffold-remove.test.mjs",
     "bundle-blueprints": "node scripts/bundle-blueprints.mjs",
     "bundle-skills": "node scripts/bundle-skills.mjs",
     "bundle": "node scripts/bundle-blueprints.mjs && node scripts/bundle-skills.mjs",

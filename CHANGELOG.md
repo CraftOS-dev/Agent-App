@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased — protocol 0.2
+## 0.2.0 — protocol 0.2
+
+`agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and
+`@a2app/reverse-proxy` are released together at 0.2.0; the react-node and
+sidecar blueprints depend on `^0.2.0`.
 
 Agents get their own credentials, approved by the person they act for, and can
 never do more than that person can. The normative text is
@@ -74,6 +78,14 @@ never do more than that person can. The normative text is
   launcher.
 - A local app is now addressed the same way as a remote one: `A2APP_TOKEN`, then
   the stored credential for the live app, then the app's own `.agent-token`.
+- `agent-app blueprints` lists what an app can be scaffolded on.
+- `agent-app <dir> dev --install` runs the pipeline's install first, which a
+  fresh scaffold needs.
+- `a2app <app> tasks complete <id> --summary "…"` closes a task with a summary,
+  no JSON to quote.
+- `a2app <app> data <entity> create|update` also takes fields as `field=value`.
+- The harness tools' `agent_app_build` takes `authMode`, so a multi-user app can
+  be scaffolded through them.
 
 ### Removed
 
@@ -93,7 +105,15 @@ for, and nothing else is sent.
 - Clients accept protocol `0.1` and `0.2`.
 - `agent-app <app> bridge` always uses the app's admin credential, and gives the
   harness the task's credential: `A2APP_TOKEN` for a headless run,
-  `credential.token` in the body posted to an inbound or gateway route.
+  `credential.token` in the body posted to an inbound or gateway route. Its log
+  names who each run acts as.
+- `scaffold` needs `--blueprint`; without one it lists the choices instead of
+  writing a stack-free skeleton (`blueprint-base` is that).
+- The Claude Code MCP server no longer writes a `claude` profile into
+  `harnesses.json`; the bridge uses the framework's built-in one. A profile an
+  earlier version wrote replaces the built-in until it is deleted.
+- `remove` keeps the app's own backups as well as its data, under
+  `removed/<name>-<id>/` in the framework home.
 
 ### Fixed
 
@@ -104,6 +124,22 @@ for, and nothing else is sent.
   needs a toolkit installed on this machine.
 - The CLI's describe cache is kept per credential, under a hash of it, so a walk
   never shows one agent another's reach.
+- **The bridge killed runs that had finished.** A heartbeat the app refused was
+  read as a lost claim, including the refusal a task gets once its own run has
+  completed it, so a run still exiting was killed and logged `claim_lost`. A
+  refusal is now read: a task its run completed or failed is left to exit.
+- **An app installed from npm got none of its blueprint's `.gitignore`** (npm
+  never packs one), so its export shipped the PocketBase binary. The bundled
+  blueprints carry it as `_gitignore`, written back on scaffold.
+- **`pb-serve.mjs --fetch` trusted any binary that reported the pinned
+  version**, running it to ask. A binary is now kept only when its SHA-256 is the
+  pinned release's, and anything else is replaced.
+- PocketBase's describe root named the app after PocketBase's own setting
+  ("Acme" on a fresh database) instead of the manifest.
+- A remote agent with no credential was told to read the app's `.agent-token`;
+  it is now pointed at `a2app <url> login`.
+- `--scopes a,b` from PowerShell arrived as one scope `"a b"`; scopes are now
+  separated by commas or spaces.
 
 - **A task's credential could come back to life.** Task ids came from a
   counter that restarted at boot while credentials persisted, so after a restart

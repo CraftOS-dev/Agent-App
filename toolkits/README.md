@@ -11,6 +11,7 @@ An agent can start from a blueprint or kit, but **none is required for complianc
 | [blueprint-go-react/](blueprint-go-react/) | Tier 2 — Go + React + SQLite | Go (net/http) server + SQLite store + React (Vite) View, with a native Go adapter port (rules + served surface) |
 | [blueprint-rust-react/](blueprint-rust-react/) | Tier 2 — Rust + React + SQLite | Rust (tiny_http) server + SQLite store + React (Vite) View, with a native Rust adapter port (rules + served surface) |
 | [blueprint-rails-vue/](blueprint-rails-vue/) | Tier 2 — Rails + Vue + SQLite | Rails server + SQLite store + Vue 3 (Vite) View, with a native Ruby adapter port (rules + served surface) |
+| [blueprint-sidecar/](blueprint-sidecar/) | Adopt — any HTTP app, unchanged | the foreign app runs as-is in `upstream/`; the sidecar adapter (`@a2app/reverse-proxy`) serves A2App in front of it and forwards the operations mapped in `sidecar.json` |
 | [kit/](kit/) | The reference kit | browser client glue + design tokens, vendored by tier-2 blueprints and hash-registered in the canon |
 
-All seven blueprints pass `scaffold → validate` in the [conformance](../conformance/) Toolkit class.
+All eight blueprints pass `scaffold → validate` in the [conformance](../conformance/) Toolkit class.

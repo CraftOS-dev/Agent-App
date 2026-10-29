@@ -8,3 +8,4 @@ packages:
   - toolkits/kit
   - toolkits/blueprint-pocketbase-react
   - toolkits/blueprint-react-node
+  - toolkits/blueprint-sidecar

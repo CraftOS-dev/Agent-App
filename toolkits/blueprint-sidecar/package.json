@@ -1,0 +1,16 @@
+{
+  "name": "@craftos/agent-app-blueprint-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent App blueprint: adopt a foreign app as-is, unchanged, behind the sidecar A2App adapter (@a2app/reverse-proxy)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo \"blueprint - nothing to build\" && exit 0",
+    "typecheck": "echo \"blueprint - nothing to typecheck\" && exit 0",
+    "test": "node test/adopt.test.mjs"
+  }
+}

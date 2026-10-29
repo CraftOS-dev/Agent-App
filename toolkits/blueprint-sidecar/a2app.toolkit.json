@@ -1,0 +1,21 @@
+{
+  "id": "blueprint-sidecar",
+  "description": "Adopt a foreign app as-is: its source runs unchanged from upstream/ behind the sidecar A2App adapter (@a2app/reverse-proxy), which starts it from sidecar.json, serves the A2App surface on the app's port, and forwards each declared operation to one of the app's own routes. Operate-only: no entities. NOT part of the framework.",
+  "template": "template",
+  "systemPaths": [
+    "manifest.json",
+    "a2app-account.html"
+  ],
+  "adapterPaths": [
+    "a2app-account.html"
+  ],
+  "gate": [
+    {
+      "name": "sidecar.json valid; operations resolve (every declared op maps onto a route of the adopted app)",
+      "run": "node node_modules/@a2app/reverse-proxy/dist/bin.js --check"
+    }
+  ],
+  "lifecycle": {
+    "dataDir": "data"
+  }
+}

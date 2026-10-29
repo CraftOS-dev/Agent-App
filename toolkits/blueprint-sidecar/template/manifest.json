@@ -1,0 +1,24 @@
+{
+  "id": "REPLACED_AT_CREATE",
+  "name": "Adopted App",
+  "agentAppVersion": "0.1.0",
+  "adapterVersion": "0.1.0",
+  "appVersion": "0.1.0",
+  "authMode": "none",
+  "modules": [
+    {
+      "name": "core",
+      "summary": "the adopted app — rename and split by the app's own areas"
+    }
+  ],
+  "modificationLock": false,
+  "capabilities": {
+    "integrations": []
+  },
+  "pipeline": {
+    "install": "npm install",
+    "build": "npm run build --if-present",
+    "start": "node node_modules/@a2app/reverse-proxy/dist/bin.js",
+    "health": "/api/_a2app"
+  }
+}

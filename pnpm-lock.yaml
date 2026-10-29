@@ -193,6 +193,8 @@ importers:
 
   toolkits/blueprint-react-node: {}
 
+  toolkits/blueprint-sidecar: {}
+
   toolkits/kit:
     devDependencies:
       '@types/node':

@@ -1,0 +1,12 @@
+{
+  "upstream": {
+    "command": [],
+    "cwd": "upstream",
+    "port": "auto",
+    "env": {
+      "PORT": "{port}"
+    },
+    "health": "/"
+  },
+  "operations": {}
+}

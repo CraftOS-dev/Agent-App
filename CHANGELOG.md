@@ -36,8 +36,22 @@ never do more than that person can. The normative text is
   task ends — never with the app's admin credential.
 - **`validate` checks who a multi-user app answers**: sign-in must be on, and no
   entity may be readable without it (a public PocketBase rule fails the gate).
-- `conformance/multi-user/run.mjs`: a black-box suite every starter passes when
-  served as `multi-user`.
+- `conformance/multi-user/run.mjs` (65 checks) and `conformance/starter/run.mjs`
+  (32 checks): black-box suites a running starter must pass. Every starter
+  passes the multi-user suite. The starter suite is passed by react-node, go-react,
+  python-fastapi, rust-react and rails-vue. pocketbase-react, which serves records
+  through PocketBase itself, passes 19 of the 32.
+- **The native adapters match the reference** (go-react, python-fastapi,
+  rust-react, rails-vue):
+  - operation arguments are guarded;
+  - idempotency covers operations and updates;
+  - runners can refuse with typed errors;
+  - approval keys use the reference's format;
+  - the record guard follows the current rules;
+  - tasks, events, approvals, idempotency keys and the audit log persist across
+    a restart;
+  - every app has viewers, `dataVersion`, `targetParam` and describe budgets,
+    and a Host check on every path.
 - A local app is now addressed the same way as a remote one: `A2APP_TOKEN`, then
   the stored credential for the live app, then the app's own `.agent-token`.
 
@@ -61,6 +75,22 @@ for, and nothing else is sent.
   harness the task's credential: `A2APP_TOKEN` for a headless run,
   `credential.token` in the body posted to an inbound or gateway route.
 
+### Fixed
+
+- **A task's credential could come back to life.** Task ids came from a
+  counter that restarted at boot while credentials persisted, so after a restart
+  a new task could revive an old task's credential (go-react, python-fastapi,
+  rails-vue). Tasks now have random ids and are persisted.
+- **rails-vue logged request bodies**, including passwords and device codes. It
+  no longer does, and secret-looking values are filtered.
+- **adapter-core wrote a raw token into its audit log** when it rate-limited a
+  caller. It now records the token's hash.
+- A record update whose body is not a JSON object no longer fails with a 500.
+- The native adapters no longer lose writes behind a 200, crash, or store wrong
+  numbers on unusual input (go-react: NaN and ignored SQLite errors; rust-react:
+  a runner panic stopping the process; python-fastapi and rails-vue: framework
+  500s, `to_i` numbers).
+
 ### Upgrading an existing app
 
 `agent-app <dir> adapter-sync` (run at every launch) brings the new adapter. The
@@ -72,6 +102,8 @@ of their own:
   `url = "2"`, `getrandom = "0.2"`,
   `pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }`,
   `subtle = "2"` and `base64 = "0.22"`.
+- **go-react**: `ENTITIES` in `schema.go` can now be an ordered list (`[]M` with
+  `"name"`), which `describe` follows. A map still compiles, listed by name.
 - **pocketbase-react, multi-user only**: copy
   `pb/pb_migrations/1759622300_a2app_accounts.js` from the toolkit, and give
   each collection rules on `@request.auth.id` (see the starter's `tasks`

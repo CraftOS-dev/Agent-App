@@ -6,7 +6,7 @@
  * `agent-app <dir> owner` is this command with `--role owner`, and is how the
  * first owner is created. The link is printed once and is good for 7 days; the
  * person opens it and chooses their own login and password — no password ever
- * passes through here.
+ * passes through here. stdout carries `{ ok, role, url, expiresAt }`.
  */
 import { flag } from "../lib/args.js";
 import { log } from "../lib/log.js";
@@ -29,9 +29,9 @@ export async function invite(args: string[], app: string, role: string): Promise
     log.error(`The app refused the invite (${res.status}${body?.code ? ` ${body.code}` : ""}): ${body?.message ?? "no reason given"}`);
     return 1;
   }
-  log.ok(`one-time setup link for a new ${role} (valid until ${body.expiresAt}):`);
-  log.raw(body.url);
+  log.ok(`one-time setup link for a new ${role} (valid until ${body.expiresAt}): ${body.url}`);
   log.info("send it to the person; they choose their own login and password there.");
+  log.raw(JSON.stringify({ ok: true, role, url: body.url, expiresAt: body.expiresAt ?? null }, null, 2));
   return 0;
 }
 

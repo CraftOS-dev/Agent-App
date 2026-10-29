@@ -27,6 +27,7 @@ import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js
 import { UsageError } from "../lib/project.js";
 import { connect, labelFor } from "../lib/target.js";
 import { log } from "../lib/log.js";
+import { callerRefused, reportRefusal } from "../lib/refusal.js";
 
 export async function run(args: string[], app: string): Promise<number> {
   const [collection, verb = "list", id] = positionals(args);
@@ -53,6 +54,13 @@ export async function run(args: string[], app: string): Promise<number> {
 
   const schema = await fetchEntitySchema(client, collection);
   if (schema === null) {
+    // A refused credential reads as "no such entity" from describe; say the
+    // real reason instead.
+    const refused = await callerRefused(client);
+    if (refused !== null) {
+      reportRefusal(refused, "the app");
+      return 1;
+    }
     const index = await fetchEntityIndex(client);
     const hint = suggest(collection, [...index.keys()]);
     log.error(`No entity "${collection}"${hint !== null ? ` — did you mean "${hint}"?` : ""}`);
@@ -116,7 +124,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
   if (res.status >= 300) {
     const parsed = res.json as Record<string, unknown> | null;
-    log.error(String(parsed?.["message"] ?? `HTTP ${res.status}`));
+    reportRefusal(res, `${verb} ${collection}`);
     const violations = parsed?.["violations"];
     if (Array.isArray(violations) && violations.length > 1) {
       for (const v of violations.slice(1) as { field?: string; expected?: string }[]) {

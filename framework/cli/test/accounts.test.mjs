@@ -45,7 +45,15 @@ function cli(args, home) {
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.on("close", (code) => done({ code, out: stdout + stderr }));
+    child.on("close", (code) => {
+      let result = null;
+      try {
+        result = JSON.parse(stdout);
+      } catch {
+        /* no JSON result: a failure, or a command that prints none */
+      }
+      done({ code, out: stdout + stderr, result });
+    });
   });
 }
 
@@ -88,14 +96,15 @@ try {
     try {
       const owner = await cli([dir, "owner"], home);
       check("owner prints a link and succeeds", owner.code, 0);
-      ok("…a one-time setup link on the account page", new RegExp(`http://127\\.0\\.0\\.1:${port}/_a2app/account#setup/[A-Za-z0-9_-]{43}`).test(owner.out));
+      ok("…a one-time setup link on the account page", new RegExp(`^http://127\\.0\\.0\\.1:${port}/_a2app/account#setup/[A-Za-z0-9_-]{43}$`).test(owner.result?.url ?? ""));
+      check("…for an owner, in a JSON result", owner.result?.role, "owner");
       const member = await cli([dir, "invite"], home);
-      ok("invite makes a member link by default", member.code === 0 && /new member/.test(member.out));
+      ok("invite makes a member link by default", member.code === 0 && member.result?.role === "member");
       const bad = await cli([dir, "invite", "--role", "admin"], home);
       check("an unknown role is a usage error", bad.code, 2);
 
       // credential mint / list / revoke, for a person who signed up through the link.
-      const code = owner.out.match(/#setup\/([A-Za-z0-9_-]{43})/)[1];
+      const code = new URL(owner.result.url).hash.slice("#setup/".length);
       const signup = await fetch(`http://127.0.0.1:${port}/api/_a2app/invites/${code}`, {
         method: "POST",
         headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
@@ -103,15 +112,17 @@ try {
       });
       const alice = await signup.json();
       const minted = await cli([dir, "credential", "mint", "--for", "Alice@Example.com", "--scopes", "data:notes:read", "--expires", "1d", "--name", "CI"], home);
-      const token = minted.out.split(/\r?\n/).find((l) => /^a2a_[A-Za-z0-9_-]{43}$/.test(l));
-      ok("credential mint prints the token once, on a line of its own", minted.code === 0 && token !== undefined);
+      const token = minted.result?.token;
+      ok("credential mint answers with the token, once", minted.code === 0 && /^a2a_[A-Za-z0-9_-]{43}$/.test(token ?? ""));
       const whoami = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
       check("…a token that acts for the person it was minted for", [whoami.principal, whoami.scopes], [alice.id, ["data:notes:read"]]);
       const listed = await cli([dir, "credential", "list"], home);
-      ok("credential list shows it", listed.code === 0 && /for Alice/.test(listed.out) && /agent "CI"/.test(listed.out));
+      const entry = listed.result?.credentials?.find((c) => c.credentialId === minted.result.credential.credentialId);
+      ok("credential list shows it", listed.code === 0 && entry?.principalName === "Alice" && entry?.agentName === "CI");
       ok("…without the token", !listed.out.includes(token));
-      const id = listed.out.match(/cred_[0-9a-f]{16}/)[0];
-      check("credential revoke succeeds", (await cli([dir, "credential", "revoke", id], home)).code, 0);
+      const id = entry.credentialId;
+      const revoked = await cli([dir, "credential", "revoke", id], home);
+      check("credential revoke succeeds", [revoked.code, revoked.result?.revoked], [0, id]);
       const after = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
       check("…and the token is refused from the next request", after.code, "credential_revoked");
       check("a lifetime that is not one is a usage error", (await cli([dir, "credential", "mint", "--expires", "soon"], home)).code, 2);

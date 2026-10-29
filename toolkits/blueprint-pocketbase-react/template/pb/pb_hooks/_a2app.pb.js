@@ -13,9 +13,11 @@
  * sign-in) — lives in `_a2app_impl.js`.
  * (`require()` is cached per runtime, so the module loads once per pooled VM.)
  *
- * Runtime: PocketBase JSVM (Goja) on the 0.23+ hook API (binary pinned to
- * v0.26.x). `node --check` validates syntax in the gate; this file only executes
- * inside `pocketbase serve`.
+ * Runtime: PocketBase JSVM (Goja) on the 0.39 line (pb-serve.mjs pins the
+ * binary to v0.39.7). Since 0.27 PocketBase checks a collection's API rules
+ * BEFORE the record request hooks below, so the create rule is decided before
+ * the guard fills a record's owner. `node --check` validates syntax in the gate;
+ * this file only executes inside `pocketbase serve`.
  */
 
 /* -------------------------------------------------------------- bootstrap */

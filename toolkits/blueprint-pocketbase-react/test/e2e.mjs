@@ -3,8 +3,9 @@
  *
  * The hooks only run inside `pocketbase serve` (Goja, not Node), so `node
  * --check` and the rules self-test cannot tell whether they work. This scaffolds
- * a fresh app with the real CLI, boots it with the launcher the pipeline uses,
- * and drives it over HTTP and through the `a2app` CLI: access from foreign
+ * a fresh app with the real CLI, checks that the pipeline's install finds the
+ * binary in place, boots the app with the launcher the pipeline uses, and
+ * drives it over HTTP and through the `a2app` CLI: access from foreign
  * origins and programs, who is calling (protocol 0.2: the admin credential,
  * delegated credentials held to their scopes, device sign-in approved by the
  * View and confirmed by the agent, whose records), operations and approval,
@@ -16,10 +17,12 @@
  *
  *   POCKETBASE_BIN=/path/to/pocketbase node test/e2e.mjs
  *
- * Needs a PocketBase 0.26.x binary and a built CLI (`pnpm -r build`). Without
+ * Needs the PocketBase binary the blueprint pins (v0.39.7, what `node
+ * pb-serve.mjs --fetch` downloads) and a built CLI (`pnpm -r build`). Without
  * POCKETBASE_BIN it says so and exits 0, so the workspace test run stays green
  * on machines that do not have one. E2E_SLOW=1 also waits out a claim (60 s) to
- * check that an abandoned task goes back to the queue.
+ * check that an abandoned task goes back to the queue. Nothing here uses the
+ * network.
  *
  * Standard library only, run directly — no test runner.
  */
@@ -34,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 const binary = process.env.POCKETBASE_BIN;
 if (!binary) {
-  console.log("pocketbase e2e: skipped (set POCKETBASE_BIN to a PocketBase 0.26.x binary to run it)");
+  console.log("pocketbase e2e: skipped (set POCKETBASE_BIN to a PocketBase 0.39.7 binary to run it)");
   process.exit(0);
 }
 
@@ -101,6 +104,16 @@ try {
     },`,
   );
   writeFileSync(opsJs, opsSource);
+
+  console.log("install");
+  {
+    // The pipeline's install starts with `node pb-serve.mjs --fetch`. With the
+    // pinned binary already in place it must download nothing, so the network
+    // is switched off for this run: an attempt to download fails the check.
+    const offline = `data:text/javascript,${encodeURIComponent("globalThis.fetch = () => Promise.reject(new Error('the network is off in this test'));")}`;
+    const fetched = await cli(join(dir, "pb-serve.mjs"), ["--fetch"], env, ["--import", offline]);
+    check("with the pinned PocketBase in place, install's fetch downloads nothing", [fetched.code, fetched.stderr.trim()], [0, ""]);
+  }
 
   await start();
 
@@ -493,9 +506,9 @@ function rawRequest(method, path, headers, json) {
   });
 }
 
-function cli(entry, args, childEnv) {
+function cli(entry, args, childEnv, nodeArgs = []) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [entry, ...args], { env: childEnv, windowsHide: true });
+    const child = spawn(process.execPath, [...nodeArgs, entry, ...args], { env: childEnv, windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));

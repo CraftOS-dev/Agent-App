@@ -38,26 +38,215 @@
  * silently on a panic, so a panic line fails the run and a hard timeout bounds
  * it.
  *
+ * `node pb-serve.mjs --fetch` is the first half of `pipeline.install`: it puts
+ * the pinned PocketBase release for this OS/arch at pb/pocketbase[.exe],
+ * checked against the SHA-256 embedded below, and does nothing when that
+ * version is already there. An installed app then runs with no manual step.
+ *
  * Why a launcher rather than raw commands in the manifest: `serve` spawns the
  * start command through the OS shell, and `pb/pocketbase serve --http
  * 127.0.0.1:${PORT}` is not portable across shells (cmd.exe expands neither
  * `${PORT}` nor `/`-separated executables). Node resolves both.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { isIPv4, isIPv6 } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pbDir = join(here, "pb");
 
-// The adapter (pb/pb_hooks/_a2app.pb.js) targets the PocketBase 0.23+ JSVM API
-// and the blueprint is pinned to the 0.26 line. Older/newer majors moved these
-// hook and DAO APIs, so a mismatched binary fails deep inside a hook with an
-// opaque ReferenceError. This is the required series.
-const SUPPORTED_SERIES = "0.26.";
+/* ------------------------------------------------------------- the binary */
+
+// The PocketBase release this blueprint is pinned to. The adapter
+// (pb/pb_hooks/_a2app*.js) is written against this line's JSVM API, and
+// PocketBase has moved its hook, record and DAO APIs between lines before (0.23
+// rewrote them), so a binary from another line fails deep inside a hook with an
+// opaque ReferenceError. `--fetch` installs exactly the pinned release; serving
+// accepts any patch release of its line.
+const POCKETBASE_VERSION = "0.39.7";
+const SUPPORTED_SERIES = "0.39.";
+
+// SHA-256 of each release zip, copied from the release's checksums.txt
+// (https://github.com/pocketbase/pocketbase/releases/tag/v0.39.7). Embedded
+// rather than downloaded beside the zip, so a download is held to what this
+// hash-locked file says, not to whatever the same server answers. Keyed by the
+// release's own `<os>_<arch>` names: an OS/arch missing here is one the release
+// does not ship.
+const RELEASE_SHA256 = {
+  darwin_amd64: "32ee65426529c5fc48b7899431b9cf22e54c40a2f39f9fde92948bcabebaa933",
+  darwin_arm64: "f94b96eac1684d35cad5368334c156673fa21ae28df721e712e1cf3b8176aeb8",
+  linux_amd64: "0fe09a4e1a8f6e5b53d206c2e6b94a5812febcb43082d66d69bc8ba4d8e8429c",
+  linux_arm64: "ff6296e90bb5545592c5696e9d591fa4570fbdf31aaec58b51c70ce7d15f581d",
+  linux_armv7: "be8f85b0a6e5bf284e26ca6dca5d88e2ab5234d030274069020566f1b836941c",
+  linux_ppc64le: "a643da593e4c234bec4a91039fae4530003f9012137fab181f0d7f1799413301",
+  linux_s390x: "5f2dc7cf20d04b548f9f23e124670d97ab4d51ecff1215b391255c268050bed0",
+  windows_amd64: "0f32dfda39949cfbec38ea18fe99f1e9e49350ce1efe87537591b44dcee51517",
+  windows_arm64: "93ea40181210b1db7d7a885caf832cbd8945ab6ae1d43ed2c858bfc4390b4d26",
+};
+/** A release zip is ~13 MB; anything far larger is not the release. */
+const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+
+// PocketBase ships as `pocketbase` on POSIX and `pocketbase.exe` on Windows;
+// both live in `pb/` (put there by `--fetch`, the pipeline's `install`).
+const binary = join(pbDir, process.platform === "win32" ? "pocketbase.exe" : "pocketbase");
+
+/** The version a PocketBase binary reports, or null when there is none or it
+ *  does not run here. `pocketbase --version` prints "pocketbase[.exe] version
+ *  0.39.7"; the version is the last token. */
+function versionOf(file) {
+  if (!existsSync(file)) return null;
+  try {
+    return execFileSync(file, ["--version"], { encoding: "utf8", timeout: 30_000, windowsHide: true }).trim().split(" ").pop();
+  } catch {
+    return null;
+  }
+}
+
+/** This machine as the release names its builds (`windows_amd64`, …), or null
+ *  when the release ships no build for it. */
+function releaseTarget() {
+  const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform];
+  const arch = { x64: "amd64", arm64: "arm64", arm: "armv7", ppc64: "ppc64le", s390x: "s390x" }[process.arch];
+  const target = `${os}_${arch}`;
+  return Object.hasOwn(RELEASE_SHA256, target) ? target : null;
+}
+
+/**
+ * `--fetch`: download the pinned release for this OS/arch, refuse it unless its
+ * SHA-256 is the embedded one, and put only the binary at pb/pocketbase[.exe],
+ * executable. Nothing happens when that version is already there.
+ */
+async function fetchBinary() {
+  if (versionOf(binary) === POCKETBASE_VERSION) {
+    console.log(`PocketBase ${POCKETBASE_VERSION} is already at ${binary}`);
+    return;
+  }
+  const target = releaseTarget();
+  if (target === null) {
+    throw new Error(
+      `PocketBase ${POCKETBASE_VERSION} ships no build for ${process.platform}/${process.arch} ` +
+        `(its release has ${Object.keys(RELEASE_SHA256).join(", ")}). Build v${POCKETBASE_VERSION} for this machine ` +
+        `from https://github.com/pocketbase/pocketbase and place it at ${binary}.`,
+    );
+  }
+  const asset = `pocketbase_${POCKETBASE_VERSION}_${target}.zip`;
+  const url = `https://github.com/pocketbase/pocketbase/releases/download/v${POCKETBASE_VERSION}/${asset}`;
+  console.log(`downloading ${url}`);
+  const zip = await download(url);
+  const digest = createHash("sha256").update(zip).digest("hex");
+  if (digest !== RELEASE_SHA256[target]) {
+    throw new Error(`${asset} is not the pinned release: its SHA-256 is ${digest}, not ${RELEASE_SHA256[target]}. Nothing was installed.`);
+  }
+
+  // Written beside the binary and checked to run before it takes the binary's
+  // place, so a failed fetch never leaves a broken file where serve looks.
+  const partial = `${binary}.partial`;
+  mkdirSync(pbDir, { recursive: true });
+  try {
+    writeFileSync(partial, zipEntry(zip, basename(binary)));
+    chmodSync(partial, 0o755);
+    const got = versionOf(partial);
+    if (got !== POCKETBASE_VERSION) {
+      throw new Error(`the binary in ${asset} does not run on this machine (it reported ${got ?? "nothing"}).`);
+    }
+    renameSync(partial, binary);
+  } catch (err) {
+    rmSync(partial, { force: true });
+    if (err.code === "EPERM" || err.code === "EBUSY") {
+      throw new Error(`could not replace ${binary} (${err.code}): stop the app that is running it, then fetch again.`);
+    }
+    throw err;
+  }
+  console.log(`PocketBase ${POCKETBASE_VERSION} (${target}, SHA-256 verified) is at ${binary}`);
+}
+
+/** The body at `url`, following GitHub's redirect to its download host; bounded
+ *  in size and time. */
+async function download(url) {
+  let res;
+  try {
+    res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+  } catch (err) {
+    throw new Error(`could not download ${url}: ${err.cause?.message ?? err.message}`);
+  }
+  if (!res.ok || !res.body) throw new Error(`could not download ${url}: HTTP ${res.status}`);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body) {
+    size += chunk.length;
+    if (size > MAX_DOWNLOAD_BYTES) throw new Error(`${url} is larger than ${MAX_DOWNLOAD_BYTES} bytes; refusing it.`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * One file from a zip archive, by its name at the archive's root. This reads
+ * as much of the format as a release zip uses — stored or deflated entries,
+ * found through the central directory — and refuses the rest (encryption,
+ * zip64) by name. The archive's SHA-256 is verified before this runs.
+ */
+function zipEntry(zip, name) {
+  const END = 0x06054b50; // end of central directory
+  const CENTRAL = 0x02014b50;
+  const LOCAL = 0x04034b50;
+  let end = -1;
+  for (let i = zip.length - 22; i >= Math.max(0, zip.length - 22 - 0xffff) && end < 0; i--) {
+    if (zip.readUInt32LE(i) === END) end = i;
+  }
+  if (end < 0) throw new Error("the download is not a zip archive.");
+  let at = zip.readUInt32LE(end + 16);
+  for (let n = zip.readUInt16LE(end + 10); n > 0; n--) {
+    if (zip.readUInt32LE(at) !== CENTRAL) throw new Error("the zip archive's directory is damaged.");
+    const flags = zip.readUInt16LE(at + 8);
+    const method = zip.readUInt16LE(at + 10);
+    const packed = zip.readUInt32LE(at + 20);
+    const size = zip.readUInt32LE(at + 24);
+    const nameLength = zip.readUInt16LE(at + 28);
+    const local = zip.readUInt32LE(at + 42);
+    const entry = zip.toString("utf8", at + 46, at + 46 + nameLength);
+    at += 46 + nameLength + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
+    if (entry !== name) continue;
+    if (flags & 1) throw new Error(`${name} is encrypted in the archive.`);
+    if ([packed, size, local].includes(0xffffffff)) throw new Error(`${name} is a zip64 entry, which this launcher does not read.`);
+    if (zip.readUInt32LE(local) !== LOCAL) throw new Error("the zip archive's entry header is damaged.");
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const data = zip.subarray(start, start + packed);
+    if (method !== 0 && method !== 8) throw new Error(`${name} uses zip compression method ${method}, which this launcher does not read.`);
+    const out = method === 8 ? inflateRawSync(data) : data;
+    if (out.length !== size) throw new Error(`${name} did not extract to its recorded size.`);
+    return out;
+  }
+  throw new Error(`the archive has no ${name} at its root.`);
+}
+
+if (process.argv.includes("--fetch")) {
+  try {
+    await fetchBinary();
+    process.exit(0);
+  } catch (err) {
+    console.error(`could not fetch PocketBase: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/* -------------------------------------------------------------- the launch */
 
 const manifest = JSON.parse(readFileSync(join(here, "manifest.json"), "utf8"));
 const port = process.env.PORT ?? manifest.port;
@@ -131,21 +320,20 @@ if (!migrateMode && !port) {
   process.exit(1);
 }
 
-// PocketBase ships as `pocketbase` on POSIX and `pocketbase.exe` on Windows;
-// both live in `pb/` (see the pipeline `install` step).
-const binary = join(pbDir, process.platform === "win32" ? "pocketbase.exe" : "pocketbase");
+// The binary must be there, run, and be on the supported series.
 if (!existsSync(binary)) {
-  console.error(`PocketBase binary not found at ${binary} — download it into pb/ (pipeline \`install\`) before serving`);
+  console.error(`PocketBase binary not found at ${binary}: run \`node pb-serve.mjs --fetch\` (the pipeline's \`install\`) before serving`);
   process.exit(1);
 }
-
-// Assert the binary is on the supported series. `pocketbase --version` prints
-// "pocketbase[.exe] version 0.26.6"; the version is the last token.
-const version = execFileSync(binary, ["--version"], { encoding: "utf8" }).trim().split(" ").pop();
+const version = versionOf(binary);
+if (version === null) {
+  console.error(`PocketBase at ${binary} does not run on this machine: run \`node pb-serve.mjs --fetch\` to replace it`);
+  process.exit(1);
+}
 if (!version.startsWith(SUPPORTED_SERIES)) {
   console.error(
     `PocketBase ${version} is not supported: this app's adapter targets the ${SUPPORTED_SERIES}x JSVM API. ` +
-      `Replace ${binary} with a ${SUPPORTED_SERIES}x build (pinned: v0.26.6).`,
+      `Run \`node pb-serve.mjs --fetch\` to replace ${binary} with the pinned v${POCKETBASE_VERSION}.`,
   );
   process.exit(1);
 }

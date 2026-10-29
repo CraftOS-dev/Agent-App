@@ -112,8 +112,12 @@ export interface LinkedDependency {
  * Rewrite a scaffolded app's dependencies on packages that live in the
  * toolkit's repository to `file:` paths. Returns what it changed; an empty
  * array means the app's package.json was left untouched.
+ *
+ * `relink` is for an installed package: a `file:`/`link:` path it carries was
+ * written on the machine it was exported from and means nothing here, so a
+ * dependency with a local match is re-pointed even when it already names a path.
  */
-export function linkLocalPackages(projectDir: string, toolkitSource: string): LinkedDependency[] {
+export function linkLocalPackages(projectDir: string, toolkitSource: string, opts: { relink?: boolean } = {}): LinkedDependency[] {
   const pkgPath = join(projectDir, "package.json");
   if (!existsSync(pkgPath)) return [];
 
@@ -140,11 +144,12 @@ export function linkLocalPackages(projectDir: string, toolkitSource: string): Li
       if (dir === undefined) continue;
       // Leave anything already pointing somewhere concrete alone — the blueprint
       // author meant it, and `workspace:` is pnpm's own linking.
-      if (typeof spec === "string" && (spec.startsWith("file:") || spec.startsWith("link:") || spec.startsWith("workspace:"))) {
+      const pinned = typeof spec === "string" && (spec.startsWith("file:") || spec.startsWith("link:"));
+      if (typeof spec === "string" && ((pinned && opts.relink !== true) || spec.startsWith("workspace:"))) {
         continue;
       }
       const target = specifierFor(projectDir, dir);
-      if (target === null) continue;
+      if (target === null || target === spec) continue;
       table[name] = target;
       linked.push({ name, from: typeof spec === "string" ? spec : String(spec), to: target });
     }

@@ -47,6 +47,8 @@ export interface BudgetGateResult {
 export interface GateOptions {
   /** skip the (slow) build step — used by data-only re-checks */
   skipBuild?: boolean;
+  /** the caller has just run `pipeline.install` (install's dependencies step): build without repeating it */
+  skipInstall?: boolean;
 }
 
 function runStep(errors: GateError[], step: string, fn: () => void): void {
@@ -98,7 +100,7 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
 
   if (!opts.skipBuild) {
     runStep(errors, "build (manifest pipeline)", () => {
-      if (manifest.pipeline.install) runShell(manifest.pipeline.install, projectDir);
+      if (manifest.pipeline.install && opts.skipInstall !== true) runShell(manifest.pipeline.install, projectDir);
       runShell(manifest.pipeline.build, projectDir);
     });
   }

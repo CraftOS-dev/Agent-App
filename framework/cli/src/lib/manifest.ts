@@ -26,6 +26,10 @@ export const AGENT_APP_VERSION = "0.1.0";
  *
  * `modules` is app-owned because an app's modules ARE the app: the creator
  * flow declares them here, and they name nothing executable.
+ *
+ * `source` is the app's provenance (framework packaging §4): where it was
+ * installed from. A `toolkit-sync` must not forget it; install overwrites it
+ * with the real provenance, whatever a package claims.
  */
 export const APP_OWNED_MANIFEST_KEYS = [
   "id",
@@ -36,6 +40,7 @@ export const APP_OWNED_MANIFEST_KEYS = [
   "modules",
   "modificationLock",
   "capabilities",
+  "source",
 ] as const;
 
 export type Manifestish = Record<string, unknown>;

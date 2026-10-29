@@ -9,7 +9,25 @@
     "kind": { "enum": ["agent-app", "living-ui", "foreign"] },
     "installable": { "type": "boolean" },
     "reason": { "type": ["string", "null"] },
-    "source": { "type": "object" },
+    "routes": {
+      "type": "array",
+      "items": { "enum": ["adopt", "convert"] },
+      "description": "for a tree that is not a package: what can be done with it instead (packaging §7); empty for an agent-app"
+    },
+    "source": {
+      "type": "object",
+      "description": "the provenance install would record (manifest `source`, less `installedAt`), plus the catalogue entry's name",
+      "properties": {
+        "kind": { "enum": ["marketplace", "zip", "folder", "github", "git"] },
+        "location": { "type": "string" },
+        "ref": { "type": "string" },
+        "catalogueId": { "type": "string" },
+        "version": { "type": "string" },
+        "sha256": { "type": "string" },
+        "commit": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
     "app": {
       "type": "object",
       "properties": {
@@ -32,7 +50,7 @@
     },
     "pipeline": { "type": ["object", "null"] },
     "capabilities": { "type": ["object", "null"] },
-    "strips": { "type": "array", "items": { "type": "string" } },
+    "strips": { "type": "array", "items": { "type": "string" }, "description": "root-relative paths; folders end in `/`" },
     "placeholders": { "type": "array", "items": { "type": "string" } },
     "warnings": { "type": "array", "items": { "type": "string" } }
   }

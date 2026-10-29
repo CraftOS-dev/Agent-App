@@ -23,6 +23,7 @@ import { A2AppUnreachableError, PROTOCOL_VERSION } from "@a2app/sdk";
 import { EnvError, UsageError } from "./lib/project.js";
 import { ValuelessFlagError } from "./lib/args.js";
 import { log } from "./lib/log.js";
+import { SourceUnreachableError } from "./lib/packageErrors.js";
 
 export const VERSION = "0.1.0";
 
@@ -50,7 +51,13 @@ interface CommandMeta {
 const COMMANDS: Record<string, CommandMeta> = {
   // agent-app — the framework: build, evolve, and manage Agent Apps.
   scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app", scope: "app", args: "[--blueprint <id>] [--name <name>] [--port <n>] [--auth-mode none|multi-user]" },
-  import: { summary: "Import an existing app: fresh identity + port, strip credentials, re-vendor from a trusted toolkit", surface: "agent-app", scope: "app" },
+  import: {
+    summary: "Install this folder in place through the install pipeline (untrusted): credentials, data and runtime state dropped, system files re-vendored from a local toolkit, fresh identity + port",
+    surface: "agent-app",
+    scope: "app",
+    args: "[--blueprint <id>] [--name <name>] [--port <n>] [--set KEY=VALUE]… [--no-start] [--open] [--events]",
+  },
+  export: { summary: "Write the app as a package zip: no credentials, data, runtime state or build output", surface: "agent-app", scope: "app", args: "[--out <file.zip>]" },
   validate: { summary: "Run the validation + security gate", surface: "agent-app", scope: "app" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
@@ -81,6 +88,26 @@ const COMMANDS: Record<string, CommandMeta> = {
   list: { summary: "List every known Agent App with its port and derived status", surface: "agent-app", scope: "registry" },
   global: { summary: "Show the cross-app conventions (GLOBAL_AGENT_APP.md), seeding it on first use", surface: "agent-app", scope: "registry" },
   skills: { summary: "List the framework skills, or install them into a harness (--install <dir>)", surface: "agent-app", scope: "registry" },
+  catalogue: {
+    summary: "List the marketplace's apps, each marked compatible (or not, and why) without downloading it",
+    surface: "agent-app",
+    scope: "registry",
+    args: "[--search <words>] [--source <marketplace>]",
+  },
+  inspect: {
+    summary: "Stage an app (catalogue id or --from), report what it is and what installing it would do; installs nothing",
+    surface: "agent-app",
+    scope: "registry",
+    args: "<catalogue id> [--source <marketplace>] | --from <zip | folder | github:… | git+…>",
+  },
+  install: {
+    summary: "Install an app from the marketplace, or --from a zip, folder, GitHub repo or git URL (one pipeline for every source)",
+    surface: "agent-app",
+    scope: "registry",
+    args:
+      "<catalogue id> [--source <marketplace>] | --from <zip | folder | github:… | git+…> [--into <dir>] [--name <name>] [--port <n>] " +
+      "[--blueprint <id>] [--set KEY=VALUE]… [--no-start] [--open] [--events]",
+  },
   // a2app — the A2App protocol client. Operate only; never a build command.
   identity: { summary: "Probe the app's identity document", surface: "a2app", scope: "app" },
   data: { summary: "Read/write records; `<app> data schema` lists entities", surface: "a2app", scope: "app", args: "<entity> <verb>" },
@@ -122,7 +149,7 @@ const TAGLINE: Record<Surface, string> = {
 function shape(surface: Surface, cmd: string, meta: CommandMeta): string {
   const target = surface === "a2app" ? "<app>" : "<dir>";
   return meta.scope === "registry"
-    ? `${surface} ${cmd}`
+    ? `${surface} ${cmd}${meta.args ? ` ${meta.args}` : ""}`
     : `${surface} ${target} ${cmd}${meta.args ? ` ${meta.args}` : ""}`;
 }
 
@@ -299,7 +326,7 @@ export function dispatch(surface: Surface): void {
       if (err instanceof UsageError || err instanceof ValuelessFlagError) {
         log.error(err.message);
         process.exitCode = 2;
-      } else if (err instanceof A2AppUnreachableError) {
+      } else if (err instanceof A2AppUnreachableError || err instanceof SourceUnreachableError) {
         log.error(err.message);
         process.exitCode = 3;
       } else if (err instanceof EnvError) {

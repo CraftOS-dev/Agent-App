@@ -61,12 +61,13 @@
       "description": "provenance written at install (framework packaging §4): where this app came from",
       "required": ["kind", "installedAt"],
       "properties": {
-        "kind": { "enum": ["marketplace", "zip", "folder", "git"] },
-        "location": { "type": "string" },
+        "kind": { "enum": ["marketplace", "zip", "folder", "github", "git"] },
+        "location": { "type": "string", "description": "the marketplace (github:<owner>/<repo>, or its directory), the zip file, the folder, github:<owner>/<repo>[/<path>], or the git URL" },
         "ref": { "type": "string" },
         "catalogueId": { "type": "string" },
-        "version": { "type": "string" },
-        "sha256": { "type": "string" },
+        "version": { "type": "string", "description": "the catalogue entry's version" },
+        "sha256": { "type": "string", "description": "of the archive the app came from (marketplace, zip, github)" },
+        "commit": { "type": "string", "description": "the commit a git source was cloned at" },
         "installedAt": { "type": "string" }
       }
     }

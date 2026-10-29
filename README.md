@@ -117,6 +117,9 @@ agent-app <dir> validate            # the validation + security gate
 agent-app <dir> serve               # launch via the manifest pipeline
 agent-app <dir> dev / promote       # safe-evolve: build on a hidden port, gate, promote with backup
 agent-app <dir> bridge start        # watch the app's task queue and trigger your harness
+agent-app catalogue                 # the marketplace's apps, and whether each runs here
+agent-app install <id>              # install one (or --from a zip, folder, github:… or git+…)
+agent-app <dir> export              # package an app as a zip that installs elsewhere
 agent-app list                      # every app with its port and live status
 ```
 

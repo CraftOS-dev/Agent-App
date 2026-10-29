@@ -42,7 +42,7 @@ export async function run(args: string[], app: string): Promise<number> {
   let help = args.includes("--help") || args.includes("-h");
   if (help) log.raw(helpHeader(app));
 
-  const { client, target } = await connect(app);
+  const { client, target, credential } = await connect(app);
 
   const term = flag(args, "find");
   if (term !== undefined) return renderLevel(await fetchFind(client, term), app);
@@ -58,12 +58,13 @@ export async function run(args: string[], app: string): Promise<number> {
   // ≤2 round-trip write budget would be spent navigating. Both markers key the
   // cache: schemaVersion does not move for everything describe publishes (an
   // operation's description, for one), so it alone would keep serving text the
-  // app has already changed.
+  // app has already changed. And describe answers for the caller, so the levels
+  // are held per credential: one credential's reach is never shown to another.
   const identity = await client.identity();
   const cache =
     identity === null
       ? null
-      : DescribeCache.open(cacheDirFor(target), identity.app.id, identity.schemaVersion, identity.appVersion);
+      : DescribeCache.open(cacheDirFor(target), identity.app.id, identity.schemaVersion, identity.appVersion, credential);
 
   // Walk down as far as the path goes, one level per segment. Each level is
   // fetched (or read from cache) before the next, because only the level knows

@@ -53,6 +53,45 @@ Reserved protocol segments (never module names): `data`, `identity`, `whoami`, `
 | `agent-app global` | The user's cross-app conventions (`GLOBAL_AGENT_APP.md`) |
 | `agent-app skills [--install <dir>]` | List the framework skills, or install them into a harness |
 | `agent-app <dir> bridge [status\|start\|stop]` | The app→agent direction: watch this app's task queue, claim what appears, and trigger an agent harness by the deepest route it offers — see [Bridge](#bridge-the-appagent-direction) |
+| `agent-app catalogue [--search <words>] [--source <marketplace>]` | The marketplace's apps, each marked `compatible` (or not, and why) without downloading it — see [Install](#install-the-marketplace-and-packages) |
+| `agent-app inspect <id> \| --from <source>` | What a package is and what installing it would do; installs nothing |
+| `agent-app install <id> \| --from <source>` | Install from the marketplace, a zip, a folder, GitHub or any git host — one pipeline for every source |
+| `agent-app <dir> export [--out <file.zip>]` | Write the app as a package zip that installs elsewhere |
+| `agent-app <dir> import` | Install a folder in place, through the same pipeline |
+
+* * *
+
+## Install: the marketplace and packages
+
+An app travels as a **package**: its directory tree, usually zipped, carrying the framework files and never its credentials, data, runtime state, dependencies or build output. Every source goes through one pipeline, so an app arrives the same way whichever harness installed it ([packaging spec](https://github.com/CraftOS-dev/Agent-App/blob/main/spec/v0_2/packaging.md)):
+
+`acquire → inspect → sanitize → revendor → customize → place → register → dependencies → gate → serve → open`
+
+```bash
+agent-app catalogue --search kanban                 # what the marketplace offers, and whether it runs here
+agent-app inspect kanban-board                       # stage it, say what it is; installs nothing
+agent-app install kanban-board --set APP_TITLE=Team  # the marketplace (catalogued: nothing more owed)
+agent-app install --from ./board.zip                 # a package zip (untrusted: walk-verify owed)
+agent-app install --from ./board                     # a folder (copied; the folder is left as it was)
+agent-app install --from github:owner/repo@main/apps/board
+agent-app install --from https://github.com/owner/repo/tree/main/apps/board
+agent-app install --from git+https://git.example.com/board.git#release
+agent-app ./board import                             # this folder, in place
+agent-app ./board export --out board.zip             # the other direction
+```
+
+Install flags: `--into <dir>` (absent or empty; default `$A2APP_HOME/apps/<name>`), `--name`, `--port`, `--blueprint <id>` (the local toolkit to re-vendor from), `--set KEY=VALUE` (repeatable), `--no-start` (install the files only; `serve --install` installs dependencies and launches later), `--open`, `--events` (one JSON line per step, then the result).
+
+What install guarantees:
+
+- **Nothing from the package runs before its dependencies step**, and what runs then is the *local* toolkit's pipeline: system files are replaced from a toolkit installed on this machine, chosen by the id the package records — never by a path it records, and never from inside the package.
+- **A failed step leaves nothing behind**: no registry entry, no app folder, no staging; an in-place import puts the folder back exactly as it was. The one exception is the gate: an app that fails it stays installed so it can be fixed, and the result says so.
+- **Archives are read defensively**: absolute paths, `..`, drives, links, encrypted entries and anything that would land outside the target are refused, and sizes are capped at 512 MiB while bytes arrive.
+- **Provenance is recorded** in the app's `manifest.json` as `source`: where it came from, the ref, the archive's SHA-256 or the git commit, and when.
+
+**Which marketplace.** `--source`, else `A2APP_MARKETPLACE`, else `marketplace` in `$A2APP_HOME/settings.json`, else `github:CraftOS-dev/agent-app-collection` — which alone falls back to `github:CraftOS-dev/living-ui-marketplace` when it cannot be read. Each is `github:<owner>/<repo>[@<ref>]` or a local directory holding `catalogue.json` and the app folders. `A2APP_MARKETPLACE_REF` sets the branch when the source names none.
+
+**Test only:** `A2APP_TEST_GITHUB_BASE=http://127.0.0.1:<port>` serves both GitHub's raw files and its branch archives from one local server, with GitHub's own paths below it. It accepts only a loopback `http://` origin, so it can never point an install at another host.
 
 * * *
 

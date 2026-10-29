@@ -215,7 +215,7 @@ export function renderPrompt(task: Task, ctx: PromptContext): string {
     ``,
     `Report as you work, and finish with exactly one terminal call:`,
     `  a2app ${ref} tasks progress ${task.id} --step "what you are doing" --percent 40`,
-    `  a2app ${ref} tasks complete ${task.id} --result '{"summary":"what changed"}'`,
+    `  a2app ${ref} tasks complete ${task.id} --summary "what changed"`,
     `  a2app ${ref} tasks complete ${task.id} --reason <machine_code>   (on failure)`,
     ...(ctx.closesOnExit
       ? [
@@ -353,9 +353,10 @@ async function deliverHttp(
  * stop being a title. An argument array reaches the binary verbatim, so the
  * worst a hostile payload can do is be read.
  *
- * `onHeartbeat` is called while the child runs and may ask for the run to be
- * abandoned — that is how a lost claim kills a run instead of letting it finish
- * against a task somebody else now owns.
+ * `onHeartbeat` is called while the child runs. `lost` abandons the run — that
+ * is how a lost claim kills a run instead of letting it finish against a task
+ * somebody else now owns. `settled` stops the heartbeats and lets the run exit
+ * on its own: the agent already reported its outcome and is only finishing up.
  */
 async function deliverHeadless(
   route: Extract<Route, { mode: "headless" }>,
@@ -363,7 +364,7 @@ async function deliverHeadless(
   cwd: string,
   credential: TaskCredential | null,
   timeoutMs: number,
-  onHeartbeat: () => Promise<boolean>,
+  onHeartbeat: () => Promise<Heartbeat>,
   heartbeatMs: number = HEARTBEAT_MS,
 ): Promise<Delivery> {
   const started = Date.now();
@@ -479,8 +480,12 @@ async function deliverHeadless(
     }, timeoutMs);
 
     beat = setInterval(() => {
-      void onHeartbeat().then((keep) => {
-        if (keep || settled) return;
+      void onHeartbeat().then((state) => {
+        if (settled || state === "alive") return;
+        if (state === "settled") {
+          clearInterval(beat);
+          return;
+        }
         if (child.pid !== undefined) killTreeForce(child.pid);
         finish({
           ok: false,
@@ -555,18 +560,43 @@ interface TaskCredential {
   token: string;
   credentialId: string;
   expiresAt: string;
+  /** who the run acts as: the person who queued the task */
+  principal: string;
+  principalName: string | null;
+  scopes: string[];
 }
+
+/**
+ * What a heartbeat found. `alive`: the claim is still ours. `settled`: the run
+ * itself completed or failed the task and is finishing up. `lost`: the task went
+ * back to the queue, to someone else, or was canceled.
+ */
+type Heartbeat = "alive" | "settled" | "lost";
+
+/** The statuses a run sets on its own task when it reports the outcome. */
+const SETTLED_BY_RUN: ReadonlySet<string> = new Set(["completed", "failed"]);
 
 /** Ask the app for this task's credential, or say why it gave none. */
 async function issueTaskCredential(ctx: BridgeContext, task: Task): Promise<TaskCredential | { refused: string }> {
   const res = await ctx.client.request("POST", `/api/_a2app/tasks/${encodeURIComponent(task.id)}/credential`, {
     agentName: `bridge:${ctx.profile.id}`,
   });
-  const body = res.json as { token?: unknown; credential?: { credentialId?: unknown; expiresAt?: unknown }; code?: unknown } | null;
+  const body = res.json as {
+    token?: unknown;
+    credential?: { credentialId?: unknown; expiresAt?: unknown; principal?: unknown; principalName?: unknown; scopes?: unknown };
+    code?: unknown;
+  } | null;
   const { token } = body ?? {};
-  const { credentialId, expiresAt } = body?.credential ?? {};
+  const { credentialId, expiresAt, principal, principalName, scopes } = body?.credential ?? {};
   if (res.ok && typeof token === "string" && typeof credentialId === "string" && typeof expiresAt === "string") {
-    return { token, credentialId, expiresAt };
+    return {
+      token,
+      credentialId,
+      expiresAt,
+      principal: typeof principal === "string" ? principal : (task.request.principal ?? "owner"),
+      principalName: typeof principalName === "string" ? principalName : null,
+      scopes: Array.isArray(scopes) ? scopes.filter((s): s is string => typeof s === "string") : [],
+    };
   }
   return { refused: `HTTP ${res.status}${typeof body?.code === "string" ? ` ${body.code}` : ""}` };
 }
@@ -604,6 +634,13 @@ export async function deliverAndSettle(ctx: BridgeContext, task: Task): Promise<
       ms: 0,
     };
   }
+  // The task's claim names the bridge's own credential, because the bridge is
+  // what claimed it. Who the run acts as is this credential, so say so where
+  // anyone reading the bridge's log will look.
+  log.info(
+    `task ${task.id} runs as ${issued.principalName ?? issued.principal} with its own credential ` +
+      `${issued.credentialId} (${issued.scopes.join(" ") || "no scopes"}), which ends with the task`,
+  );
   try {
     return await runAndSettle(ctx, task, issued);
   } finally {
@@ -625,18 +662,26 @@ async function runAndSettle(ctx: BridgeContext, task: Task, credential: TaskCred
   await ctx.client.progressTask(task.id, { step: `delivered to ${ctx.profile.id} (${ctx.route.mode})`, percent: 0 });
 
   /**
-   * Keep the claim alive; false means the app no longer agrees it is ours.
+   * Keep the claim alive.
    *
    * It carries no step. An agent that reports its own ("Writing triage notes")
    * is telling the person watching what it is doing, and a heartbeat every 20 s
    * that replaced it with "running in claude" made the app flip back and forth
    * between the two. With no step sent, the step stays whatever was said last:
    * the agent's, or "delivered to …" until it says anything.
+   *
+   * A refusal is read, not assumed. The app refuses progress on a task the run
+   * has already completed or failed, and the run is then only finishing up —
+   * killing it there cut off agents that had done their job. Only a task that
+   * went back to the queue, on to someone else, or was canceled is lost.
    */
-  const heartbeat = async (): Promise<boolean> => {
+  const heartbeat = async (): Promise<Heartbeat> => {
     const res = await ctx.client.progressTask(task.id, {}).catch(() => null);
-    if (res === null) return true; // a transient network blip is not a lost claim
-    return res.ok;
+    if (res === null || res.ok) return "alive"; // a transient network blip is not a lost claim
+    const now = await ctx.client.getTask(task.id).catch(() => null);
+    if (now === null) return "alive";
+    const current = now.ok ? ((now.json as Task | null) ?? null) : null;
+    return current !== null && SETTLED_BY_RUN.has(current.status) ? "settled" : "lost";
   };
 
   let delivery: Delivery;
@@ -825,7 +870,7 @@ export async function pumpOnce(
           `(delivery ${before + 1}). The app returns a claimed task after 60s without an update, so the run ` +
           `either never started or is working silently — a second run may now be in flight.\n` +
           `  The fix is on the harness's side: call \`tasks progress\` while it works, and one of ` +
-          `\`tasks complete --result\` / \`--reason\` when it is done.`,
+          `\`tasks complete --summary\` / \`--reason\` when it is done.`,
       );
     }
 

@@ -215,6 +215,8 @@ For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
   credential: on a single-user app the View is trusted, on a multi-user app the
   person's session carries it.
 - `GET /api/_a2app/tasks/<id>` — follow work queued for an agent.
+- `GET /api/_a2app/whoami` — who is using the app: `principalName` and `role` of
+  the signed-in person on a multi-user app; the owner on `authMode: none`.
 - `GET /api/_a2app` — identity (app name, versions, `authMode`, `accountUrl`).
 
 `ui/src/api.js` sends a person who is not signed in to the account page (on
@@ -429,8 +431,9 @@ also what stops a page whose DNS re-resolves to 127.0.0.1 from reading the app.
 - `install` = `node pb-serve.mjs --fetch`, then `npm --prefix ui install`. The
   fetch downloads the official **PocketBase v0.39.7** release for this OS/arch,
   refuses it unless its SHA-256 matches the one `pb-serve.mjs` carries, and puts
-  only the binary at `pb/pocketbase` (`.exe` on Windows); when that version is
-  already there it does nothing. An OS/arch the release does not ship is refused
+  only the binary at `pb/pocketbase` (`.exe` on Windows); when that exact binary
+  is already there (by its SHA-256, never by running it) it does nothing, and
+  anything else there is replaced. An OS/arch the release does not ship is refused
   by name: build v0.39.7 from source and place it there yourself. The adapter
   targets the 0.39 JSVM API (`onRecordCreateRequest`/`e.next()`, `$app.find*`,
   `collection.fields`, `e.requestInfo().body`), so **only 0.39.x is supported**

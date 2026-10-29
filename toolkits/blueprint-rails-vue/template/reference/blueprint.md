@@ -199,6 +199,10 @@ session cookie makes them (see **Accounts and whose records**).
 | `PATCH /api/collections/<entity>/records/<id>` | update |
 | `DELETE /api/collections/<entity>/records/<id>` | delete |
 | `GET /api/_a2app` | identity (app name, versions, `authMode`, `accountUrl`) |
+| `POST /api/ops/<name>` (JSON body: the operation's params) | run a declared operation; returns its runner's result. The View's only way to queue agent work: a runner's `trigger` (see App→agent triggers) |
+| `GET /api/_a2app/whoami` | who is using the app: `principalName` and `role` of the signed-in person on a multi-user app; the owner on `authMode: none` |
+
+Call both through `api()`, like the records: `api("/api/ops/request-triage", { method: "POST", body: JSON.stringify({ task: id }) })`. A same-origin call needs no credential; on a multi-user app the person's session makes it.
 
 Always render back what the server **stored**, not what you sent. Never render an
 unbounded collection — page with `perPage`.

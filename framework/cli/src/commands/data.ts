@@ -2,8 +2,8 @@
  * a2app <app> data schema
  * a2app <app> data <entity> schema
  * a2app <app> data <entity> [list|get <id>|create|update <id>|delete <id>]
- *                  [--field value ...] [--json '{...}'] [--filter '...'] [--sort '...']
- *                  [--limit N] [--idempotency-key KEY]
+ *                  [--field value ... | field=value ...] [--json '{...}'] [--filter '...']
+ *                  [--sort '...'] [--limit N] [--idempotency-key KEY]
  *
  * Raw record access, alongside the walk. The walk is for browsing and acting;
  * `data` is for filtered queries and direct writes — the two cases a screen is
@@ -23,20 +23,35 @@ import {
   renderEntityIndex,
   suggest,
 } from "@a2app/sdk";
-import { BODY_CONTROL_FLAGS, buildBody, flag, positionals } from "../lib/args.js";
+import { BODY_CONTROL_FLAGS, buildBody, coerceScalar, flag, positionals } from "../lib/args.js";
 import { UsageError } from "../lib/project.js";
 import { connect, labelFor } from "../lib/target.js";
 import { log } from "../lib/log.js";
 import { callerRefused, reportRefusal } from "../lib/refusal.js";
 
+/**
+ * `field=value` words, the other way a body is written (`answer="Tokyo"` sets
+ * what `--answer "Tokyo"` sets). Anything else in that place is a mistake to
+ * name, not to drop.
+ */
+function assignedFields(words: string[], example: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const word of words) {
+    const at = word.indexOf("=");
+    if (at <= 0) throw new UsageError(`"${word}" is not a field: write --${example} "…" or ${example}="…"`);
+    out[word.slice(0, at)] = coerceScalar(word.slice(at + 1));
+  }
+  return out;
+}
+
 export async function run(args: string[], app: string): Promise<number> {
   const [collection, verb = "list", id] = positionals(args);
   if (collection === undefined) {
     throw new UsageError(
-      "Usage: a2app <app> data schema | <entity> [schema|list|get <id>|create|update <id>|delete <id>] [--field value ...]",
+      "Usage: a2app <app> data schema | <entity> [schema|list|get <id>|create|update <id>|delete <id>] [--field value ... | field=value ...]",
     );
   }
-  const { client, target } = await connect(app);
+  const { client, target, caller } = await connect(app);
 
   // `data schema` is entity NAMES, grouped by module — never the whole model.
   // Field detail is one level in, which is what keeps this bounded at any app
@@ -58,7 +73,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // real reason instead.
     const refused = await callerRefused(client);
     if (refused !== null) {
-      reportRefusal(refused, "the app");
+      reportRefusal(refused, "the app", caller);
       return 1;
     }
     const index = await fetchEntityIndex(client);
@@ -75,9 +90,15 @@ export async function run(args: string[], app: string): Promise<number> {
   }
 
   const idempotencyKey = flag(args, "idempotency-key");
+  // A field of this entity, for the usage messages: an example the agent can use.
+  const example = schema.fields.find((f) => !f.readOnly)?.name ?? "field";
   // A record body reserves only --json / --idempotency-key; every other flag is a
   // field, so common field names like `status` are settable from the CLI.
   let body = buildBody(args, BODY_CONTROL_FLAGS);
+  if (verb === "create" || verb === "update") {
+    const assigned = assignedFields(positionals(args).slice(verb === "update" ? 3 : 2), example);
+    if (Object.keys(assigned).length > 0) body = { ...assigned, ...body };
+  }
 
   if (body !== undefined && (verb === "create" || verb === "update")) {
     const coerced = await coerceBody(client, new Map([[collection, schema]]), collection, body);
@@ -106,12 +127,12 @@ export async function run(args: string[], app: string): Promise<number> {
       res = await client.getRecord(collection, id);
       break;
     case "create":
-      if (body === undefined) throw new UsageError('create needs fields (e.g. --title "…") or --json \'{...}\'');
+      if (body === undefined) throw new UsageError(`create needs fields: --${example} "…" (or ${example}="…"), or --json '{...}'`);
       res = await client.createRecord(collection, body, idempotencyKey);
       break;
     case "update":
       if (id === undefined) throw new UsageError("update needs an <id>");
-      if (body === undefined) throw new UsageError("update needs fields or --json '{...}'");
+      if (body === undefined) throw new UsageError(`update <id> needs fields: --${example} "…" (or ${example}="…"), or --json '{...}'`);
       res = await client.updateRecord(collection, id, body, idempotencyKey);
       break;
     case "delete":
@@ -124,7 +145,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
   if (res.status >= 300) {
     const parsed = res.json as Record<string, unknown> | null;
-    reportRefusal(res, `${verb} ${collection}`);
+    reportRefusal(res, `${verb} ${collection}`, caller);
     const violations = parsed?.["violations"];
     if (Array.isArray(violations) && violations.length > 1) {
       for (const v of violations.slice(1) as { field?: string; expected?: string }[]) {

@@ -45,13 +45,13 @@ FRAMEWORK_SKILLS = ("creator", "modify", "importer", "operator", "walk-verify", 
 FRAMEWORK_VERBS = frozenset({
     "scaffold", "import", "export", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
     "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
-    "list", "global", "skills", "catalogue", "inspect", "install",
+    "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 })
 
 # The closed set of verbs that address every app rather than one, and so take
 # no app argument. Closed is what makes verb_of exact: it never has to inspect a
 # positional to guess what it is.
-REGISTRY_VERBS = frozenset({"list", "global", "skills", "catalogue", "inspect", "install"})
+REGISTRY_VERBS = frozenset({"list", "blueprints", "global", "skills", "catalogue", "inspect", "install"})
 
 # The toolkits the framework ships, offered in the manager's stack dropdown: the
 # same list as the TypeScript engine's. The CLI accepts any toolkit it can
@@ -362,11 +362,15 @@ def _complete_task(a: dict) -> list[str]:
 
 
 def _scaffold(a: dict) -> list[str]:
+    # A call without the blueprint reaches the CLI as one, which answers with
+    # the ids to choose from.
     argv = [_s(a["dir"]), "scaffold"]
     if a.get("blueprint") is not None:
         argv += ["--blueprint", _s(a["blueprint"])]
     if a.get("name") is not None:
         argv += ["--name", _s(a["name"])]
+    if a.get("authMode") is not None:
+        argv += ["--auth-mode", _s(a["authMode"])]
     return argv
 
 
@@ -505,8 +509,11 @@ def a2app_tools() -> list[Tool]:
              _obj({"dir": _DIR, "id": _STR, "result": {"type": "object"}, "reason": _STR}, ["dir", "id"]), "operate",
              _complete_task, "✅"),
         Tool("agent_app_build",
-             "Scaffold a new Agent App from a blueprint (writes the adapter app part + the ownership canon).",
-             _obj({"dir": _DIR, "blueprint": _STR, "name": _STR}, ["dir"]), "build", _scaffold, "🏗️"),
+             "Scaffold a new Agent App on a blueprint (writes the adapter app part + the ownership canon). "
+             "`agent-app blueprints` lists the ids. `authMode` is `multi-user` when more than one person will use the app "
+             "(sign-in, accounts, per-person records), else `none`; it is chosen here, once.",
+             _obj({"dir": _DIR, "blueprint": _STR, "name": _STR, "authMode": {"type": "string", "enum": ["none", "multi-user"]}},
+                  ["dir", "blueprint"]), "build", _scaffold, "🏗️"),
         Tool("agent_app_validate", "Run the validation + security gate on an Agent App.",
              _obj({"dir": _DIR, "noBuild": {"type": "boolean"}}, ["dir"]), "build",
              lambda a: [_s(a["dir"]), "validate", "--no-build"] if a.get("noBuild") else [_s(a["dir"]), "validate"], "🛡️"),

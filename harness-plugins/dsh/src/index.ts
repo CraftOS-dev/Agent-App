@@ -141,8 +141,13 @@ export function apply(ctx: Context): void {
     "Close a task you claimed, exactly once: `result` (e.g. {\"summary\": \"what changed\"}) when the work is " +
       "done, or `reason` (a machine code) when it failed."));
 
-  ctx.tools.register(cliTool("agent_app_build", { dir: DIR, blueprint: opt("blueprint id"), name: opt("app name") },
-    "Scaffold a new Agent App from a blueprint."));
+  ctx.tools.register(cliTool("agent_app_build",
+    {
+      dir: DIR,
+      blueprint: req("blueprint id (`agent-app blueprints` lists them)"),
+      name: opt("app name"),
+      authMode: { type: "string" as const, enum: ["none", "multi-user"], description: "multi-user when more than one person will use the app" },
+    }));
 
   ctx.tools.register(cliTool("agent_app_validate", { dir: DIR, noBuild: flag("skip the build step") },
     "Run the validation + security gate."));

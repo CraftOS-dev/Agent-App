@@ -4,10 +4,10 @@ import { log } from "../lib/log.js";
 import { reportRefusal } from "../lib/refusal.js";
 
 export async function run(_args: string[], app: string): Promise<number> {
-  const { client } = await connect(app);
+  const { client, caller } = await connect(app);
   const res = await client.request("GET", "/api/_a2app/whoami");
   if (!res.ok) {
-    reportRefusal(res, "whoami");
+    reportRefusal(res, "whoami", caller);
     return 1;
   }
   log.raw(JSON.stringify(res.json, null, 2));

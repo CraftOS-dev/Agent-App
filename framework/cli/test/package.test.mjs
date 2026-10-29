@@ -10,7 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -20,7 +20,7 @@ import { compatibility, matchesSearch, parseGithubShorthand, validateCatalogue }
 import { parseFrom } from "../dist/lib/sources.js";
 import { downloadBytes, downloadToFile, USER_AGENT } from "../dist/lib/download.js";
 import { PackageRefusedError, SourceNotFoundError, SourceUnreachableError } from "../dist/lib/packageErrors.js";
-import { installedToolkit, isToolkitId, resolveToolkit } from "../dist/lib/toolkit.js";
+import { installedToolkit, isToolkitId, resolveToolkit, vendorPaths } from "../dist/lib/toolkit.js";
 import { UsageError } from "../dist/lib/project.js";
 
 const base = mkdtempSync(join(tmpdir(), "a2app-package-"));
@@ -79,6 +79,31 @@ test("ignore rules: the patterns stacks actually write", () => {
     ["trailing", false, true],
   ];
   for (const [path, dir, want] of cases) assert.equal(isIgnored(rules, path, dir), want, `${path}${dir ? "/" : ""}`);
+});
+
+/* ------------------------------------- a toolkit packed into the CLI package */
+
+// npm never packs a `.gitignore`, so the bundled toolkits carry it as
+// `_gitignore`. Scaffolding writes it back under its real name, and the package
+// rules read it, so an installed CLI excludes what the stack says to exclude.
+test("a packed _gitignore is the template's .gitignore", () => {
+  const source = fresh();
+  put(source, "a2app.toolkit.json", JSON.stringify({ id: "blueprint-packed", template: "template" }));
+  put(source, "template/_gitignore", "pb/pocketbase.exe\n");
+  put(source, "template/ui/_gitignore", "dist/\n");
+  put(source, "template/manifest.json", "{}");
+  const tk = { source, manifest: { id: "blueprint-packed", template: "template" } };
+
+  const app = fresh();
+  vendorPaths(tk, app, ["."]);
+  assert.equal(readFileSync(join(app, ".gitignore"), "utf8"), "pb/pocketbase.exe\n");
+  assert.equal(readFileSync(join(app, "ui", ".gitignore"), "utf8"), "dist/\n");
+  assert.equal(existsSync(join(app, "_gitignore")), false);
+
+  const pkg = fresh();
+  put(pkg, "manifest.json", "{}");
+  put(pkg, "pb/pocketbase.exe", "MZ");
+  assert.deepEqual(strippable(pkg, exclusionRules(pkg, tk)), ["pb/pocketbase.exe"]);
 });
 
 /* ------------------------------------------------------- never carried (§1) */

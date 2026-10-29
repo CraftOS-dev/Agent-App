@@ -538,6 +538,7 @@ class Engine(unittest.TestCase):
             ["agent_app_complete_task", {"dir": "crm", "id": "T1", "result": {"summary": "done"}}],
             ["agent_app_complete_task", {"dir": "crm", "id": "T1", "reason": "blocked"}],
             ["agent_app_build", {"dir": "crm"}],
+            ["agent_app_build", {"dir": "crm", "blueprint": "blueprint-base", "name": "CRM", "authMode": "multi-user"}],
             ["agent_app_validate", {"dir": "crm", "noBuild": True}],
             ["agent_app_serve", {"dir": "crm", "install": True, "open": True}],
             ["agent_app_stop", {"dir": "crm"}],

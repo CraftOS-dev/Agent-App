@@ -3,7 +3,7 @@
  * own repository.
  *
  * A blueprint template declares its adapter as an ordinary registry dependency
- * (`"@a2app/adapter-core": "^0.1.0"`). That is the right thing to ship once the
+ * (`"@a2app/adapter-core": "^0.2.0"`). That is the right thing to ship once the
  * package is published — but while it is not, every app scaffolded outside the
  * repo's own workspace fails `npm install` with a 404, and therefore fails the
  * build gate on step one, before its author has written a line.

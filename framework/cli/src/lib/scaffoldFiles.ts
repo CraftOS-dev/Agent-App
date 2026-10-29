@@ -20,7 +20,7 @@ import { join } from "node:path";
  * A blueprint that ships its own guidance wins: an existing file is never
  * overwritten.
  */
-export function writeHarnessGuides(dir: string, name: string, fromBlueprint: boolean): void {
+export function writeHarnessGuides(dir: string, name: string): void {
   const agents = join(dir, "AGENTS.md");
   if (!existsSync(agents)) {
     writeFileSync(
@@ -39,11 +39,8 @@ export function writeHarnessGuides(dir: string, name: string, fromBlueprint: boo
         // The stack map comes first: before writing any code, an agent reads
         // `reference/blueprint.md` to learn this stack's file ownership, schema
         // API, operation wiring, UI kit, and gate — so the contract is never
-        // reverse-engineered from source. Only present when scaffolded from a
-        // blueprint (a blueprint-less app has no such file to point at).
-        ...(fromBlueprint
-          ? ["- `reference/blueprint.md` — YOUR STACK'S MAP: files you own vs. system-owned, schema/migration API, operations, UI kit, gate. Read this before writing code."]
-          : []),
+        // reverse-engineered from source.
+        "- `reference/blueprint.md` — YOUR STACK'S MAP: files you own vs. system-owned, schema/migration API, operations, UI kit, gate. Read this before writing code.",
         "- `AGENT_APP.md` — this app's index: plan, entities, operations, conventions, checklist.",
         "- `reference/requirements.md` — the binding spec of what this app must do.",
         "",
@@ -60,7 +57,7 @@ export function writeHarnessGuides(dir: string, name: string, fromBlueprint: boo
         "a2app . <module> <entity> <id>          # one record, and what its state allows",
         "a2app . <module> <entity> <id> <op> …   # invoke, at the path that identifies it",
         "a2app . --find <term>                   # search names, get locations",
-        "a2app . data <entity> list|create|…     # raw record access",
+        "a2app . data <entity> create --<field> \"…\"   # raw record access: list|get|create|update|delete",
         "```",
         "",
         "The CLI is a walk: each argument names a place in the app, and every screen",
@@ -72,7 +69,7 @@ export function writeHarnessGuides(dir: string, name: string, fromBlueprint: boo
         "## Change its code",
         "",
         "```bash",
-        "agent-app . dev          # boot the candidate on a hidden port, fresh migration-replayed DB",
+        "agent-app . dev          # boot the candidate on a hidden port, fresh migration-replayed DB (--install the first time)",
         "agent-app . validate     # the gate — must pass; measures the dev instance, records the pass",
         "# walk-verify: a verifier agent that is NOT the builder loads the walk-verify",
         "# skill and drives every reference/requirements.md Feature against the dev URL.",
@@ -100,11 +97,12 @@ export function writeHarnessGuides(dir: string, name: string, fromBlueprint: boo
 /**
  * Guarantee the ignore rules that keep runtime artifacts out of a repository.
  *
- * Blueprints ship their own `.gitignore`, but npm strips dotfiles named
- * `.gitignore` out of a published tarball, so a CLI installed with `npm i -g`
- * scaffolds an app carrying none at all — and the next `git add -A` publishes
- * the agent token, the principal password and the live database. The rules the
- * framework depends on are therefore written here, from the CLI, on every path.
+ * Blueprints ship their own `.gitignore` (packed as `_gitignore`, since npm
+ * strips the real name from a tarball), but an imported or adopted app may carry
+ * none, and an older one may lack a rule added since. Without these the next
+ * `git add -A` publishes the agent token, the principal password and the live
+ * database, so the rules the framework depends on are written here, from the
+ * CLI, on every path.
  *
  * Existing lines are kept and only missing ones appended: a blueprint's own
  * rules (node_modules, the PocketBase binary, __pycache__) are none of the

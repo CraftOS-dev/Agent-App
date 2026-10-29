@@ -95,6 +95,10 @@ class Actions(unittest.TestCase):
         self.assertEqual(self.ran(self.run_action("agent_app_find", dir="crm", term="invoice")), ("a2app", ["crm", "--find", "invoice"]))
         self.assertEqual(self.ran(self.run_action("agent_app_validate", dir="crm", no_build="true")), ("agent-app", ["crm", "validate", "--no-build"]))
         self.assertEqual(self.ran(self.run_action("agent_app_build", dir="crm", blueprint="blueprint-base")), ("agent-app", ["crm", "scaffold", "--blueprint", "blueprint-base"]))
+        self.assertEqual(
+            self.ran(self.run_action("agent_app_build", dir="crm", blueprint="blueprint-base", authMode="multi-user")),
+            ("agent-app", ["crm", "scaffold", "--blueprint", "blueprint-base", "--auth-mode", "multi-user"]),
+        )
 
     def test_marketplace_list_and_install_keep_craftbots_names(self) -> None:
         listed = self.run_action("agent_app_marketplace_list")

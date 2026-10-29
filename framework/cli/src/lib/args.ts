@@ -112,6 +112,16 @@ export function flagAll(args: string[], name: string): string[] {
   return out;
 }
 
+/**
+ * The scopes `--scopes` names, or `["*"]` when it names none. Separated by
+ * commas or spaces, and the flag may repeat: PowerShell turns an unquoted `a,b`
+ * into the single argument "a b" before the CLI sees it.
+ */
+export function scopesFlag(args: string[]): string[] {
+  const listed = flagAll(args, "scopes").flatMap((value) => value.split(/[\s,]+/)).filter((s) => s !== "");
+  return listed.length > 0 ? listed : ["*"];
+}
+
 /** Positionals: tokens that are neither a `--flag` nor a flag's value. */
 export function positionals(args: string[]): string[] {
   return args.filter((a, i) => !a.startsWith("--") && !(args[i - 1] ?? "").startsWith("--"));

@@ -14,7 +14,7 @@
  * person the agent acts for and hand it over as A2APP_TOKEN. An agent that can
  * reach a browser uses `a2app <app> login` instead, approved by the person.
  */
-import { flag, positionals } from "../lib/args.js";
+import { flag, positionals, scopesFlag } from "../lib/args.js";
 import { parseDuration } from "../lib/duration.js";
 import { log } from "../lib/log.js";
 import { adminClient, loadProject, UsageError } from "../lib/project.js";
@@ -71,7 +71,7 @@ async function list(client: A2AppClient): Promise<number> {
 }
 
 async function mint(client: A2AppClient, args: string[]): Promise<number> {
-  const scopes = (flag(args, "scopes") ?? "*").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const scopes = scopesFlag(args);
   const expiresIn = parseDuration(flag(args, "expires") ?? "30d", "expires");
   const principal = await principalFor(client, flag(args, "for") ?? "owner");
   const agentName = flag(args, "name");

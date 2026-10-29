@@ -40,8 +40,8 @@
  *
  * `node pb-serve.mjs --fetch` is the first half of `pipeline.install`: it puts
  * the pinned PocketBase release for this OS/arch at pb/pocketbase[.exe],
- * checked against the SHA-256 embedded below, and does nothing when that
- * version is already there. An installed app then runs with no manual step.
+ * checked against the SHA-256s embedded below, and does nothing when that
+ * exact binary is already there. An installed app then runs with no manual step.
  *
  * Why a launcher rather than raw commands in the manifest: `serve` spawns the
  * start command through the OS shell, and `pb/pocketbase serve --http
@@ -98,6 +98,22 @@ const RELEASE_SHA256 = {
   windows_amd64: "0f32dfda39949cfbec38ea18fe99f1e9e49350ce1efe87537591b44dcee51517",
   windows_arm64: "93ea40181210b1db7d7a885caf832cbd8945ab6ae1d43ed2c858bfc4390b4d26",
 };
+// SHA-256 of the binary inside each of those zips: what a binary already at
+// pb/pocketbase[.exe] must hash to before `--fetch` keeps it. A file is judged by
+// its bytes, never by running it — a binary that arrived inside a package would
+// otherwise be executed just to ask what version it is, and kept for saying the
+// right one.
+const BINARY_SHA256 = {
+  darwin_amd64: "21a04857ca5ff069ccdd274133b66316b2207226628b531c443683bd1c256af9",
+  darwin_arm64: "391caac919eebe71cf85a59183296ce5c9fd00d5e3e2c74be401d231fb282278",
+  linux_amd64: "dd6ebcb5a163e36b14454c45382fe8e17974aa9f4ffe3a6e4cca6d8528a26e29",
+  linux_arm64: "46aee8dcce801b0cfaa013e640346205ad462c03711820768ee762223aceecd4",
+  linux_armv7: "23571695eeb3be36a693fc6db03ccf1ddb92a8ec9f437899236d6196da23343a",
+  linux_ppc64le: "862885c8c4b83abb12aa1796381588c9b398fbe20c360e08429e574ac3678d5a",
+  linux_s390x: "5d182a1d9747a13b92670da83b2beceb915bece030fda308d8363cd7881f800d",
+  windows_amd64: "7072057ce3b5d2c94f91d203b11d5e4cbc0603e6a0f6ef411b99f06d44af3595",
+  windows_arm64: "785d1bee66a29459f90a8a7ed2bd0a119eae801805f80f4ca636803fdfb88a36",
+};
 /** A release zip is ~13 MB; anything far larger is not the release. */
 const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
@@ -127,18 +143,29 @@ function releaseTarget() {
   return Object.hasOwn(RELEASE_SHA256, target) ? target : null;
 }
 
+/** The SHA-256 of a file, or null when there is none. */
+function sha256Of(file) {
+  return existsSync(file) ? createHash("sha256").update(readFileSync(file)).digest("hex") : null;
+}
+
 /**
  * `--fetch`: download the pinned release for this OS/arch, refuse it unless its
  * SHA-256 is the embedded one, and put only the binary at pb/pocketbase[.exe],
- * executable. Nothing happens when that version is already there.
+ * executable. Nothing happens when that exact binary is already there.
  */
 async function fetchBinary() {
-  if (versionOf(binary) === POCKETBASE_VERSION) {
-    console.log(`PocketBase ${POCKETBASE_VERSION} is already at ${binary}`);
+  const target = releaseTarget();
+  if (target !== null && sha256Of(binary) === BINARY_SHA256[target]) {
+    console.log(`PocketBase ${POCKETBASE_VERSION} (${target}, SHA-256 verified) is already at ${binary}`);
     return;
   }
-  const target = releaseTarget();
   if (target === null) {
+    // No release to check against: a binary here is one this machine's owner
+    // built and placed by hand, as the error below asks.
+    if (versionOf(binary) === POCKETBASE_VERSION) {
+      console.log(`PocketBase ${POCKETBASE_VERSION} (built for this machine) is at ${binary}`);
+      return;
+    }
     throw new Error(
       `PocketBase ${POCKETBASE_VERSION} ships no build for ${process.platform}/${process.arch} ` +
         `(its release has ${Object.keys(RELEASE_SHA256).join(", ")}). Build v${POCKETBASE_VERSION} for this machine ` +
@@ -156,10 +183,14 @@ async function fetchBinary() {
 
   // Written beside the binary and checked to run before it takes the binary's
   // place, so a failed fetch never leaves a broken file where serve looks.
+  const extracted = zipEntry(zip, basename(binary));
+  if (createHash("sha256").update(extracted).digest("hex") !== BINARY_SHA256[target]) {
+    throw new Error(`the binary in ${asset} is not the pinned one. Nothing was installed.`);
+  }
   const partial = `${binary}.partial`;
   mkdirSync(pbDir, { recursive: true });
   try {
-    writeFileSync(partial, zipEntry(zip, basename(binary)));
+    writeFileSync(partial, extracted);
     chmodSync(partial, 0o755);
     const got = versionOf(partial);
     if (got !== POCKETBASE_VERSION) {

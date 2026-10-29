@@ -303,7 +303,10 @@ function describe(e, segments) {
         problems.push('operation "' + o.name + '" declares no typed params (declare {} if it takes none)');
       }
     }
-    return { modules: mods, operations: ops, entityModule: map, problems: problems };
+    // The app's id and name come from the manifest, as in identity — never from
+    // PocketBase's settings.meta.appName, which a fresh database answers "Acme".
+    const app = manifest ? { id: manifest.id, name: manifest.name || null } : null;
+    return { app: app, modules: mods, operations: ops, entityModule: map, problems: problems };
   }
 
   /* ------------------------------------------------------------- levels */
@@ -320,10 +323,7 @@ function describe(e, segments) {
     }
     return {
       level: "root",
-      app: {
-        id: $app.settings().meta.appName || "pocketbase_app",
-        name: $app.settings().meta.appName || null,
-      },
+      app: appPart.app,
       modules: rows,
       conventions: conventions(),
       next: ["describe/{module}", "describe?find={term}"],

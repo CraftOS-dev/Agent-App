@@ -25,10 +25,10 @@ A call whose CLI exits non-zero (1 rejected, 2 usage, 3 unreachable, or a CLI th
 
 ## Taking work from an app
 
-When the server starts it registers Claude Code with `agent-app <dir> bridge` (the service that starts a harness when an app queues work), as a `claude` profile in `$A2APP_HOME/harnesses.json` that replaces the framework's built-in one:
+`agent-app <dir> bridge` (the service that starts a harness when an app queues work) runs Claude Code through the framework's built-in `claude` profile:
 
 ```
-claude -p {prompt} --permission-mode dontAsk --allowedTools "Bash(a2app *)"
+claude --allowedTools "Bash(a2app:*)" --disallowedTools Edit Write NotebookEdit -p {prompt}
 ```
 
-The built-in runs `claude -p` with no permission flags, and print mode denies every Bash call that would prompt, so the agent could not run a single `a2app` command. `dontAsk` denies anything not listed instead of prompting, and the one rule lets the agent operate the app through the a2app CLI and nothing else. The entry is written once; if the file already has a `claude` profile (your own), it is kept. The outcome goes to stderr, since stdout carries JSON-RPC.
+Print mode denies any tool call that would prompt, so the grant is exactly the CLI the bridge's prompt names, and file edits are refused: a delivered task is done through the app's API, as the person who asked, with the task's own credential. This server registers nothing. A `claude` profile in `$A2APP_HOME/harnesses.json` (your own, or one an earlier version of this server wrote) replaces the built-in entirely; delete it to go back to the built-in.

@@ -22,7 +22,7 @@
  * The app records which toolkit it came from in `.a2app/toolkit.json`
  * `{ "id": "...", "source": "<abs path>" }` so sync commands can find it again.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertInside, assertRealInside, copyTree } from "./fsx.js";
@@ -34,6 +34,8 @@ export interface GateStep {
 
 export interface ToolkitManifest {
   id: string;
+  /** what the toolkit builds with, in a sentence or two */
+  description?: string;
   template?: string;
   adapterVersionFrom?: string;
   systemPaths: string[];
@@ -113,6 +115,32 @@ export function resolveToolkit(idOrPath: string, exclude: string[] = []): Resolv
 }
 
 /**
+ * Every toolkit a bare id can name here, each as {@link resolveToolkit} would
+ * resolve it: the first found in search order wins, sorted by id.
+ */
+export function availableToolkits(): ResolvedToolkit[] {
+  const found = new Map<string, ResolvedToolkit>();
+  for (const root of toolkitSearchRoots()) {
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      continue; // a search root that does not exist here
+    }
+    for (const name of names) {
+      const file = join(root, name, "a2app.toolkit.json");
+      if (found.has(name) || !isToolkitId(name) || !existsSync(file)) continue;
+      try {
+        found.set(name, { source: join(root, name), manifest: JSON.parse(readFileSync(file, "utf8")) as ToolkitManifest });
+      } catch {
+        /* an unreadable manifest is not a toolkit anyone can scaffold from */
+      }
+    }
+  }
+  return [...found.values()].sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
+}
+
+/**
  * Whether a value is a toolkit id as a package may name one: a bare folder
  * name. A package's `.a2app/toolkit.json` is untrusted, and {@link resolveToolkit}
  * reads anything starting with `.` or a drive as a path — so a package naming
@@ -139,6 +167,26 @@ export function installedToolkit(id: string, untrusted: string[] = []): Resolved
 /** The folder a toolkit's template files are copied from. */
 export function templateRoot(tk: ResolvedToolkit): string {
   return tk.manifest.template ? join(tk.source, tk.manifest.template) : tk.source;
+}
+
+/**
+ * npm never packs a file named `.gitignore`, so the toolkits bundled into the
+ * CLI package carry each one a second time under this name
+ * (scripts/bundle-blueprints.mjs). Copying a template writes it back as
+ * `.gitignore`, and reading a template's rules accepts either spelling.
+ */
+const PACKED_GITIGNORE = "_gitignore";
+
+/** A template entry's name in the app: the packed `.gitignore` gets its dot back. */
+function unpackName(name: string): string {
+  return name === PACKED_GITIGNORE ? ".gitignore" : name;
+}
+
+/** The template's own `.gitignore`, in whichever spelling this copy of the toolkit has. */
+export function templateIgnoreFile(tk: ResolvedToolkit): string {
+  const root = templateRoot(tk);
+  const plain = join(root, ".gitignore");
+  return existsSync(plain) ? plain : join(root, PACKED_GITIGNORE);
 }
 
 /** Read the toolkit an app was scaffolded from, re-resolving its source. */
@@ -178,7 +226,7 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
     if (!existsSync(src)) continue;
     const dest = assertRealInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
-    copyTree(src, dest);
+    copyTree(src, dest, unpackName);
     written.push(rel);
   }
   return written;

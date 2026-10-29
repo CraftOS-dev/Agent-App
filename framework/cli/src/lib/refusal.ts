@@ -7,11 +7,28 @@
 import type { A2AppClient, A2AppResponse } from "@a2app/sdk";
 import { log } from "./log.js";
 
+/** Who made a request, as far as the advice after a refusal depends on it. */
+export interface Caller {
+  /** the app's origin when it is reached by URL; null for an app on this machine */
+  remoteOrigin: string | null;
+  /** whether the request carried a credential at all */
+  sentCredential: boolean;
+}
+
 /** Report a refused response on stderr. */
-export function reportRefusal(res: A2AppResponse, what: string): void {
+export function reportRefusal(res: A2AppResponse, what: string, caller?: Caller): void {
   const body = res.json as { code?: unknown; message?: unknown; how?: unknown } | null;
   const message = typeof body?.message === "string" ? body.message : `HTTP ${res.status}`;
   log.error(typeof body?.code === "string" ? `${body.code}: ${message}` : `${what} answered HTTP ${res.status}`);
+  // An app's hint for a missing credential describes the token file on its own
+  // host, which only whoever runs the app can read. An agent that reached it by
+  // URL and sent nothing is told its own way in instead.
+  if (res.status === 401 && caller?.remoteOrigin != null && !caller.sentCredential) {
+    log.info(
+      `No credential for ${caller.remoteOrigin} is stored here: \`a2app ${caller.remoteOrigin} login\` asks the person you act for to approve this agent.`,
+    );
+    return;
+  }
   if (typeof body?.how === "string") log.info(body.how);
 }
 

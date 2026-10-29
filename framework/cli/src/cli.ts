@@ -19,13 +19,15 @@
  * this split adds is taught at the moment it is needed rather than surfacing as
  * "Unknown command".
  */
+import { readFileSync } from "node:fs";
 import { A2AppUnreachableError, PROTOCOL_VERSION } from "@a2app/sdk";
 import { EnvError, UsageError } from "./lib/project.js";
 import { ValuelessFlagError } from "./lib/args.js";
 import { log } from "./lib/log.js";
 import { SourceUnreachableError } from "./lib/packageErrors.js";
 
-export const VERSION = "0.1.0";
+/** This package's version, read from its own package.json (dist/ sits beside it). */
+export const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 /** Which binary owns a command. */
 export type Surface = "agent-app" | "a2app";
@@ -50,7 +52,12 @@ interface CommandMeta {
 
 const COMMANDS: Record<string, CommandMeta> = {
   // agent-app — the framework: build, evolve, and manage Agent Apps.
-  scaffold: { summary: "Scaffold a new Agent App (framework files + ownership canon)", surface: "agent-app", scope: "app", args: "[--blueprint <id>] [--name <name>] [--port <n>] [--auth-mode none|multi-user]" },
+  scaffold: {
+    summary: "Scaffold a new Agent App on a blueprint (`agent-app blueprints` lists them): framework files + ownership canon",
+    surface: "agent-app",
+    scope: "app",
+    args: "--blueprint <id> [--name <name>] [--port <n>] [--auth-mode none|multi-user]",
+  },
   import: {
     summary: "Install this folder in place through the install pipeline (untrusted): credentials, data and runtime state dropped, system files re-vendored from a local toolkit, fresh identity + port",
     surface: "agent-app",
@@ -61,7 +68,12 @@ const COMMANDS: Record<string, CommandMeta> = {
   validate: { summary: "Run the validation + security gate", surface: "agent-app", scope: "app" },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
-  serve: { summary: "Launch the app via its manifest pipeline as a managed background process (health-polled)", surface: "agent-app", scope: "app" },
+  serve: {
+    summary: "Launch the app via its manifest pipeline as a managed background process (health-polled); --install runs the pipeline's install first",
+    surface: "agent-app",
+    scope: "app",
+    args: "[--install] [--open]",
+  },
   stop: { summary: "Stop an app launched with `agent-app <app> serve` (--dev stops the dev instance instead)", surface: "agent-app", scope: "app", args: "[--dev]" },
   open: { summary: "Open a running app in a browser (--if-needed opens only when no tab is already on it)", surface: "agent-app", scope: "app", args: "[--if-needed] [--print-only]" },
   bridge: {
@@ -70,7 +82,13 @@ const COMMANDS: Record<string, CommandMeta> = {
     scope: "app",
     args: "[status|start|stop] [--harness <id>] [--once] [--dry-run]",
   },
-  dev: { summary: "Boot the candidate on a hidden port with a fresh, migration-replayed database; operate commands target it until promote", surface: "agent-app", scope: "app" },
+  dev: {
+    summary:
+      "Boot the candidate on a hidden port with a fresh, migration-replayed database; operate commands target it until promote. --install runs the pipeline's install first (a fresh scaffold has no dependencies yet)",
+    surface: "agent-app",
+    scope: "app",
+    args: "[--install]",
+  },
   promote: { summary: "Require a fresh gate pass, take the pre-promote backup, apply the new migrations to live, destroy the dev instance", surface: "agent-app", scope: "app" },
   backup: { summary: "Take an explicit backup of the live database", surface: "agent-app", scope: "app" },
   restore: { summary: "Restore a backup (captures current state, rolls back on failure)", surface: "agent-app", scope: "app", args: "[<backup-id>]" },
@@ -80,12 +98,19 @@ const COMMANDS: Record<string, CommandMeta> = {
     summary: "List, mint or revoke the agent credentials acting for this app's people (mint prints the token once)",
     surface: "agent-app",
     scope: "app",
-    args: "list | mint [--for <login>] [--scopes a,b] [--expires 30d] [--name <agent>] | revoke <id>",
+    args: "list | mint [--for <login>] [--scopes data:<entity>:read,op:<name>] [--expires 30d] [--name <agent>] | revoke <id>",
   },
   forget: { summary: "Drop an app from the registry, releasing its port (never touches files)", surface: "agent-app", scope: "app", args: "[--force]" },
-  remove: { summary: "Delete an app's files and drop it from the registry (data backed up first; needs --yes)", surface: "agent-app", scope: "app", args: "[--yes] [--force]" },
+  remove: {
+    summary:
+      "Delete an app's files and drop it from the registry; its data and backups are kept first under removed/ in the framework home (needs --yes)",
+    surface: "agent-app",
+    scope: "app",
+    args: "[--yes] [--force]",
+  },
   // agent-app registry commands: the machine's set of apps, not one app.
   list: { summary: "List every known Agent App with its port and derived status", surface: "agent-app", scope: "registry" },
+  blueprints: { summary: "List the blueprints an app can be scaffolded from, and what each is built with", surface: "agent-app", scope: "registry" },
   global: { summary: "Show the cross-app conventions (GLOBAL_AGENT_APP.md), seeding it on first use", surface: "agent-app", scope: "registry" },
   skills: { summary: "List the framework skills, or install them into a harness (--install <dir>)", surface: "agent-app", scope: "registry" },
   catalogue: {
@@ -110,16 +135,28 @@ const COMMANDS: Record<string, CommandMeta> = {
   },
   // a2app — the A2App protocol client. Operate only; never a build command.
   identity: { summary: "Probe the app's identity document", surface: "a2app", scope: "app" },
-  data: { summary: "Read/write records; `<app> data schema` lists entities", surface: "a2app", scope: "app", args: "<entity> <verb>" },
+  data: {
+    summary: "Read/write records; `<app> data schema` lists entities",
+    surface: "a2app",
+    scope: "app",
+    args: 'schema | <entity> [list|get <id>|create|update <id>|delete <id>] [--<field> "…" | <field>="…"]',
+  },
   whoami: { summary: "Show the calling credential's grant (scopes)", surface: "a2app", scope: "app" },
   context: { summary: "Show what the user is currently viewing", surface: "a2app", scope: "app" },
-  tasks: { summary: "Poll/claim/progress/complete the app→agent task queue", surface: "a2app", scope: "app" },
+  tasks: {
+    summary: "Poll/claim/progress/complete the app→agent task queue (no subcommand: the tasks waiting)",
+    surface: "a2app",
+    scope: "app",
+    args:
+      '[next [--wait <ms>] [--capability <name>] | get <id> | claim <id> | progress <id> --step "…" [--percent <n>] | ' +
+      "complete <id> --summary \"…\" | complete <id> --result '{…}' | complete <id> --reason <code> | cancel <id>]",
+  },
   events: { summary: "Poll the app's event log", surface: "a2app", scope: "app" },
   login: {
     summary: "Ask the person to approve this agent in the app; stores the credential it is given (never printed)",
     surface: "a2app",
     scope: "app",
-    args: "[--scopes a,b] [--expires 30d] [--name <agent>] [--no-browser] | --confirm <code>",
+    args: "[--scopes data:<entity>:read,data:<entity>:write,op:<name>] [--expires 30d] [--name <agent>] [--no-browser] | --confirm <code>",
   },
   logout: { summary: "Revoke and forget this agent's stored credential for the app", surface: "a2app", scope: "app" },
 };

@@ -21,6 +21,7 @@ import { credentialFor, originOf, pinAppId, pinnedAppId } from "./remote.js";
 import { credentialKey } from "./describeCache.js";
 import { homePath } from "./home.js";
 import { log } from "./log.js";
+import type { Caller } from "./refusal.js";
 
 /** An app on this machine: its files are here, so anything may be done to it. */
 export interface LocalTarget {
@@ -227,9 +228,11 @@ async function localClient(project: Project): Promise<{ client: A2AppClient; tok
  * `credential` names the credential the client presents, as a hash
  * ({@link credentialKey}) and never the token: describe answers for the caller,
  * so anything that remembers what describe said must remember it per credential.
+ * `caller` is what a refusal's advice depends on ({@link reportRefusal}).
  */
-export async function connect(app: string): Promise<{ target: Target; client: A2AppClient; credential: string }> {
+export async function connect(app: string): Promise<{ target: Target; client: A2AppClient; credential: string; caller: Caller }> {
   const target = resolveTarget(app);
   const { client, token } = await openClient(target);
-  return { target, client, credential: credentialKey(token) };
+  const caller = { remoteOrigin: target.kind === "remote" ? target.origin : null, sentCredential: token !== null };
+  return { target, client, credential: credentialKey(token), caller };
 }

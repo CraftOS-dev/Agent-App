@@ -390,7 +390,7 @@ async function register(
   writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
   mintAgentToken(dir);
   ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
-  writeHarnessGuides(dir, identity.name, true);
+  writeHarnessGuides(dir, identity.name);
   for (const dep of linkLocalPackages(dir, tk.source, { relink: true })) {
     log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
   }

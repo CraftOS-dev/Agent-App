@@ -67,6 +67,11 @@ export function takeBackup(projectDir: string, id: string): string {
   return dest;
 }
 
+/** The folder an app's backups live in, inside the app. */
+export function backupsDir(projectDir: string): string {
+  return join(projectDir, BACKUP_ROOT);
+}
+
 /** List backup ids. By default hides internal safety snapshots (pre-restore /
  *  pre-promote) and staging temps, so `restore` never defaults to one. */
 export function listBackups(projectDir: string, opts: { includeInternal?: boolean } = {}): string[] {
@@ -229,14 +234,14 @@ export function clearGatePass(projectDir: string): void {
  * everywhere it risks an inconsistent snapshot. Confirmed by asking the port
  * whether THIS app is answering there.
  */
-export async function assertNotServing(project: Project): Promise<void> {
+export async function assertNotServing(project: Project, action: string): Promise<void> {
   const port = project.manifest.port;
   if (port === undefined) return;
   const servingId = await identifyApp(port);
   if (servingId === project.manifest.id) {
     throw new EnvError(
       `"${project.manifest.name}" is currently serving on port ${port}. Stop it first ` +
-        "(`agent-app stop`) before backup/restore/promote — mutating its data directory " +
+        `(\`agent-app <app> stop\`), then ${action} — changing its data directory ` +
         "while it is running risks corruption (open file handles, especially on Windows).",
     );
   }

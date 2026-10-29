@@ -72,13 +72,13 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
 export const FRAMEWORK_VERBS = new Set([
   "scaffold", "import", "export", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
   "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
-  "list", "global", "skills", "catalogue", "inspect", "install",
+  "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 ]);
 
 /** The closed set of verbs that address every app rather than one, and so take
  *  no app argument (framework spec 5.1). Closed is what makes {@link verbOf}
  *  exact: it never has to inspect a positional to guess what it is. */
-export const REGISTRY_VERBS = new Set(["list", "global", "skills", "catalogue", "inspect", "install"]);
+export const REGISTRY_VERBS = new Set(["list", "blueprints", "global", "skills", "catalogue", "inspect", "install"]);
 
 /**
  * The verb in an app-first argv. Both CLIs are written `<binary> <app> <verb>
@@ -313,12 +313,26 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
     },
     {
       name: "agent_app_build",
-      description: "Scaffold a new Agent App from a blueprint (writes the adapter app part + the ownership canon).",
-      parameters: obj({ dir: DIR, blueprint: { type: "string" }, name: { type: "string" } }, ["dir"]),
+      description:
+        "Scaffold a new Agent App on a blueprint (writes the adapter app part + the ownership canon). " +
+        "`agent-app blueprints` lists the ids. `authMode` is `multi-user` when more than one person will use the app " +
+        "(sign-in, accounts, per-person records), else `none`; it is chosen here, once.",
+      parameters: obj(
+        {
+          dir: DIR,
+          blueprint: { type: "string" },
+          name: { type: "string" },
+          authMode: { type: "string", enum: ["none", "multi-user"] },
+        },
+        ["dir", "blueprint"],
+      ),
       handler: (a) => {
+        // A call without the blueprint reaches the CLI as one, which answers
+        // with the ids to choose from.
         const argv = [String(a.dir), "scaffold"];
         if (a.blueprint != null) argv.push("--blueprint", String(a.blueprint));
         if (a.name != null) argv.push("--name", String(a.name));
+        if (a.authMode != null) argv.push("--auth-mode", String(a.authMode));
         return build(argv);
       },
     },

@@ -12,7 +12,7 @@ import { compareCanon, computeSystemHashes, hasCanon } from "./canon.js";
 import { isIgnored, readIgnoreFile, type IgnoreRule } from "./ignore.js";
 import { readJsonFile } from "./json.js";
 import { PackageRefusedError } from "./packageErrors.js";
-import { templateRoot, type ResolvedToolkit } from "./toolkit.js";
+import { templateIgnoreFile, type ResolvedToolkit } from "./toolkit.js";
 
 /* ---------------------------------------------------------- never carried */
 
@@ -43,7 +43,7 @@ export interface ExclusionRules {
  */
 export function exclusionRules(root: string, toolkit: ResolvedToolkit | null): ExclusionRules {
   const ignore = [readIgnoreFile(join(root, ".gitignore"))];
-  if (toolkit !== null) ignore.push(readIgnoreFile(join(templateRoot(toolkit), ".gitignore")));
+  if (toolkit !== null) ignore.push(readIgnoreFile(templateIgnoreFile(toolkit)));
   const declared = toolkit?.manifest.lifecycle?.dataDir;
   const dataDir = declared === undefined ? "" : declared.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
   return { dataDir: dataDir === "" ? null : dataDir, ignore };

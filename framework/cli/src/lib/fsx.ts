@@ -119,8 +119,11 @@ function syncDir(dir: string): void {
  * for anyone whose checkout lives under a path like `C:\Users\...\デスクトップ`.
  * A plain readdir/copyFile walk has no such limit. Matches the native defaults:
  * overwrites existing entries, and copies symlinks as symlinks.
+ *
+ * `rename` maps the name of each entry found inside a copied directory to the
+ * name it is written under.
  */
-export function copyTree(src: string, dest: string): void {
+export function copyTree(src: string, dest: string, rename: (name: string) => string = (name) => name): void {
   // cpSync refuses to copy a directory into itself (ERR_FS_CP_EINVAL). Dropping
   // that check does not merely lose an error message: the walk would copy the
   // destination it is creating, on and on, until the disk or the path limit
@@ -153,7 +156,7 @@ export function copyTree(src: string, dest: string): void {
   }
   mkdirSync(dest, { recursive: true });
   for (const entry of readdirSync(src, { withFileTypes: true })) {
-    copyTree(join(src, entry.name), join(dest, entry.name));
+    copyTree(join(src, entry.name), join(dest, rename(entry.name)), rename);
   }
 }
 

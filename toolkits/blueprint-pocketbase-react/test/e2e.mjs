@@ -113,6 +113,16 @@ try {
     const offline = `data:text/javascript,${encodeURIComponent("globalThis.fetch = () => Promise.reject(new Error('the network is off in this test'));")}`;
     const fetched = await cli(join(dir, "pb-serve.mjs"), ["--fetch"], env, ["--import", offline]);
     check("with the pinned PocketBase in place, install's fetch downloads nothing", [fetched.code, fetched.stderr.trim()], [0, ""]);
+
+    // Anything else at that path is replaced, judged by its SHA-256 and never
+    // run: a binary that came inside a package must not be executed to ask its
+    // version. Offline, the replacement fails instead of downloading.
+    const bin = join(dir, "pb", process.platform === "win32" ? "pocketbase.exe" : "pocketbase");
+    const pinned = readFileSync(bin);
+    writeFileSync(bin, "not the pinned binary");
+    const planted = await cli(join(dir, "pb-serve.mjs"), ["--fetch"], env, ["--import", offline]);
+    ok("a binary that is not the pinned one is not kept", planted.code !== 0 && /could not download/.test(planted.stderr));
+    writeFileSync(bin, pinned);
   }
 
   await start();
@@ -221,6 +231,11 @@ try {
     ok("…and whose it is is not a client's to write", reowned.status === 400 && /read_only_field/.test(reowned.json?.message ?? ""));
     const described = (await http("GET", `${base}/api/_a2app/describe/planning/tasks`)).json;
     check("describe says so", [described?.ownedBy, described?.fields?.owner?.readOnly], ["owner", true]);
+    // A fresh database names itself "Acme" in PocketBase's settings; the app's
+    // name is the manifest's, on the root screen as in its identity.
+    const root = (await http("GET", `${base}/api/_a2app/describe`)).json;
+    const identity = (await http("GET", `${base}/api/_a2app`)).json;
+    check("the root screen names the app as its identity does", root?.app, identity?.app);
     await http("DELETE", `${records}/${created.json?.id}`, { headers: agent });
   }
 

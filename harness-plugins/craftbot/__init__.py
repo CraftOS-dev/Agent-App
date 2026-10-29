@@ -240,9 +240,14 @@ def agent_app_poll_tasks(input_data: dict) -> dict:
 
 @action(
     name="agent_app_build",
-    description="Scaffold a new Agent App from a blueprint (framework files + ownership canon).",
+    description="Scaffold a new Agent App on a blueprint (framework files + ownership canon). The blueprint is required.",
     mode="CLI", action_sets=["agent_app"], parallelizable=False,
-    input_schema={"dir": _DIR, "blueprint": {"type": "string", "description": "Blueprint id, e.g. blueprint-react-node."}, "name": {"type": "string", "description": "App name."}},
+    input_schema={
+        "dir": _DIR,
+        "blueprint": {"type": "string", "description": "Blueprint id, e.g. blueprint-react-node (`agent-app blueprints` lists them)."},
+        "name": {"type": "string", "description": "App name."},
+        "authMode": {"type": "string", "enum": ["none", "multi-user"], "description": "multi-user when more than one person will use the app."},
+    },
     output_schema=_OUT,
 )
 def agent_app_build(input_data: dict) -> dict:
@@ -251,6 +256,8 @@ def agent_app_build(input_data: dict) -> dict:
         a += ["--blueprint", str(input_data["blueprint"])]
     if input_data.get("name"):
         a += ["--name", str(input_data["name"])]
+    if input_data.get("authMode"):
+        a += ["--auth-mode", str(input_data["authMode"])]
     return _build(a)
 
 

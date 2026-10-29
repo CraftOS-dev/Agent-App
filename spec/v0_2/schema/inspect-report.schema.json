@@ -52,6 +52,7 @@
     "capabilities": { "type": ["object", "null"] },
     "strips": { "type": "array", "items": { "type": "string" }, "description": "root-relative paths; folders end in `/`" },
     "placeholders": { "type": "array", "items": { "type": "string" } },
-    "warnings": { "type": "array", "items": { "type": "string" } }
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "kept": { "type": "string", "description": "--keep: where the source was kept, as a package would carry it" }
   }
 }

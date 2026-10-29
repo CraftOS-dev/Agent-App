@@ -98,7 +98,7 @@ const COMMANDS: Record<string, CommandMeta> = {
     summary: "Stage an app (catalogue id or --from), report what it is and what installing it would do; installs nothing",
     surface: "agent-app",
     scope: "registry",
-    args: "<catalogue id> [--source <marketplace>] | --from <zip | folder | github:… | git+…>",
+    args: "<catalogue id> [--source <marketplace>] | --from <zip | folder | github:… | git+…>  [--keep <dir>]",
   },
   install: {
     summary: "Install an app from the marketplace, or --from a zip, folder, GitHub repo or git URL (one pipeline for every source)",

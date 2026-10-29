@@ -95,13 +95,13 @@ For a CraftBot Living UI app, or foreign code the person wants rebuilt as an
 Agent App. **Tell the person the cost first:** nothing of the original code runs
 afterward; its behaviour is re-implemented.
 
-1. **Get the source tree.** A folder or a git repository as it is; a zip,
-   extracted; a marketplace Living UI app, its `folder` in the marketplace's
-   repository (`source.location` in the inspect report, at the entry's ref).
-2. **Scaffold** a new app on the blueprint that fits what it does:
+1. **Scaffold** a new app on the blueprint that fits what it does:
    `agent-app <dir> scaffold --blueprint <id>`.
-3. **Keep the original read-only** in `<dir>/reference/source/`: read it, never
-   edit it, never run it.
+2. **Keep the original as a read-only reference** — the CLI fetches it, from
+   any source, without its credentials, data or build output:
+   `agent-app inspect <catalogue id> --keep <dir>/reference/source`, or
+   `agent-app inspect --from <source> --keep <dir>/reference/source`.
+   Read it; never edit it, never run it.
 4. **Synthesize `reference/requirements.md` from it** — its screens, its data,
    what each action does — and build it with the **creator** skill: feature by
    feature under the ownership rule, `agent-app <dir> validate`, launch, and a

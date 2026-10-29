@@ -209,6 +209,7 @@ put(market, "round-trip/reference/title.md", "# {{APP_TITLE}}\n");
 put(market, "round-trip/thumbnail.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x7b, 0x7b]));
 put(market, "kanban-online/manifest.json", JSON.stringify({ livingUIVersion: 2, name: "{{PROJECT_NAME}}", authMode: "multi-user", port: "{{PORT}}" }));
 put(market, "kanban-online/frontend/index.html", "<title>{{PROJECT_NAME}}</title>");
+put(market, "kanban-online/.superuser", JSON.stringify({ email: "a@b.c", password: "published-by-mistake" }));
 put(market, "plain-site/index.html", "<h1>hello</h1>");
 cpSync(pkgTree, join(market, "needs-kit"), { recursive: true });
 put(market, "needs-kit/.a2app/toolkit.json", JSON.stringify({ id: "blueprint-nope" }));
@@ -411,6 +412,17 @@ test("inspect: a Living UI app is classified and routed, not installable", async
   const result = JSON.parse((await run(["install", "kanban-online", "--no-start"], 1)).stdout);
   assert.deepEqual({ ok: result.ok, step: result.step, kind: result.kind, routes: result.routes }, { ok: false, step: "inspect", kind: "living-ui", routes: ["convert"] });
   assertNothingLeft(before, "living-ui install");
+});
+
+test("inspect --keep keeps a source to convert from, as a package would carry it", async () => {
+  const kept = join(base, "kept-kanban");
+  const report = json(await run(["inspect", "kanban-online", "--keep", kept]));
+  assert.equal(report.kept, kept);
+  assert.equal(report.kind, "living-ui");
+  assert.equal(read(kept, "frontend", "index.html"), "<title>{{PROJECT_NAME}}</title>", "the source, untouched");
+  assert.ok(existsSync(join(kept, "manifest.json")));
+  assert.ok(!existsSync(join(kept, ".superuser")), "never its credentials");
+  await run(["inspect", "kanban-online", "--keep", kept], 2);
 });
 
 test("inspect: a foreign tree is classified and routed", async () => {

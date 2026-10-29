@@ -41,6 +41,8 @@ export interface InspectReport {
   strips: string[];
   placeholders: string[];
   warnings: string[];
+  /** `--keep`: where the source was kept */
+  kept?: string;
 }
 
 export interface Inspection {

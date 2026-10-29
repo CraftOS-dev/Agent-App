@@ -54,7 +54,7 @@ Reserved protocol segments (never module names): `data`, `identity`, `whoami`, `
 | `agent-app skills [--install <dir>]` | List the framework skills, or install them into a harness |
 | `agent-app <dir> bridge [status\|start\|stop]` | The app→agent direction: watch this app's task queue, claim what appears, and trigger an agent harness by the deepest route it offers — see [Bridge](#bridge-the-appagent-direction) |
 | `agent-app catalogue [--search <words>] [--source <marketplace>]` | The marketplace's apps, each marked `compatible` (or not, and why) without downloading it — see [Install](#install-the-marketplace-and-packages) |
-| `agent-app inspect <id> \| --from <source>` | What a package is and what installing it would do; installs nothing |
+| `agent-app inspect <id> \| --from <source> [--keep <dir>]` | What a package is and what installing it would do; installs nothing. `--keep` keeps the source there (as a package carries it), the reference a conversion rebuilds from |
 | `agent-app install <id> \| --from <source>` | Install from the marketplace, a zip, a folder, GitHub or any git host — one pipeline for every source |
 | `agent-app <dir> export [--out <file.zip>]` | Write the app as a package zip that installs elsewhere |
 | `agent-app <dir> import` | Install a folder in place, through the same pipeline |

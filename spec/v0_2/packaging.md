@@ -130,7 +130,7 @@ Every source goes through the same steps, in this order. A step that fails stops
 
 ## 5. Inspect
 
-`agent-app inspect <catalogue id> [--source <marketplace>]` and `agent-app inspect --from <source>` stage the source, classify it, report, and delete the staging. Nothing is installed and nothing from the source runs. The report (schema `inspect-report.schema.json`):
+`agent-app inspect <catalogue id> [--source <marketplace>]` and `agent-app inspect --from <source>` stage the source, classify it, report, and delete the staging. Nothing is installed and nothing from the source runs. With `--keep <dir>` (absent or empty), the source is also kept there exactly as a package would carry it — no credentials, secrets, runtime state, data, `.git/`, `node_modules/` or build output — as the read-only reference a conversion rebuilds from (§7); the report gains `kept`. The report (schema `inspect-report.schema.json`):
 
 | Field | Meaning |
 |---|---|

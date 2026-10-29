@@ -22,11 +22,13 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, rmSync } fro
 import { dirname, join, resolve } from "node:path";
 import { openUrl } from "../commands/open.js";
 import { serveApp } from "../commands/serve.js";
+import { stopServed } from "../commands/stop.js";
 import { validateApp, type ValidateOutcome } from "../commands/validate.js";
 import { writeSystemHashes } from "./canon.js";
 import { mintAgentToken } from "./credential.js";
 import { appCommand } from "./delivery.js";
 import { assertRealInside, copyTree } from "./fsx.js";
+import { runAccessGate, runBudgetGate, type GateError, type GateUnchecked } from "./gate.js";
 import { homePath, writeFileAtomic } from "./home.js";
 import { inspectStaged, type InspectReport } from "./inspect.js";
 import { readJsonFile } from "./json.js";
@@ -487,12 +489,18 @@ export async function install(opts: InstallOptions): Promise<number> {
     progress.start("gate");
     let gate: ValidateOutcome;
     try {
-      gate = await validateApp(project, opts.start ? { skipInstall: true } : { skipBuild: true });
+      // With the app about to start, its running-app checks run once it is up
+      // (after serve); without that, the gate reports them unchecked.
+      gate = await validateApp(project, opts.start ? { skipInstall: true, skipRunningChecks: true } : { skipBuild: true });
     } catch (err) {
       progress.failed("gate", { error: (err as Error).message });
       throw new StepFailed("gate", err);
     }
-    const gateResult = { ok: gate.ok, ...(gate.ok ? {} : { failures: gate.failures }), ...(gate.unchecked.length > 0 ? { unchecked: gate.unchecked } : {}) };
+    let gateResult: { ok: boolean; failures?: GateError[]; unchecked?: GateUnchecked[] } = {
+      ok: gate.ok,
+      ...(gate.ok ? {} : { failures: gate.failures }),
+      ...(gate.unchecked.length > 0 ? { unchecked: gate.unchecked } : {}),
+    };
     const next: string[] = [];
     const base = { id, name: identity.name, dir, port };
 
@@ -522,6 +530,28 @@ export async function install(opts: InstallOptions): Promise<number> {
         (r) => ({ url: r["url"] }),
       );
       url = String(served["url"]);
+
+      // The gate's running-app checks (the describe budget, and who a
+      // multi-user app answers) need the app up, so they run now that it
+      // serves: an app that answers strangers must not stay up because it was
+      // installed.
+      {
+        const running = loadProject(dir);
+        const checks = [await runBudgetGate(running), await runAccessGate(running)];
+        const failures = checks.flatMap((c) => c.errors);
+        const unchecked = checks.flatMap((c) => c.unchecked);
+        gateResult = { ok: failures.length === 0, ...(failures.length > 0 ? { failures } : {}), ...(unchecked.length > 0 ? { unchecked } : {}) };
+        if (failures.length > 0) {
+          await stopServed(running);
+          keep(placement);
+          next.push(`fix what the gate reports, then run ${appCommand(dir, "validate")} and ${appCommand(dir, "serve")}`);
+          if (trust === "untrusted") next.push(walkVerifyStep());
+          progress.skipped("open", "the running app failed its gate, so it was stopped");
+          progress.result({ ok: false, ...base, trust, source: readJsonFile<Manifestish>(join(dir, "manifest.json")).source, gate: gateResult, served: false, next });
+          log.error(`installed "${identity.name}" at ${dir}, but the running app fails its gate — it was stopped, and stays registered so it can be fixed`);
+          return 1;
+        }
+      }
     } else {
       progress.skipped("serve", "--no-start");
       next.push(`${appCommand(dir, "serve --install")}   (installs its dependencies, builds and launches it)`);

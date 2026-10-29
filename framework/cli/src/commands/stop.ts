@@ -62,14 +62,30 @@ export async function run(args: string[], app: string): Promise<number> {
         `  Abandoning the change?  ${appCommand(app, "stop --dev")}`,
     );
   }
+  const outcome = await stopServed(project, app);
+  log.raw(JSON.stringify(outcome, null, 2));
+  return outcome.ok ? 0 : 1;
+}
+
+/** What stopping the live app did: the result `stop` prints. */
+export type StopOutcome =
+  | { ok: true; stopped: number | null; bridge: ReturnType<typeof inspectLocalBridge> }
+  | { ok: false; stopped: null; pid: number };
+
+/**
+ * Stop the live app launched by `serve`, and report what happened without
+ * printing it, so a caller with a result of its own (install) can stop an app
+ * and still answer with one JSON document.
+ */
+export async function stopServed(project: ReturnType<typeof loadProject>, app: string = project.dir): Promise<StopOutcome> {
   const serveLock = join(project.dir, ".a2app", "serve.lock");
 
-  return withLock(serveLock, async () => {
+  return withLock(serveLock, async (): Promise<StopOutcome> => {
     const servePath = join(project.dir, ".a2app", "serve.json");
     // A bridge is not part of the app's process tree and `stop` leaves it up:
     // it picks work up again when the app is back. Say so, or a person who
     // stopped "the app" believes nothing of it is still running.
-    const reportStopped = (stopped: number | null): void => {
+    const stoppedOutcome = (stopped: number | null): StopOutcome => {
       const bridge = inspectLocalBridge(project.dir);
       if (bridge.running !== null) {
         log.info(
@@ -77,7 +93,7 @@ export async function run(args: string[], app: string): Promise<number> {
             `Stop it: ${appCommand(app, "bridge stop")}`,
         );
       }
-      log.raw(JSON.stringify({ ok: true, stopped, bridge }, null, 2));
+      return { ok: true, stopped, bridge };
     };
 
     const clearRecord = async (): Promise<void> => {
@@ -98,8 +114,7 @@ export async function run(args: string[], app: string): Promise<number> {
 
     if (!existsSync(servePath)) {
       log.info("not serving (no .a2app/serve.json)");
-      reportStopped(null);
-      return 0;
+      return stoppedOutcome(null);
     }
 
     const rec = (() => {
@@ -114,8 +129,7 @@ export async function run(args: string[], app: string): Promise<number> {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1) {
       log.warn(`serve.json has no usable pid — clearing the record without killing anything.`);
       await clearRecord();
-      reportStopped(null);
-      return 0;
+      return stoppedOutcome(null);
     }
 
     // PID-reuse guard: only kill when we can confirm THIS app is the one on its
@@ -129,8 +143,7 @@ export async function run(args: string[], app: string): Promise<number> {
         `this app is not answering on port ${port} (recorded pid ${pid}) — clearing a stale serve record without killing.`,
       );
       await clearRecord();
-      reportStopped(null);
-      return 0;
+      return stoppedOutcome(null);
     }
 
     // Graceful, then force.
@@ -145,13 +158,11 @@ export async function run(args: string[], app: string): Promise<number> {
       // Do NOT clear the record on a failed kill: reporting "stopped" while the
       // process is still alive is the failure mode this guards against.
       log.error(`could not stop pid ${pid} — it is still running. Kept ${servePath} for a retry.`);
-      log.raw(JSON.stringify({ ok: false, stopped: null, pid }, null, 2));
-      return 1;
+      return { ok: false, stopped: null, pid };
     }
 
     await clearRecord();
     log.ok(`stopped (pid ${pid})`);
-    reportStopped(pid);
-    return 0;
+    return stoppedOutcome(pid);
   });
 }

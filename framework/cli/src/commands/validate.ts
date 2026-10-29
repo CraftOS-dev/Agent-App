@@ -22,6 +22,8 @@ export interface ValidateOptions {
   skipBuild?: boolean;
   /** the caller has just run `pipeline.install`; the build step runs only `pipeline.build` */
   skipInstall?: boolean;
+  /** the caller runs the running-app checks itself once the app is up (install) */
+  skipRunningChecks?: boolean;
 }
 
 /**
@@ -41,8 +43,9 @@ export async function validateApp(project: Project, opts: ValidateOptions = {}):
   // step has already failed: a broken build would report every level
   // unreachable and bury the real cause.
   const none = { errors: [], unchecked: [] };
-  const budget = errors.length === 0 ? await runBudgetGate(project) : none;
-  const access = errors.length === 0 ? await runAccessGate(project) : none;
+  const running = errors.length === 0 && opts.skipRunningChecks !== true;
+  const budget = running ? await runBudgetGate(project) : none;
+  const access = running ? await runAccessGate(project) : none;
   errors.push(...budget.errors, ...access.errors);
   const unchecked = [...budget.unchecked, ...access.unchecked];
 

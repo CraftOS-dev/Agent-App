@@ -3,8 +3,9 @@
  *
  * The hooks only run inside `pocketbase serve` (Goja, not Node), so `node
  * --check` and the rules self-test cannot tell whether they work. This scaffolds
- * a fresh app with the real CLI, boots it with the launcher the pipeline uses,
- * and drives it over HTTP and through the `a2app` CLI: access from foreign
+ * a fresh app with the real CLI, checks that the pipeline's install finds the
+ * binary in place, boots the app with the launcher the pipeline uses, and
+ * drives it over HTTP and through the `a2app` CLI: access from foreign
  * origins and programs, who is calling (protocol 0.2: the admin credential,
  * delegated credentials held to their scopes, device sign-in approved by the
  * View and confirmed by the agent, whose records), operations and approval,
@@ -16,10 +17,12 @@
  *
  *   POCKETBASE_BIN=/path/to/pocketbase node test/e2e.mjs
  *
- * Needs a PocketBase 0.26.x binary and a built CLI (`pnpm -r build`). Without
+ * Needs the PocketBase binary the blueprint pins (v0.39.7, what `node
+ * pb-serve.mjs --fetch` downloads) and a built CLI (`pnpm -r build`). Without
  * POCKETBASE_BIN it says so and exits 0, so the workspace test run stays green
  * on machines that do not have one. E2E_SLOW=1 also waits out a claim (60 s) to
- * check that an abandoned task goes back to the queue.
+ * check that an abandoned task goes back to the queue. Nothing here uses the
+ * network.
  *
  * Standard library only, run directly — no test runner.
  */
@@ -34,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 const binary = process.env.POCKETBASE_BIN;
 if (!binary) {
-  console.log("pocketbase e2e: skipped (set POCKETBASE_BIN to a PocketBase 0.26.x binary to run it)");
+  console.log("pocketbase e2e: skipped (set POCKETBASE_BIN to a PocketBase 0.39.7 binary to run it)");
   process.exit(0);
 }
 
@@ -101,6 +104,26 @@ try {
     },`,
   );
   writeFileSync(opsJs, opsSource);
+
+  console.log("install");
+  {
+    // The pipeline's install starts with `node pb-serve.mjs --fetch`. With the
+    // pinned binary already in place it must download nothing, so the network
+    // is switched off for this run: an attempt to download fails the check.
+    const offline = `data:text/javascript,${encodeURIComponent("globalThis.fetch = () => Promise.reject(new Error('the network is off in this test'));")}`;
+    const fetched = await cli(join(dir, "pb-serve.mjs"), ["--fetch"], env, ["--import", offline]);
+    check("with the pinned PocketBase in place, install's fetch downloads nothing", [fetched.code, fetched.stderr.trim()], [0, ""]);
+
+    // Anything else at that path is replaced, judged by its SHA-256 and never
+    // run: a binary that came inside a package must not be executed to ask its
+    // version. Offline, the replacement fails instead of downloading.
+    const bin = join(dir, "pb", process.platform === "win32" ? "pocketbase.exe" : "pocketbase");
+    const pinned = readFileSync(bin);
+    writeFileSync(bin, "not the pinned binary");
+    const planted = await cli(join(dir, "pb-serve.mjs"), ["--fetch"], env, ["--import", offline]);
+    ok("a binary that is not the pinned one is not kept", planted.code !== 0 && /could not download/.test(planted.stderr));
+    writeFileSync(bin, pinned);
+  }
 
   await start();
 
@@ -208,6 +231,11 @@ try {
     ok("…and whose it is is not a client's to write", reowned.status === 400 && /read_only_field/.test(reowned.json?.message ?? ""));
     const described = (await http("GET", `${base}/api/_a2app/describe/planning/tasks`)).json;
     check("describe says so", [described?.ownedBy, described?.fields?.owner?.readOnly], ["owner", true]);
+    // A fresh database names itself "Acme" in PocketBase's settings; the app's
+    // name is the manifest's, on the root screen as in its identity.
+    const root = (await http("GET", `${base}/api/_a2app/describe`)).json;
+    const identity = (await http("GET", `${base}/api/_a2app`)).json;
+    check("the root screen names the app as its identity does", root?.app, identity?.app);
     await http("DELETE", `${records}/${created.json?.id}`, { headers: agent });
   }
 
@@ -493,9 +521,9 @@ function rawRequest(method, path, headers, json) {
   });
 }
 
-function cli(entry, args, childEnv) {
+function cli(entry, args, childEnv, nodeArgs = []) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [entry, ...args], { env: childEnv, windowsHide: true });
+    const child = spawn(process.execPath, [...nodeArgs, entry, ...args], { env: childEnv, windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));

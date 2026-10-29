@@ -1,0 +1,21 @@
+# Credentials are runtime artifacts: never shipped, exported, or committed.
+.agent-token
+.principal
+.superuser
+
+# Adapter-owned state and the adopted app's own {dataDir} (the toolkit's
+# lifecycle dataDir).
+data/
+
+# Framework runtime state: serve records, logs, the dev instance, the gate
+# pass, and backups.
+.a2app/serve.json
+.a2app/serve.log
+.a2app/dev.json
+.a2app/dev/
+.a2app/gate-pass.json
+.a2app/backups/
+
+# The sidecar runtime, and any dependencies the adopted app installs — the
+# pipeline recreates both.
+node_modules/

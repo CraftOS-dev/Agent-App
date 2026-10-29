@@ -7,12 +7,23 @@ token), and the dashboard serves the plugin only while it is enabled.
 
 Endpoints, all JSON:
 
-  GET  /meta                  blueprints, build stamp, where new apps go
+  GET  /meta                  blueprints, install steps, build stamp, where new apps go
   GET  /apps                  registered apps merged with builds in flight
   POST /build                 start a build: the creator kickoff, in the app's session
   GET  /session?app=<path>    an app's transcript, whether a turn is running, the last error
   POST /session/send          a message into an app's session
   POST /app/serve|stop|remove lifecycle, shelling `agent-app`
+
+The Marketplace and Import panels, over the same CLI the tools use:
+
+  GET  /catalogue?search=&source=   the marketplace, each app marked compatible or not
+  POST /inspect   {id | from, source?}            the inspect report
+  POST /install   {id | from, source?, name?, set?}  starts an install job: {job}
+  GET  /install?job=<id>            the job: each step's state, then the CLI's result
+  POST /upload    <zip bytes>       a zip kept privately for --from: {file}
+  POST /import/agent {action: import|adopt, id | from, source?, name}
+                                    a source that is not a package, handed to the
+                                    importer skill in a new app's session
 
 Each app has its own Hermes session, with a deterministic id. A turn is one
 `hermes --cli chat -Q --resume <id> --query-file -` subprocess run in the
@@ -42,7 +53,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs
 
 try:
-    from fastapi import APIRouter, Body
+    from fastapi import APIRouter, Body, Request
     from fastapi.responses import JSONResponse
 except ImportError:  # loaded by the hermes-webui backend (../webui_backend.py), which needs only dispatch()
     APIRouter = None
@@ -415,6 +426,7 @@ class Manager:
         # Sessions this process has seeded with the preamble, so a send right
         # after a build (before its first turn is stored) does not prepend it.
         self.seeded: set[str] = set()
+        self.jobs = engine.InstallJobs()
         self._lock = threading.Lock()
 
     @classmethod
@@ -428,7 +440,10 @@ class Manager:
         return cls(TurnRunner(data_dir), HermesSessions())
 
     def meta(self) -> dict:
-        return {"ok": True, "blueprints": list(engine.FRAMEWORK_BLUEPRINTS), "build": engine.build_stamp(), "appsDir": str(engine.apps_dir())}
+        return {
+            "ok": True, "blueprints": list(engine.FRAMEWORK_BLUEPRINTS), "steps": list(engine.INSTALL_STEPS),
+            "build": engine.build_stamp(), "appsDir": str(engine.apps_dir()),
+        }
 
     def rows(self) -> list[dict]:
         """Registered apps merged with builds not yet in the registry. A build
@@ -457,16 +472,15 @@ class Manager:
             })
         return out
 
-    def start_build(self, body: dict) -> tuple[int, dict]:
-        name = str(body.get("name") or "").strip()
+    def _start_agent_run(self, name: str, kick: dict) -> tuple[int, dict]:
+        """Start an agent run that creates a new app under the apps folder, in
+        that app's session: a build from the form, or a source the importer
+        skill converts or adopts. It shows as a building tab until the app is up."""
+        name = name.strip()
         slug = engine.slugify(name)
         if not slug:
             return 400, {"ok": False, "message": "Give the app a name."}
         directory = str(engine.apps_dir() / slug)
-        kick = engine.build_kickoff_prompt({
-            "action": "build", "name": name, "requirement": body.get("requirement"),
-            "blueprint": body.get("blueprint"), "port": body.get("port"),
-        })
         if kick["kind"] == "error":
             return 400, {"ok": False, "message": kick["message"]}
         sid = session_id_for(directory)
@@ -496,6 +510,81 @@ class Manager:
 
         self.runner.submit(sid, prompt, str(engine.apps_dir()), on_done=done)
         return 200, {"ok": True, "path": directory}
+
+    def start_build(self, body: dict) -> tuple[int, dict]:
+        kick = engine.build_kickoff_prompt({
+            "action": "build", "name": body.get("name"), "requirement": body.get("requirement"),
+            "blueprint": body.get("blueprint"), "port": body.get("port"),
+        })
+        return self._start_agent_run(str(body.get("name") or ""), kick)
+
+    def start_import(self, body: dict) -> tuple[int, dict]:
+        """A source that is not a package, handed to the importer skill:
+        `import` converts it, `adopt` runs it as it is."""
+        action = "adopt" if body.get("action") == "adopt" else "import"
+        kick = engine.build_kickoff_prompt({
+            "action": action, "id": body.get("id"), "from": body.get("from"),
+            "source": body.get("source"), "requirement": body.get("requirement"),
+        })
+        return self._start_agent_run(str(body.get("name") or ""), kick)
+
+    # ── The marketplace and import panels ──
+
+    @staticmethod
+    def _failed(result: "engine.CliResult") -> tuple[int, dict]:
+        # By the exit code: 2 usage, 3 unreachable, anything else rejected.
+        status = 400 if result.code == 2 else 502 if result.code == 3 else 500
+        return status, {"ok": False, "message": engine.failure_of(result, result.json if isinstance(result.json, dict) else None), "code": result.code}
+
+    def catalogue(self, search: str = "", source: str = "") -> tuple[int, dict]:
+        result = engine.run_framework(engine.catalogue_argv({"search": search, "source": source}))
+        if not result.ok or not isinstance(result.json, dict):
+            return self._failed(result)
+        return 200, result.json
+
+    def inspect(self, body: dict) -> tuple[int, dict]:
+        result = engine.run_framework(engine.inspect_argv(_package_request(body)))
+        if not result.ok or not isinstance(result.json, dict):
+            return self._failed(result)
+        return 200, {"ok": True, "report": result.json}
+
+    def install(self, body: dict) -> tuple[int, dict]:
+        """Start an install job and answer at once. The page's own installs
+        serve the app (no `noStart`), so it is up when the job ends and the
+        page shows it in its tab."""
+        request = _package_request(body)
+        if "id" not in request and "from" not in request:
+            return 400, {"ok": False, "message": "Name a marketplace app or a source to install from."}
+
+        def ended(job: dict) -> None:
+            # An upload is the manager's own file: once installed, it is no longer needed.
+            source = request.get("from")
+            if job["ok"] and source and engine.is_upload(source):
+                Path(source).unlink(missing_ok=True)
+
+        return 200, {"ok": True, "job": self.jobs.start(request, on_end=ended)}
+
+    def install_job(self, job_id: str) -> tuple[int, dict]:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return 404, {"ok": False, "message": "no such install: it may have ended over an hour ago"}
+        return 200, {"ok": True, "job": job}
+
+    def upload(self, chunks, declared: int | None) -> tuple[int, dict]:
+        """Save a zip arriving as `chunks` (bytes) for `inspect --from` and `install --from`."""
+        try:
+            upload = engine.Upload(declared)
+        except engine.UploadTooLarge as exc:
+            return 413, {"ok": False, "message": str(exc)}
+        try:
+            for chunk in chunks:
+                upload.write(chunk)
+        except engine.UploadTooLarge as exc:
+            return 413, {"ok": False, "message": str(exc)}
+        except BaseException:
+            upload.abort()
+            raise
+        return 200, {"ok": True, "file": upload.finish()}
 
     def send(self, body: dict) -> tuple[int, dict]:
         path = str(body.get("path") or "")
@@ -558,6 +647,30 @@ class Manager:
         return 200, {"ok": True}
 
 
+def _package_request(body: dict) -> dict:
+    """The fields of a page's request passed on to the CLI: strings only, and
+    `set` as KEY -> text. `noStart` is honoured for a caller that wants the
+    files only (the page itself never sends it)."""
+    request: dict = {}
+    for key in ("id", "from", "source", "name"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            request[key] = value.strip()
+    fields = body.get("set")
+    if isinstance(fields, dict):
+        request["set"] = {k: v for k, v in fields.items() if isinstance(k, str) and isinstance(v, str)}
+    if body.get("noStart") is True:
+        request["noStart"] = True
+    return request
+
+
+def _declared_length(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _reply(status: int, payload: dict) -> JSONResponse:
     return JSONResponse(status_code=status, content=payload)
 
@@ -612,22 +725,80 @@ def build_router(manager: Manager) -> APIRouter:
             return _reply(404, {"ok": False, "message": "unknown endpoint"})
         return _reply(*manager.lifecycle(verb, str((body or {}).get("path") or "")))
 
+    @r.get("/catalogue")
+    @_guarded
+    def catalogue(search: str = "", source: str = "") -> Any:
+        return _reply(*manager.catalogue(search, source))
+
+    @r.post("/inspect")
+    @_guarded
+    def inspect(body: dict | None = Body(default=None)) -> Any:
+        return _reply(*manager.inspect(body or {}))
+
+    @r.post("/install")
+    @_guarded
+    def install(body: dict | None = Body(default=None)) -> Any:
+        return _reply(*manager.install(body or {}))
+
+    @r.get("/install")
+    @_guarded
+    def install_job(job: str = "") -> Any:
+        return _reply(*manager.install_job(job))
+
+    @r.post("/import/agent")
+    @_guarded
+    def import_agent(body: dict | None = Body(default=None)) -> Any:
+        return _reply(*manager.start_import(body or {}))
+
+    # The zip itself, not JSON, read as it arrives: async, so the body streams
+    # through this route rather than being buffered whole first.
+    @r.post("/upload")
+    async def upload(request: Request) -> Any:
+        try:
+            saving = engine.Upload(_declared_length(request.headers.get("content-length")))
+        except engine.UploadTooLarge as exc:
+            return _reply(413, {"ok": False, "message": str(exc)})
+        try:
+            async for chunk in request.stream():
+                saving.write(chunk)
+        except engine.UploadTooLarge as exc:
+            return _reply(413, {"ok": False, "message": str(exc)})
+        except Exception as exc:
+            saving.abort()
+            return _reply(500, {"ok": False, "message": str(exc) or exc.__class__.__name__})
+        return _reply(200, {"ok": True, "file": saving.finish()})
+
     return r
 
 
-def dispatch(manager: Manager, method: str, path: str, query: str = "", body: Any = None) -> tuple[int, dict]:
+def dispatch(manager: Manager, method: str, path: str, query: str = "", body: Any = None, *,
+             stream: Any = None, length: int | None = None) -> tuple[int, dict]:
     """The same routes as `build_router`, for a host with no FastAPI app to
     mount a router on (the hermes-webui backend). `path` is relative to
-    `/api/plugins/agent-app`."""
+    `/api/plugins/agent-app`. `/upload` reads `stream` (chunks of bytes, of
+    the declared `length`) instead of a JSON body."""
     body = body if isinstance(body, dict) else {}
+    params = parse_qs(query)
     try:
         if method == "GET" and path == "/meta":
             return 200, manager.meta()
         if method == "GET" and path == "/apps":
             return 200, {"ok": True, "rows": manager.rows()}
         if method == "GET" and path == "/session":
-            app = (parse_qs(query).get("app") or [""])[0]
+            app = (params.get("app") or [""])[0]
             return 200, manager.transcript(app)
+        if method == "GET" and path == "/catalogue":
+            return manager.catalogue((params.get("search") or [""])[0], (params.get("source") or [""])[0])
+        if method == "GET" and path == "/install":
+            return manager.install_job((params.get("job") or [""])[0])
+        if method == "POST" and path == "/upload":
+            return manager.upload(stream if stream is not None else (), length)
+        if method == "POST" and path == "/inspect":
+            return manager.inspect(body)
+        if method == "POST" and path == "/install":
+            return manager.install(body)
+        if method == "POST" and path == "/import/agent":
+            return manager.start_import(body)
         if method == "POST" and path == "/build":
             return manager.start_build(body)
         if method == "POST" and path == "/session/send":

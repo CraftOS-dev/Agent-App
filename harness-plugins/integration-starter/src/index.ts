@@ -14,11 +14,35 @@
  * build/evolve, `a2app` for operate) and preserves the exit-code contract
  * (0 success · 1 rejected · 2 usage · 3 unreachable); nothing here is simulated.
  */
-// cross-spawn instead of node:child_process spawn: npm installs CLIs as .cmd
-// shims on Windows, which plain spawn cannot execute; cross-spawn runs them
-// while still passing argv literally (no shell interpretation of field values).
-import spawn from "cross-spawn";
+import { runA2App, type CliResult } from "./cli.js";
+import { catalogueArgv, inspectArgv, installArgv } from "./packages.js";
 
+export { runA2App, type CliResult, type RunOptions } from "./cli.js";
+export {
+  INSTALL_STEPS,
+  InstallJobs,
+  PackageApi,
+  UPLOAD_LIMIT,
+  UploadTooLargeError,
+  catalogueArgv,
+  failureOf,
+  inspectArgv,
+  installArgv,
+  isUpload,
+  parseInstallEvent,
+  runInstall,
+  saveUpload,
+  uploadsDir,
+  type ApiReply,
+  type InstallEvent,
+  type InstallJob,
+  type InstallRequest,
+  type LooseRequest,
+  type ResultEvent,
+  type StepEvent,
+  type StepState,
+  type StepStatus,
+} from "./packages.js";
 export {
   PROMPT_PLACEHOLDER,
   harnessesFile,
@@ -38,16 +62,23 @@ export const INTEGRATION_STARTER_VERSION = "0.1.0";
 export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "walk-verify", "connect"] as const;
 
 /** Verbs owned by the `agent-app` binary; everything else is `a2app` operate
- *  (framework spec 5.1). A2App is operate-only, so its client rejects these. */
+ *  (framework spec 5.1). A2App is operate-only, so its client rejects these.
+ *
+ *  The CLI's command table is not exported, so this is a copy of its
+ *  `agent-app` half, and `test/harness.test.mjs` holds the two in step: it asks
+ *  the built CLI, verb by verb, which binary and which scope accept each of its
+ *  command modules. `login` and `logout` belong to `a2app` (they ask the person
+ *  to approve an agent in the app), so they are not here. */
 export const FRAMEWORK_VERBS = new Set([
-  "scaffold", "import", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
-  "bridge", "list", "global", "skills", "dev", "promote", "backup", "restore", "remove", "forget",
+  "scaffold", "import", "export", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
+  "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
+  "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 ]);
 
 /** The closed set of verbs that address every app rather than one, and so take
  *  no app argument (framework spec 5.1). Closed is what makes {@link verbOf}
  *  exact: it never has to inspect a positional to guess what it is. */
-export const REGISTRY_VERBS = new Set(["list", "global", "skills"]);
+export const REGISTRY_VERBS = new Set(["list", "blueprints", "global", "skills", "catalogue", "inspect", "install"]);
 
 /**
  * The verb in an app-first argv. Both CLIs are written `<binary> <app> <verb>
@@ -76,16 +107,6 @@ export function binFor(argv: string[], cliBin = "a2app", frameworkBin = "agent-a
   return FRAMEWORK_VERBS.has(verbOf(argv)) ? frameworkBin : cliBin;
 }
 
-/** The result of one framework CLI invocation (`agent-app` or `a2app`). `json` is populated when stdout is a
- *  JSON document; `ok` mirrors exit code 0. */
-export interface CliResult {
-  code: number;
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  json: unknown;
-}
-
 /** A harness-neutral agent tool. `parameters` is a JSON Schema object; each
  *  binding translates it to its harness's own schema system. */
 export interface HarnessTool {
@@ -112,42 +133,6 @@ export interface PluginOptions {
   cliBin?: string;
   /** the `agent-app` (build/evolve) binary or entry. Default "agent-app". */
   frameworkBin?: string;
-}
-
-/**
- * Run one of the framework CLIs and resolve a structured result. Never uses a shell (field
- * values reach the CLI as literal argv, so a value like `x & rm -rf` cannot be
- * interpreted). If `cliBin` points at a JS entry (`…/cli.js`), it is run with
- * the current Node executable; otherwise it is spawned directly (PATH-resolved).
- */
-export function runA2App(cliBin: string, argv: string[]): Promise<CliResult> {
-  const isNodeEntry = /\.[mc]?js$/.test(cliBin);
-  const command = isNodeEntry ? process.execPath : cliBin;
-  const args = isNodeEntry ? [cliBin, ...argv] : argv;
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    // stdio is ["ignore", "pipe", "pipe"], so both streams exist; cross-spawn's
-    // types lack node's per-stdio-config narrowing.
-    child.stdout!.on("data", (d) => (stdout += d));
-    child.stderr!.on("data", (d) => (stderr += d));
-    child.on("close", (code) => resolve(finish(code ?? -1, stdout, stderr)));
-    child.on("error", (e) => resolve(finish(-1, "", String((e as Error).message))));
-  });
-}
-
-function finish(code: number, stdout: string, stderr: string): CliResult {
-  let json: unknown = null;
-  const trimmed = stdout.trim();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      json = JSON.parse(trimmed);
-    } catch {
-      json = null;
-    }
-  }
-  return { code, ok: code === 0, stdout, stderr, json };
 }
 
 function obj(properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> {
@@ -328,12 +313,26 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
     },
     {
       name: "agent_app_build",
-      description: "Scaffold a new Agent App from a blueprint (writes the adapter app part + the ownership canon).",
-      parameters: obj({ dir: DIR, blueprint: { type: "string" }, name: { type: "string" } }, ["dir"]),
+      description:
+        "Scaffold a new Agent App on a blueprint (writes the adapter app part + the ownership canon). " +
+        "`agent-app blueprints` lists the ids. `authMode` is `multi-user` when more than one person will use the app " +
+        "(sign-in, accounts, per-person records), else `none`; it is chosen here, once.",
+      parameters: obj(
+        {
+          dir: DIR,
+          blueprint: { type: "string" },
+          name: { type: "string" },
+          authMode: { type: "string", enum: ["none", "multi-user"] },
+        },
+        ["dir", "blueprint"],
+      ),
       handler: (a) => {
+        // A call without the blueprint reaches the CLI as one, which answers
+        // with the ids to choose from.
         const argv = [String(a.dir), "scaffold"];
         if (a.blueprint != null) argv.push("--blueprint", String(a.blueprint));
         if (a.name != null) argv.push("--name", String(a.name));
+        if (a.authMode != null) argv.push("--auth-mode", String(a.authMode));
         return build(argv);
       },
     },
@@ -378,6 +377,77 @@ export function a2appTools(cliBin = "a2app", frameworkBin = "agent-app"): Harnes
       parameters: obj({ dir: DIR, printOnly: { type: "boolean" } }, ["dir"]),
       handler: (a) => build(a.printOnly === true ? [String(a.dir), "open", "--print-only"] : [String(a.dir), "open"]),
     },
+    {
+      // Which apps are on this machine. `agent_app_list` lists an entity's
+      // records, so the registry needs a name of its own.
+      name: "agent_app_list_apps",
+      description:
+        "List every Agent App on this machine (`agent-app list --json`): id, name, folder, port, live " +
+        "status and URL. Every other tool takes an app's folder as `dir`; this is where to find it.",
+      parameters: obj({}),
+      handler: () => build(["list", "--json"]),
+    },
+    {
+      name: "agent_app_catalogue",
+      description:
+        "List the marketplace's apps (`agent-app catalogue`): each one's id, name, description, tags, " +
+        "version, `customizable` fields, and whether it runs here — `compatible` is true, false with a " +
+        "`reason`, or null when the entry lists no requirement. `search` keeps the apps whose id, name, " +
+        "description or tags contain every word; `source` reads another marketplace " +
+        "(`github:<owner>/<repo>[@<ref>]`, or a local directory). Never guess an id: install only one this returns.",
+      parameters: obj({ search: { type: "string" }, source: { type: "string" } }),
+      handler: (a) => build(catalogueArgv(a)),
+    },
+    {
+      name: "agent_app_inspect",
+      description:
+        "Find out what a source is and what installing it would do, installing nothing (`agent-app inspect`). " +
+        "Give `id` (a catalogue id; `source` for another marketplace) or `from` (a .zip, a folder, " +
+        "`github:<owner>/<repo>[@<ref>][/<path>]`, a github.com URL, or `git+<url>[#<ref>]`). The report " +
+        "gives its `kind` (`agent-app`, `living-ui` or `foreign`), whether it is `installable` and why not, " +
+        "the `routes` for one that is not a package (`convert`, `adopt`: the importer skill's), the commands " +
+        "its toolkit will run (`pipeline`), what install removes (`strips`), and `warnings`. Before installing " +
+        "anything that is not from the marketplace, show the person what it will run and what it removes.",
+      parameters: obj({ id: { type: "string" }, from: { type: "string" }, source: { type: "string" } }),
+      handler: (a) => build(inspectArgv(a)),
+    },
+    {
+      // One tool call, one result: no `--events`. A UI that shows progress
+      // runs the same install through `runInstall` or `InstallJobs`.
+      name: "agent_app_install",
+      description:
+        "Install an app through the one install pipeline (`agent-app install`): `id` a marketplace app " +
+        "(`source` for another marketplace), or `from` a .zip, a folder, `github:…`, a github.com URL, or " +
+        "`git+<url>`. `set` fills a catalogue app's customizable fields ({\"APP_TITLE\": \"Team board\"}), " +
+        "`name` names it, `into` installs into a new or empty folder, `noStart` installs the files only " +
+        "(`agent_app_serve` with `install` launches it later), `open` shows it once it runs. Returns the " +
+        "CLI's result: `dir`, `url`, `gate`, `trust` and `next`. `trust: \"catalogued\"` (a marketplace app) " +
+        "owes nothing more — no walk-verify. `trust: \"untrusted\"` (any other source) owes a walk-verify by " +
+        "a separate agent before the app is used for real work. Do what `next` lists. A source that is " +
+        "not a package fails at the `inspect` step with its `kind` and `routes`: take those to the importer " +
+        "skill (convert, or adopt), never force it.",
+      parameters: obj({
+        id: { type: "string" },
+        from: { type: "string" },
+        source: { type: "string" },
+        into: { type: "string" },
+        name: { type: "string" },
+        set: { type: "object", additionalProperties: { type: "string" } },
+        noStart: { type: "boolean" },
+        open: { type: "boolean" },
+      }),
+      handler: (a) => build(installArgv(a)),
+    },
+    {
+      name: "agent_app_export",
+      description:
+        "Write an Agent App as a package zip that installs on another machine with agent_app_install " +
+        "`from` (`agent-app <dir> export`). Credentials, data, runtime state, dependencies and build output " +
+        "stay behind. `out` is the zip to write (default `<app name>.zip` in the working directory; an " +
+        "existing file is never replaced). Returns `file`, `sha256`, `bytes` and `files`.",
+      parameters: obj({ dir: DIR, out: { type: "string" } }, ["dir"]),
+      handler: (a) => build(a.out != null ? [String(a.dir), "export", "--out", String(a.out)] : [String(a.dir), "export"]),
+    },
   ];
 }
 
@@ -394,11 +464,12 @@ export function registerA2AppPlugin(ctx: HarnessContext, opts: PluginOptions = {
   // A harness with a display should EMBED a launched app rather than throw the
   // user out to a separate browser window. So when `registerDisplay` exists we
   // suppress the CLI's own opener (`open: false`) and register the display from
-  // the serve result instead — which is what makes the display hook live rather
-  // than merely declared.
+  // the result instead — which is what makes the display hook live rather than
+  // merely declared. Both tools that can leave an app running do this: serve,
+  // and install (which serves unless `noStart`).
   if (typeof ctx.registerDisplay === "function") {
     for (const tool of tools) {
-      if (tool.name !== "agent_app_serve") continue;
+      if (tool.name !== "agent_app_serve" && tool.name !== "agent_app_install") continue;
       const launch = tool.handler;
       tool.handler = async (args) => {
         const result = await launch({ ...args, open: false });
@@ -452,14 +523,20 @@ export function showAgentApp(ctx: HarnessContext, app: { id: string; name: strin
 // the UI itself and how the prompt reaches its agent (a chat command, a
 // session run, a copyable block — whatever that harness supports).
 
-/** Blueprints offered in the form's "Build new" stack dropdown. Kept in sync with
- *  the toolkits the CLI can scaffold; an unknown value is still accepted by the
- *  CLI, so this is a convenience list, not a closed set. */
+/** The toolkits the framework ships, offered in the build form's stack
+ *  dropdown. The CLI resolves any toolkit installed on the machine, so this is
+ *  a convenience list, not a closed set; `test/harness.test.mjs` holds it to
+ *  the repository's `toolkits/` folder. `blueprint-sidecar` comes last: it
+ *  adopts an app that already exists rather than building a new one. */
 export const FRAMEWORK_BLUEPRINTS = [
   "blueprint-react-node",
   "blueprint-python-fastapi",
   "blueprint-pocketbase-react",
+  "blueprint-go-react",
+  "blueprint-rust-react",
+  "blueprint-rails-vue",
   "blueprint-base",
+  "blueprint-sidecar",
 ] as const;
 
 /** One row of `agent-app list --json` — an app the user can evolve or operate. */
@@ -498,7 +575,7 @@ export async function listKnownApps(frameworkBin = "agent-app"): Promise<KnownAp
  *  prompt the user hands to the agent (pasted into chat or sent via the harness's
  *  `/agent-app` command); `error` reports what the submission was missing. */
 export type FormActionResult =
-  | { kind: "kickoff"; activity: "creator" | "modify" | "operator"; prompt: string; dir?: string; message: string }
+  | { kind: "kickoff"; activity: "creator" | "modify" | "operator" | "importer"; prompt: string; dir?: string; message: string }
   | { kind: "error"; message: string };
 
 function str(v: unknown): string {
@@ -506,8 +583,10 @@ function str(v: unknown): string {
 }
 
 /** Compose the prompt that hands an entry-form submission to the agent, routed to
- *  the skill that owns the activity. The wording mirrors the `/agent-app` command:
- *  name the skill, forbid building from general knowledge. */
+ *  the skill that owns the activity: `build` (creator), `modify`, `operate`
+ *  (operator), and `install`, `import` and `adopt` (importer). The wording
+ *  mirrors the `/agent-app` command: name the skill, forbid building from
+ *  general knowledge. */
 export function buildKickoffPrompt(body: Record<string, unknown>): FormActionResult {
   const action = str(body.action);
   const requirement = str(body.requirement);
@@ -540,5 +619,53 @@ export function buildKickoffPrompt(body: Record<string, unknown>): FormActionRes
       `Load the **operator** skill: read state and act through the A2App adapter (the \`a2app\` CLI). No code changes.`;
     return { kind: "kickoff", activity: "operator", dir, prompt, message: "Kickoff prompt for operating with the operator skill:" };
   }
+  if (action === "install" || action === "import" || action === "adopt") return importerKickoff(action, body, requirement);
   return { kind: "error", message: `Unknown action "${action}".` };
+}
+
+/**
+ * The importer skill's three ways in, as kickoffs:
+ *
+ *   - `install`: an Agent App package, by catalogue `id` or `from` a source;
+ *   - `import`: convert a source that is not a package (a CraftBot Living UI
+ *     app, or foreign code) by rebuilding it as a new Agent App;
+ *   - `adopt`: run a foreign app unchanged behind the sidecar adapter.
+ *
+ * Each names exactly one of `id` (with `source` for another marketplace) and
+ * `from`, and leaves the decisions the skill makes with the person to it.
+ */
+function importerKickoff(action: "install" | "import" | "adopt", body: Record<string, unknown>, requirement: string): FormActionResult {
+  const id = str(body.id);
+  const from = str(body.from);
+  const source = str(body.source);
+  if ((id === "") === (from === "")) {
+    return { kind: "error", message: "Name one marketplace app or one source (a .zip, a folder, or a git or GitHub URL)." };
+  }
+  const market = source ? ` from the marketplace \`${source}\`` : "";
+  const what = id ? `the marketplace app \`${id}\`${market}` : `the app at \`${from}\``;
+  const wants = requirement ? `What the person wants from it:\n${requirement}\n\n` : "";
+  if (action === "install") {
+    const prompt = id
+      ? `Install ${what}.\n\n` +
+        `Load the **importer** skill and follow its marketplace path: confirm the entry with \`agent-app catalogue\` (never guess an id), ` +
+        `then \`agent-app install <id>\`. A marketplace app is catalogued, so no walk-verify is owed; still ask the person before granting any trigger or bridge it asks for.`
+      : `Install the Agent App package at \`${from}\`.\n\n` +
+        `Load the **importer** skill and follow it: run \`agent-app inspect --from <source>\` first, show the person what it will run and what it removes, ` +
+        `and only once they agree run \`agent-app install --from <source>\`. It is untrusted: a separate agent walk-verifies it before it is used for real work.`;
+    return { kind: "kickoff", activity: "importer", prompt, message: "Kickoff prompt for installing with the importer skill:" };
+  }
+  if (action === "import") {
+    const prompt =
+      `Convert ${what} into a new Agent App.\n\n${wants}` +
+      `Load the **importer** skill and follow its convert path: tell the person first that nothing of the original code runs afterward, ` +
+      `keep the original source read-only in \`reference/source/\`, scaffold on the matching blueprint, rebuild it feature by feature, ` +
+      `run \`agent-app validate\`, launch, and have a separate agent walk-verify before announcing.`;
+    return { kind: "kickoff", activity: "importer", prompt, message: "Kickoff prompt for converting with the importer skill:" };
+  }
+  const prompt =
+    `Adopt ${what} as an Agent App without rewriting it.\n\n${wants}` +
+    `Load the **importer** skill and follow its adopt path: scaffold on \`blueprint-sidecar\`, place the source unchanged in \`upstream/\`, ` +
+    `declare how it starts in \`sidecar.json\`, map its API to operations, run \`agent-app validate\`, serve, and verify every mapping. ` +
+    `It is operate-only: the app's own UI stays at its own address.`;
+  return { kind: "kickoff", activity: "importer", prompt, message: "Kickoff prompt for adopting with the importer skill:" };
 }

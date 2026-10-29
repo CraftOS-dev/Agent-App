@@ -390,10 +390,10 @@ function validPort(p: number | undefined): p is number {
  * every registry mutation on the machine and make live locks look stale. The
  * caller re-checks the winning port under the lock before claiming it.
  */
-async function probeFreePort(reg: Registry, ownPath: string, preferred?: number): Promise<number> {
+async function probeFreePort(reg: Registry, ownPath: string | null, preferred?: number): Promise<number> {
   const claimed = new Set(
     reg.apps
-      .filter((a) => resolve(a.path) !== ownPath)
+      .filter((a) => ownPath === null || resolve(a.path) !== ownPath)
       .map((a) => a.port)
       .filter((p): p is number => validPort(p)),
   );
@@ -406,6 +406,16 @@ async function probeFreePort(reg: Registry, ownPath: string, preferred?: number)
     return port;
   }
   throw new Error(`no free port available in ${PORT_FLOOR}-${PORT_CEILING}`);
+}
+
+/**
+ * A port no registered app claims and nothing listens on, `preferred` first —
+ * probed, NOT claimed. For a caller that must write the port into files before
+ * the app has a path to register under; {@link reserveApp} claims it after,
+ * and reports whether it still could.
+ */
+export async function pickFreePort(preferred?: number): Promise<number> {
+  return probeFreePort(readRegistry(), null, preferred);
 }
 
 /**

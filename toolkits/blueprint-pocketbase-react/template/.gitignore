@@ -6,9 +6,11 @@
 # The live database and adapter-owned state (the toolkit's lifecycle dataDir).
 pb/pb_data/
 
-# The PocketBase binary is fetched per machine, never committed.
+# The PocketBase binary is fetched per machine, never committed (`.partial` is
+# a fetch that was interrupted before it finished).
 pb/pocketbase
 pb/pocketbase.exe
+pb/pocketbase*.partial
 
 # Framework runtime state: serve records, logs, the dev instance, the live
 # View snapshot, the gate pass, and backups.

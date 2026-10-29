@@ -11,6 +11,12 @@
  *     transcripts; only the authenticated Control UI can reach it.
  *   - `/agent-app/api`  (auth: plugin)  is the JSON action API the page calls,
  *     authorized by a per-page token minted into each page load.
+ *
+ * Beside the build form, the tab has a Marketplace and an Import panel. Their
+ * routes (`/catalogue`, `/inspect`, `/install`, `/upload`) are the shared
+ * engine's `PackageApi` over the same CLI the tools use, and `/import/agent`
+ * hands a source that is not a package to the agent (importer skill) in a new
+ * app's session, the way `/build` starts a build.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { randomBytes } from "node:crypto";
@@ -25,7 +31,11 @@ import {
   listKnownApps,
   registerHarnessProfile,
   FRAMEWORK_BLUEPRINTS,
+  INSTALL_STEPS,
+  PackageApi,
   PROMPT_PLACEHOLDER,
+  type ApiReply,
+  type FormActionResult,
   type KnownApp,
 } from "@a2app/integration-starter";
 import { appManagerHtml } from "./ui.js";
@@ -54,7 +64,8 @@ const AGENT_GUIDANCE =
   "never by driving the UI. When a message asks to build, change, run, import, verify, or " +
   "connect to an app, load the matching framework skill and follow it end to end: creator " +
   "(build a NEW app), modify (change an EXISTING app), operator (use/read/run an app, no code " +
-  "changes), importer (adopt existing software), walk-verify (independent verification), " +
+  "changes), importer (install from the marketplace, import a zip/folder/git source, adopt or " +
+  "convert existing software, export an app to share), walk-verify (independent verification), " +
   "connect (a published app you do not own). Do not build or operate an app from general " +
   "knowledge outside these skills. `agent-app list` locates every known Agent App.";
 
@@ -115,6 +126,7 @@ export default definePluginEntry({
     if (registration.status === "refused") api.logger.warn(`agent-app: ${registration.detail}`);
     const tokens = new Map<string, number>();
     const builds = new Map<string, BuildEntry>();
+    const packages = new PackageApi(FRAMEWORK_CLI);
 
     // subagent.run needs operator.write, which OpenClaw grants only to calls made
     // outside a request scope (a request client carries no operator scopes). Runs
@@ -219,7 +231,7 @@ export default definePluginEntry({
         }
         res.statusCode = 200;
         res.setHeader("content-type", "text/html; charset=utf-8");
-        res.end(appManagerHtml({ apiBase: API_ROUTE, homeBase: PAGE_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS, build: BUILD_STAMP }));
+        res.end(appManagerHtml({ apiBase: API_ROUTE, homeBase: PAGE_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS, steps: INSTALL_STEPS, build: BUILD_STAMP }));
       },
     });
 
@@ -244,26 +256,42 @@ export default definePluginEntry({
       return apps.find((a) => a.path === path) ?? null;
     }
 
-    async function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
-      const name = String(body.name ?? "").trim();
-      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    /**
+     * Start an agent run that creates a new app under APPS_DIR, in that app's
+     * session: a build from the form, or a source the importer skill converts
+     * or adopts. The run shows as a building tab until its app is up.
+     */
+    async function startAgentRun(name: string, kick: FormActionResult): Promise<{ status: number; out: Record<string, unknown> }> {
+      const label = name.trim();
+      const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
       if (!slug) return { status: 400, out: { ok: false, message: "Give the app a name." } };
       const dir = join(APPS_DIR, slug);
-      if (builds.has(dir)) return { status: 400, out: { ok: false, message: `"${name}" is already being built.` } };
+      if (builds.has(dir)) return { status: 400, out: { ok: false, message: `"${label}" is already being built.` } };
       if (existsSync(dir)) return { status: 400, out: { ok: false, message: `An app directory named "${slug}" already exists.` } };
-      const kick = buildKickoffPrompt({ action: "build", name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
       if (kick.kind === "error") return { status: 400, out: { ok: false, message: kick.message } };
       mkdirSync(APPS_DIR, { recursive: true });
       const prompt = `${kick.prompt}\n\nCreate the app at \`${dir}\` — pass that directory to every agent-app command.`;
       const run = await detached(() => subagent.run({ sessionKey: sessionKeyFor(dir), message: prompt, deliver: false, lane: `agent-app:${slug}`, cwd: APPS_DIR }));
       seeded.add(sessionKeyFor(dir));
-      const entry: BuildEntry = { name, dir, ended: false };
+      const entry: BuildEntry = { name: label, dir, ended: false };
       builds.set(dir, entry);
       void detached(() => subagent.waitForRun({ runId: run.runId, timeoutMs: BUILD_WAIT_MS })).then(
         () => { entry.ended = true; },
         () => { entry.ended = true; },
       );
       return { status: 200, out: { ok: true, path: dir } };
+    }
+
+    function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
+      const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
+      return startAgentRun(String(body.name ?? ""), kick);
+    }
+
+    /** A source that is not a package, handed to the importer skill: `import` converts it, `adopt` runs it as it is. */
+    function startImport(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
+      const action = body.action === "adopt" ? "adopt" : "import";
+      const kick = buildKickoffPrompt({ action, id: body.id, from: body.from, source: body.source, requirement: body.requirement });
+      return startAgentRun(String(body.name ?? ""), kick);
     }
 
     /** Flatten a transcript message to role, concatenated text, and tool names,
@@ -327,13 +355,27 @@ export default definePluginEntry({
         const sub = url.pathname.slice(API_ROUTE.length);
         try {
           if (!tokenValid(req.headers["x-a2app-token"])) { send(401, { ok: false, message: "invalid or expired page token — reopen the Agent Apps tab" }); return; }
+          const reply = (r: ApiReply): void => send(r.status, r.body);
 
           if (method === "GET" && sub === "/apps") { send(200, { ok: true, rows: await rows() }); return; }
+          if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
+          if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
 
           if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
+          if (sub === "/upload") {
+            // The zip itself, not JSON: streamed to a private file, bounded as it arrives.
+            const declared = Number(req.headers["content-length"]);
+            const r = await packages.upload(req, Number.isFinite(declared) ? declared : undefined);
+            if (r.status === 413) res.setHeader("connection", "close"); // the rest of the body is never read
+            reply(r);
+            return;
+          }
           const body = await readBody(req);
 
           if (sub === "/build") { const r = await startBuild(body); send(r.status, r.out); return; }
+          if (sub === "/inspect") { reply(await packages.inspect(body)); return; }
+          if (sub === "/install") { reply(packages.install(body)); return; }
+          if (sub === "/import/agent") { const r = await startImport(body); send(r.status, r.out); return; }
 
           if (sub === "/session/send") {
             const path = String(body.path ?? "");

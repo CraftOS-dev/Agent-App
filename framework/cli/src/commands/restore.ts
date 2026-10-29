@@ -19,7 +19,7 @@ export async function run(args: string[], app: string): Promise<number> {
   const project = loadProject(app);
 
   return withLock(lifecycleLock(project.dir), async () => {
-    await assertNotServing(project);
+    await assertNotServing(project, "restore");
 
     const backups = listBackups(project.dir);
     if (requested === undefined && backups.length === 0) {

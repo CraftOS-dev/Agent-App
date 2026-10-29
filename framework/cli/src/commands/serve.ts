@@ -1,5 +1,5 @@
 /**
- * agent-app <dir> serve [--install]
+ * agent-app <dir> serve [--install] [--open]
  *
  * Launch a running Agent App the framework way — never "start a server by hand".
  * Runs the manifest `pipeline` (optionally `install`, then `build`, then `start`)
@@ -44,26 +44,53 @@ function readServe(file: string): { pid: number } | null {
   }
 }
 
+export interface ServeOptions {
+  /** run `pipeline.install` first (`--install`) */
+  install?: boolean;
+  /** run `pipeline.build` first — on unless the caller has just built this exact tree */
+  build?: boolean;
+  /** show the healthy app to a person (`--open`) */
+  open?: boolean;
+}
+
+/** What a serve did: its exit code, the result document, and on failure why. */
+export interface ServeOutcome {
+  code: number;
+  result: Record<string, unknown> | null;
+  error?: string;
+}
+
 export async function run(args: string[], app: string): Promise<number> {
+  const outcome = await serveApp(app, { install: hasFlag(args, "install"), open: hasFlag(args, "open") });
+  if (outcome.result !== null) log.raw(JSON.stringify(outcome.result, null, 2));
+  return outcome.code;
+}
+
+/**
+ * Serve an app and report the outcome rather than print it: diagnostics go to
+ * stderr and nothing to stdout, so the install pipeline can run this as its
+ * serve step and still own its output.
+ */
+export async function serveApp(app: string, opts: ServeOptions = {}): Promise<ServeOutcome> {
   const project = loadProject(app);
   const pipeline = project.manifest.pipeline;
   const port = appPort(project.manifest);
   const healthUrl = `${project.baseUrl}${pipeline?.health ?? "/api/_a2app"}`;
+  const fail = (message: string): ServeOutcome => {
+    log.error(message);
+    return { code: 1, result: null, error: message };
+  };
   // `--open` is a hand-off to a person, so it runs only once the app is healthy —
   // never before, or the browser races the server and lands on a refused port.
-  const wantOpen = hasFlag(args, "open");
   const show = async (): Promise<Record<string, unknown>> => {
-    if (!wantOpen) return {};
+    if (opts.open !== true) return {};
     const outcome = await openUrl(project.baseUrl, false);
     if (outcome.opened) log.ok(`opened ${project.baseUrl} (${outcome.via})`);
     else log.warn(`could not open a browser (${outcome.reason ?? "unknown"}) — open this yourself: ${project.baseUrl}`);
     return { opened: outcome.opened, via: outcome.via, ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}) };
   };
 
-  if (!pipeline?.start) {
-    log.error("manifest.pipeline.start is empty — nothing to launch");
-    return 1;
-  }
+  if (!pipeline?.start) return fail("manifest.pipeline.start is empty — nothing to launch");
 
   // Index the app before anything else, so an app that was never created here
   // (imported, cloned, or already running) still shows up in `agent-app list`.
@@ -78,7 +105,7 @@ export async function run(args: string[], app: string): Promise<number> {
   const serveLock = join(project.dir, ".a2app", "serve.lock");
   // Serialize serve/stop for this app: two concurrent serves must not both pass
   // the idempotency check and spawn two processes.
-  return withLock(serveLock, async () => {
+  return withLock(serveLock, async (): Promise<ServeOutcome> => {
     const servePath = join(project.dir, ".a2app", "serve.json");
 
     // Idempotency + safety: if the port is already answering, find out WHO.
@@ -91,35 +118,27 @@ export async function run(args: string[], app: string): Promise<number> {
         const agentWork = await inspectAgentWork(project.dir, project.manifest.id, project.baseUrl, { identityVerified: true });
         printLine(agentWorkLine(agentWork, app));
         const shown = await show();
-        log.raw(
-          JSON.stringify(
-            {
-              ok: true,
-              id: project.manifest.id,
-              name: project.manifest.name,
-              url: project.baseUrl,
-              pid: prev?.pid ?? null,
-              alreadyRunning: true,
-              agentWork,
-              ...shown,
-            },
-            null,
-            2,
-          ),
-        );
-        return 0;
+        return {
+          code: 0,
+          result: {
+            ok: true,
+            id: project.manifest.id,
+            name: project.manifest.name,
+            url: project.baseUrl,
+            pid: prev?.pid ?? null,
+            alreadyRunning: true,
+            agentWork,
+            ...shown,
+          },
+        };
       }
       if (servingId !== null) {
-        log.error(
+        return fail(
           `port ${port} is held by a DIFFERENT Agent App (id ${servingId}) — refusing to start a second instance. ` +
             `Stop that app, or change this app's manifest.port.`,
         );
-        return 1;
       }
-      log.error(
-        `port ${port} is already in use by another process (not an Agent App) — free it or change manifest.port.`,
-      );
-      return 1;
+      return fail(`port ${port} is already in use by another process (not an Agent App) — free it or change manifest.port.`);
     }
 
     // Ownership canon, before any of the app's own commands run. Launch is the
@@ -134,18 +153,17 @@ export async function run(args: string[], app: string): Promise<number> {
       ...drift.added.map((p) => `added: ${p}`),
     ];
     if (drifted.length > 0) {
-      log.error(
+      return fail(
         `refusing to launch — system-managed files changed outside tooling:\n${drifted.join("\n")}\n` +
           "If a toolkit upgrade is intended, run `agent-app <dir> toolkit-sync`; agent edits belong in app-owned paths.",
       );
-      return 1;
     }
 
-    if (args.includes("--install") && pipeline.install) {
+    if (opts.install === true && pipeline.install) {
       log.step(`install: ${pipeline.install}`);
       runShell(pipeline.install, project.dir);
     }
-    if (pipeline.build) {
+    if (opts.build !== false && pipeline.build) {
       log.step(`build: ${pipeline.build}`);
       runShell(pipeline.build, project.dir);
     }
@@ -173,8 +191,7 @@ export async function run(args: string[], app: string): Promise<number> {
       spawnError = err;
     });
     if (child.pid === undefined) {
-      log.error(`failed to spawn: ${pipeline.start}${spawnError ? ` (${(spawnError as Error).message})` : ""}`);
-      return 1;
+      return fail(`failed to spawn: ${pipeline.start}${spawnError ? ` (${(spawnError as Error).message})` : ""}`);
     }
     const pid = child.pid;
     // Record the pid BEFORE polling health, so a launch that never becomes
@@ -196,8 +213,7 @@ export async function run(args: string[], app: string): Promise<number> {
       const why = spawnError
         ? `failed to launch: ${(spawnError as Error).message}`
         : `app did not become healthy at ${healthUrl} within 20s`;
-      log.error(`${why} — see ${join(project.dir, ".a2app", "serve.log")}`);
-      return 1;
+      return fail(`${why} — see ${join(project.dir, ".a2app", "serve.log")}`);
     }
 
     writeFileSync(
@@ -215,7 +231,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // stale, and the person looking at it has no way to know. The View's update
     // watcher tells them; say so here so the loop is visible from the terminal
     // too, and so `--open` is not mistaken for "everyone now has the new build".
-    if (!wantOpen) log.info(`show it to someone: ${appCommand(app, "open")}`);
+    if (opts.open !== true) log.info(`show it to someone: ${appCommand(app, "open")}`);
     // A dev instance alongside a fresh live serve means an evolve is open, and
     // the caller is at a fork with exactly two exits. Name them — a warning
     // that states the fact without the decision is how this state gets missed.
@@ -229,13 +245,9 @@ export async function run(args: string[], app: string): Promise<number> {
     }
     log.info("tabs already open are offered a reload; they are never reloaded out from under anyone");
     const shown = await show();
-    log.raw(
-      JSON.stringify(
-        { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, agentWork, ...shown },
-        null,
-        2,
-      ),
-    );
-    return 0;
+    return {
+      code: 0,
+      result: { ok: true, id: project.manifest.id, name: project.manifest.name, url: project.baseUrl, pid, port, agentWork, ...shown },
+    };
   });
 }

@@ -2,7 +2,7 @@
   "name": "@craftos/agent-app-dsh",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework bundle for deepseek-harness (dsh): the agent tools plus an 'Agent Apps' manager (build, embed, per-app session, lifecycle) shown in the dsh UI, driving the agent-app and a2app CLIs",
+  "description": "Agent App Framework bundle for deepseek-harness (dsh): the agent tools plus an 'Agent Apps' manager (build, marketplace, import, embed, per-app session, lifecycle) shown in the dsh UI, driving the agent-app and a2app CLIs",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
@@ -14,6 +14,6 @@
   "//peer": "Provided by the dsh toolchain, external in the bundle (not npm-resolvable here): cordis, @deepseek-ai/*, react. See README.",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node test/bundle.test.mjs"
   }
 }

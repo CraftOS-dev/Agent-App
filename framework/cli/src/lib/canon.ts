@@ -125,6 +125,21 @@ export interface OwnershipDrift {
  * in the project is agent-accessible by definition.
  */
 export function verifySystemHashes(projectDir: string): OwnershipDrift {
+  return compareCanon(projectDir, projectToolkit(projectDir)?.manifest.systemPaths ?? null);
+}
+
+/** Whether a tree records an ownership canon at all. */
+export function hasCanon(projectDir: string): boolean {
+  return canonPath(projectDir) !== null;
+}
+
+/**
+ * {@link verifySystemHashes} against an explicit declaration of what is
+ * system-owned (null: the canon's own keys). Inspecting a package needs this
+ * form: the toolkit a package records is not trusted to say where its own
+ * system files are, so the caller passes a locally installed toolkit's paths.
+ */
+export function compareCanon(projectDir: string, declaredPaths: string[] | null): OwnershipDrift {
   const file = canonPath(projectDir);
   if (file === null) {
     throw new Error(
@@ -132,7 +147,7 @@ export function verifySystemHashes(projectDir: string): OwnershipDrift {
     );
   }
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  const declared = projectToolkit(projectDir)?.manifest.systemPaths ?? Object.keys(recorded);
+  const declared = declaredPaths ?? Object.keys(recorded);
   const current = computeSystemHashes(projectDir, declared);
 
   const drift: OwnershipDrift = { modified: [], missing: [], added: [] };

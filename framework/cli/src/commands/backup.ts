@@ -9,7 +9,7 @@ export async function run(_args: string[], app: string): Promise<number> {
   // Serialize with any other lifecycle mutation on this app, and never copy a
   // data directory the app currently has open.
   return withLock(lifecycleLock(project.dir), async () => {
-    await assertNotServing(project);
+    await assertNotServing(project, "back it up");
     const id = backupId(new Date());
     const path = takeBackup(project.dir, id);
     log.ok(`backup ${id}`);

@@ -1,0 +1,10 @@
+{
+  "name": "adopted-agent-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An Agent App scaffolded from blueprint-sidecar: a foreign app in upstream/, run unchanged behind the sidecar A2App adapter.",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@a2app/reverse-proxy": "^0.2.0"
+  }
+}

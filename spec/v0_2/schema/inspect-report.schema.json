@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/inspect-report.json",
+  "title": "`agent-app inspect`: what a source is and what installing it would do (framework packaging §5).",
+  "type": "object",
+  "required": ["ok", "kind", "installable"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "kind": { "enum": ["agent-app", "living-ui", "foreign"] },
+    "installable": { "type": "boolean" },
+    "reason": { "type": ["string", "null"] },
+    "routes": {
+      "type": "array",
+      "items": { "enum": ["adopt", "convert"] },
+      "description": "for a tree that is not a package: what can be done with it instead (packaging §7); empty for an agent-app"
+    },
+    "source": {
+      "type": "object",
+      "description": "the provenance install would record (manifest `source`, less `installedAt`), plus the catalogue entry's name",
+      "properties": {
+        "kind": { "enum": ["marketplace", "zip", "folder", "github", "git"] },
+        "location": { "type": "string" },
+        "ref": { "type": "string" },
+        "catalogueId": { "type": "string" },
+        "version": { "type": "string" },
+        "sha256": { "type": "string" },
+        "commit": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "authMode": { "type": ["string", "null"] },
+        "modules": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "toolkit": {
+      "type": ["object", "null"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "installed": { "type": "boolean" },
+        "adapterVersion": { "type": "object", "properties": { "package": { "type": ["string", "null"] }, "current": { "type": ["string", "null"] } } }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "properties": { "canon": { "enum": ["intact", "drifted", "absent"] }, "changed": { "type": "array", "items": { "type": "string" } } }
+    },
+    "pipeline": { "type": ["object", "null"] },
+    "capabilities": { "type": ["object", "null"] },
+    "strips": { "type": "array", "items": { "type": "string" }, "description": "root-relative paths; folders end in `/`" },
+    "placeholders": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "kept": { "type": "string", "description": "--keep: where the source was kept, as a package would carry it" }
+  }
+}

@@ -25,7 +25,9 @@ says "per your stack", `reference/blueprint.md` is the answer.
 1. **You were given a project directory** → it is already scaffolded; use it,
    skip scaffolding.
 2. **No project yet** → `agent-app <dir> scaffold --blueprint <id>` scaffolds the
-   framework files, the adapter, and the ownership canon. Pick `authMode` from
+   framework files, the adapter, and the ownership canon. `agent-app blueprints`
+   lists the ids and what each is built with; `blueprint-base` is the one with
+   no stack, for when none of the others fit. Pick `authMode` from
    requirements, with `--auth-mode`: `none` (one person's tool — the default) or
    `multi-user` (several people, each signing in: a team CRM, a shared tracker).
    Choose `multi-user` whenever more than one person will use the app; adding it
@@ -283,7 +285,8 @@ someone leave the screen and come back.
 
 ## Finish: boot the candidate, gate, then verify
 
-1. **`agent-app <dir> dev`** boots your build on a hidden port with a fresh
+1. **`agent-app <dir> dev`** (`dev --install` the first time: a fresh scaffold
+   has no dependencies yet) boots your build on a hidden port with a fresh
    database created purely from your migrations — nothing is copied; the tree
    you just wrote IS the running candidate, and its log is at the path `dev`
    prints. While this instance is up, every `a2app` operate command and

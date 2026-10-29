@@ -1,5 +1,6 @@
 /**
- * Describe cache, keyed by the app's own version markers.
+ * Describe cache, keyed by the app's own version markers and by the credential
+ * that was presented.
  *
  * The protocol tells clients to cache describe against `schemaVersion` and
  * re-fetch when it changes (A2APP-SPEC 2). For a navigational surface that
@@ -26,23 +27,50 @@
  *   app's code, moves for exactly that edit, and is folded into the key here.
  *   It is an optional extension: an app that does not publish one caches on
  *   `schemaVersion` alone, exactly as before.
+ * - **Each credential sees its own reach.** Describe is answered for the caller:
+ *   a module shows the operations THIS credential may run, and a person's
+ *   delegated agent may run fewer than the app's admin token. A cache shared
+ *   across credentials showed an agent operations cached under another
+ *   credential — the server still refused the call, but the walk had offered it.
+ *   So levels are held per credential, under a SHA-256 of the token: the token
+ *   itself is never written here. A few credentials are kept side by side (an
+ *   admin and an agent alternating must not evict each other), and the least
+ *   recently used beyond {@link MAX_CREDENTIALS} are dropped, since task
+ *   credentials are minted per task and would otherwise accumulate for ever.
  * - **A cache miss is never an error.** Every entry is re-derivable from the
  *   app, so a corrupt, unreadable, or unwritable cache degrades to fetching.
  *   An operate command must not fail because a cache file is bad.
  * - **Scoped per app id**, so two apps on one machine cannot read each other's
  *   levels even if they briefly share a directory.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DescribeLevel } from "@a2app/sdk";
+
+/** How many credentials' levels one app's cache holds at once. */
+export const MAX_CREDENTIALS = 8;
 
 interface CacheFile {
   appId: string;
   schemaVersion: string;
   /** identity's `appVersion`, or "" from an app that publishes none */
   appVersion: string;
-  /** describe path ("" for root) → the level served for it */
-  levels: Record<string, DescribeLevel>;
+  /**
+   * credential key (see {@link credentialKey}) → describe path ("" for root) →
+   * the level served for it. Insertion order is recency: the last key is the
+   * credential used most recently.
+   */
+  credentials: Record<string, Record<string, DescribeLevel>>;
+}
+
+/**
+ * The key a credential's levels are cached under: a SHA-256 of the token, so the
+ * cache file never holds a usable secret. A request with no credential at all
+ * has a reach of its own (what a stranger sees), keyed `none`.
+ */
+export function credentialKey(token: string | null): string {
+  return token === null ? "none" : `sha256:${createHash("sha256").update(token).digest("hex")}`;
 }
 
 export class DescribeCache {
@@ -52,12 +80,14 @@ export class DescribeCache {
   private constructor(
     private readonly file: string,
     data: CacheFile,
+    private readonly credential: string,
   ) {
     this.data = data;
   }
 
   /**
-   * Open the cache for one app at one version of that app.
+   * Open the cache for one app at one version of that app, as seen by one
+   * credential (`credentialKey(token)`).
    *
    * A file belonging to a different app, a superseded schema, or a superseded
    * build is discarded wholesale rather than merged: a per-entry version would
@@ -65,35 +95,43 @@ export class DescribeCache {
    * is exactly the "never write against a stale schema" failure the protocol
    * names.
    *
-   * A cache written before `appVersion` existed carries none, so it fails the
-   * comparison and is discarded once — a single re-fetch, not an error.
+   * A cache written before `appVersion` existed carries none, and one written
+   * before levels were held per credential carries no `credentials`; either is
+   * discarded once — a single re-fetch, not an error.
    */
-  static open(appDir: string, appId: string, schemaVersion: string, appVersion?: string | null): DescribeCache {
+  static open(appDir: string, appId: string, schemaVersion: string, appVersion: string | null | undefined, credential: string): DescribeCache {
     const file = join(appDir, ".a2app", "describe-cache.json");
     const version = appVersion ?? "";
-    const empty: CacheFile = { appId, schemaVersion, appVersion: version, levels: {} };
+    const empty: CacheFile = { appId, schemaVersion, appVersion: version, credentials: {} };
     try {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as CacheFile;
       if (
         parsed.appId === appId &&
         parsed.schemaVersion === schemaVersion &&
         parsed.appVersion === version &&
-        parsed.levels
+        parsed.credentials !== null &&
+        typeof parsed.credentials === "object"
       ) {
-        return new DescribeCache(file, parsed);
+        return new DescribeCache(file, parsed, credential);
       }
     } catch {
       // No cache, unreadable, or not ours. Either way: start clean.
     }
-    return new DescribeCache(file, empty);
+    return new DescribeCache(file, empty, credential);
   }
 
   get(path: string): DescribeLevel | undefined {
-    return this.data.levels[path];
+    return this.data.credentials[this.credential]?.[path];
   }
 
   put(path: string, level: DescribeLevel): void {
-    this.data.levels[path] = level;
+    const levels = this.data.credentials[this.credential] ?? {};
+    levels[path] = level;
+    // Re-insert so this credential becomes the most recent, then drop the oldest.
+    delete this.data.credentials[this.credential];
+    this.data.credentials[this.credential] = levels;
+    const keys = Object.keys(this.data.credentials);
+    for (const stale of keys.slice(0, Math.max(0, keys.length - MAX_CREDENTIALS))) delete this.data.credentials[stale];
     this.dirty = true;
   }
 

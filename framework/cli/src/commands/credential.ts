@@ -7,11 +7,14 @@
  *                                                issue one; the token is printed once
  *   revoke <credentialId>                        it stops on the next request
  *
+ * stdout carries the result as JSON: `{ ok, credentials }`, `{ ok, token,
+ * credential }` (the token's only appearance) or `{ ok, revoked }`.
+ *
  * For a harness with no browser (CI, a cloud agent): mint a credential for the
  * person the agent acts for and hand it over as A2APP_TOKEN. An agent that can
  * reach a browser uses `a2app <app> login` instead, approved by the person.
  */
-import { flag, positionals } from "../lib/args.js";
+import { flag, positionals, scopesFlag } from "../lib/args.js";
 import { parseDuration } from "../lib/duration.js";
 import { log } from "../lib/log.js";
 import { adminClient, loadProject, UsageError } from "../lib/project.js";
@@ -49,12 +52,9 @@ async function list(client: A2AppClient): Promise<number> {
   const res = await client.request("GET", "/api/_a2app/credentials");
   if (res.status !== 200) return refused("list credentials", res);
   const credentials = (res.json as { credentials: Credential[] }).credentials;
-  if (credentials.length === 0) {
-    log.info("no credentials: no agent holds access to this app beyond its own .agent-token.");
-    return 0;
-  }
+  if (credentials.length === 0) log.info("no credentials: no agent holds access to this app beyond its own .agent-token.");
   for (const c of credentials) {
-    log.raw(
+    log.info(
       [
         c.credentialId,
         `for ${c.principalName ?? c.principal}`,
@@ -66,11 +66,12 @@ async function list(client: A2AppClient): Promise<number> {
       ].join("  "),
     );
   }
+  log.raw(JSON.stringify({ ok: true, credentials }, null, 2));
   return 0;
 }
 
 async function mint(client: A2AppClient, args: string[]): Promise<number> {
-  const scopes = (flag(args, "scopes") ?? "*").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const scopes = scopesFlag(args);
   const expiresIn = parseDuration(flag(args, "expires") ?? "30d", "expires");
   const principal = await principalFor(client, flag(args, "for") ?? "owner");
   const agentName = flag(args, "name");
@@ -86,8 +87,8 @@ async function mint(client: A2AppClient, args: string[]): Promise<number> {
     `credential ${issued.credential.credentialId} for ${issued.credential.principalName ?? principal}, ` +
       `scopes ${issued.credential.scopes.join(",")}, expires ${issued.credential.expiresAt}`,
   );
-  log.info("the token below is shown once: hand it to the agent as A2APP_TOKEN, then let it go from this terminal.");
-  log.raw(issued.token);
+  log.info("the token is shown once, in this result: hand it to the agent as A2APP_TOKEN, then let it go from this terminal.");
+  log.raw(JSON.stringify({ ok: true, token: issued.token, credential: issued.credential }, null, 2));
   return 0;
 }
 
@@ -96,6 +97,7 @@ async function revoke(client: A2AppClient, id: string | undefined): Promise<numb
   const res = await client.request("DELETE", `/api/_a2app/credentials/${encodeURIComponent(id)}`);
   if (res.status !== 200) return refused(`revoke ${id}`, res);
   log.ok(`revoked ${id}: it is refused from the next request on.`);
+  log.raw(JSON.stringify({ ok: true, revoked: id }, null, 2));
   return 0;
 }
 

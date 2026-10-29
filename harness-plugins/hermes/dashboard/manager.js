@@ -17,6 +17,14 @@
  * transcript every 2.5s, only while the page is visible. DOM is built with
  * createElement/textContent so app-provided strings never reach innerHTML.
  *
+ * The New + tab has three panels: Build (the agent builds a new app), the
+ * Marketplace (search, tag chips, a card per app, install), and Import (a zip,
+ * a folder or a git URL: inspect, then install, or hand a source that is not a
+ * package to the agent to convert or adopt). An install is a job on the
+ * server; the page polls it every second and shows each pipeline step from
+ * `install --events`, then opens the app in its tab. It never gives up on a
+ * running install, so no client timeout is shorter than the CLI's own.
+ *
  * An app runs on the Hermes machine's loopback interface, so it is embedded
  * only when the page itself is open over http on loopback; anywhere else the
  * frame would point at the viewer's own machine (or be blocked as mixed
@@ -37,26 +45,39 @@
     return n;
   }
 
-  /** One API call. Failures resolve to `{ ok: false, message }` rather than
-   *  throwing. On a non-2xx, fetchJSON throws an ApiError whose message is
-   *  already the body's `message`/`detail` and which keeps the raw body on
-   *  `.body`; older dashboards threw "<status>: <body>". Either way the body
-   *  is this API's own JSON. */
+  /** A failed call as this API's own `{ ok: false, message }`. On a non-2xx,
+   *  fetchJSON throws an ApiError whose message is already the body's
+   *  `message`/`detail` and which keeps the raw body on `.body`; older
+   *  dashboards threw "<status>: <body>". Either way the body is this API's
+   *  own JSON. */
+  function failure(e) {
+    var text = String((e && e.message) || e);
+    var legacy = /^(\d+): ([\s\S]*)$/.exec(text);
+    var raw = e && typeof e.body === "string" ? e.body : legacy ? legacy[2] : "";
+    // The HTTP status, when there was one (0: the request never got an answer).
+    var status = e && typeof e.status === "number" ? e.status : legacy ? Number(legacy[1]) : 0;
+    try {
+      var j = JSON.parse(raw);
+      if (j && typeof j === "object" && (j.message || j.detail)) return { ok: false, message: j.message || j.detail, status: status };
+    } catch (_) { /* not JSON */ }
+    return { ok: false, message: text, status: status };
+  }
+
+  /** One API call. Failures resolve to `{ ok: false, message }` rather than throwing. */
   function makeApi(fetchJSON) {
     return function api(path, body) {
       var init = body
         ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
         : undefined;
-      return Promise.resolve().then(function () { return fetchJSON(API + path, init); }).catch(function (e) {
-        var text = String((e && e.message) || e);
-        var legacy = /^\d+: ([\s\S]*)$/.exec(text);
-        var raw = e && typeof e.body === "string" ? e.body : legacy ? legacy[1] : "";
-        try {
-          var j = JSON.parse(raw);
-          if (j && typeof j === "object" && (j.message || j.detail)) return { ok: false, message: j.message || j.detail };
-        } catch (_) { /* not JSON */ }
-        return { ok: false, message: text };
-      });
+      return Promise.resolve().then(function () { return fetchJSON(API + path, init); }).catch(failure);
+    };
+  }
+
+  /** Send a zip as it is (no JSON, no encoding); the server keeps it for --from. */
+  function makeUpload(fetchJSON) {
+    return function upload(file) {
+      var init = { method: "POST", headers: { "Content-Type": "application/zip" }, body: file };
+      return Promise.resolve().then(function () { return fetchJSON(API + "/upload", init); }).catch(failure);
     };
   }
 
@@ -71,13 +92,19 @@
   function mount(root, host) {
     host = host || {};
     var api = makeApi(host.fetchJSON);
+    var upload = makeUpload(host.fetchJSON);
     var EMBEDDABLE = host.embeddable != null ? !!host.embeddable : LOOPBACK_HTTP;
     var noFrameReason = "";
     var S = {
-      meta: { blueprints: [], build: "dev" },
+      meta: { blueprints: [], steps: [], build: "dev" },
       rows: [], active: null, side: false,
       log: [], busy: false, error: null, sending: false,
       acting: new Set(), confirmDelete: null,
+      // The New + tab: which panel, the marketplace, the import, and an install in progress.
+      newMode: "build",
+      market: { q: "", tag: null, tags: [], data: null, error: null, loading: false, seq: 0, open: null },
+      imp: { kind: "zip", from: "", file: null, origin: null, label: "", uploaded: false, report: null, error: null, busy: false },
+      job: null,
     };
     var timers = [];
     var disposers = [];
@@ -251,19 +278,21 @@
       }
       panel.hidden = showFrame;
       var notice = S.notice && r && S.notice.path === r.path ? S.notice.text : "";
+      var isNew = S.active === "new" || !r;
       var key = showFrame
         ? "frame:" + r.path
         : S.apiError && !S.rows.length
           ? "apierror:" + S.apiError
-          : S.active === "new" || !r
-            ? "new"
+          : isNew
+            ? "new:" + S.newMode + (S.job ? ":job" : "")
             : ["app", r.path, r.status, r.building, r.buildEnded, S.acting.has(r.path), S.side, notice].join("|");
       if (key === viewKey) return;
       viewKey = key;
       if (showFrame) return;
       panel.replaceChildren();
+      panel.classList.toggle("aa-top", isNew && !(S.apiError && !S.rows.length));
       if (S.apiError && !S.rows.length) { panel.appendChild(apiErrorPanel()); return; }
-      if (S.active === "new" || !r) { panel.appendChild(buildForm()); return; }
+      if (isNew) { panel.appendChild(newPanel()); return; }
       panel.appendChild(appPanel(r, notice));
     }
     // The dashboard shows an enabled plugin's tab at once but mounts its API
@@ -327,7 +356,7 @@
     var form = {};
     function buildForm() {
       var f = el("div", "aa-form");
-      f.appendChild(el("h1", null, "Agent Apps"));
+      f.appendChild(el("h1", null, "Build an app"));
       f.appendChild(el("p", "aa-lead", "Describe the app; the agent builds, verifies, and serves it here."));
       f.appendChild(el("label", null, "App name"));
       form.name = el("input", "aa-input");
@@ -376,6 +405,490 @@
         S.active = out.path;
         return refresh().then(function () { toggleSide(true); });
       });
+    }
+
+    /* ── New tab: build · marketplace · import ── */
+    var MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"]];
+    var KINDS = { "agent-app": "Agent App package", "living-ui": "CraftBot Living UI app", foreign: "Not an Agent App" };
+    var ROUTES = {
+      convert: "Convert: the agent rebuilds it as a new Agent App, with the original source kept read-only in reference/source/. Nothing of the original code runs afterward.",
+      adopt: "Adopt: the app runs unchanged behind the framework’s sidecar adapter. Agents operate it through the operations the agent maps; its own UI stays at its own address.",
+    };
+    var STEP_ICONS = { pending: "○", start: "●", done: "✓", skipped: "–", failed: "✗" };
+    function message(e) { return String((e && e.message) || e); }
+
+    function newPanel() {
+      var wide = S.job || S.newMode !== "build";
+      var wrap = el("div", "aa-newpane" + (wide ? " wide" : ""));
+      if (S.job) { wrap.appendChild(jobView()); return wrap; }
+      var modes = el("div", "aa-modes");
+      MODES.forEach(function (m) {
+        var b = el("button", S.newMode === m[0] ? "on" : "", m[1]);
+        b.onclick = function () { S.newMode = m[0]; render(); };
+        modes.appendChild(b);
+      });
+      wrap.appendChild(modes);
+      wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : buildForm());
+      return wrap;
+    }
+    function errorBox(text, retry) {
+      var box = el("div", "aa-errbox");
+      box.appendChild(el("pre", "aa-code", text));
+      if (retry) { var b = el("button", "aa-btn small", "Retry"); b.onclick = retry; box.appendChild(b); }
+      return box;
+    }
+    function section(parent, title, body) {
+      var s = el("div", "aa-section");
+      s.appendChild(el("h3", null, title));
+      s.appendChild(body);
+      parent.appendChild(s);
+    }
+    function list(items, cls) {
+      var ul = el("ul", cls);
+      items.forEach(function (item) { ul.appendChild(el("li", null, item)); });
+      return ul;
+    }
+    function find(items, pred) { for (var i = 0; i < items.length; i++) if (pred(items[i])) return items[i]; return null; }
+
+    /* Marketplace: the catalogue (searched by the CLI), filtered by tag, one card per app. */
+    var marketEls = null;
+    function tagsOf(apps) {
+      var seen = new Set();
+      apps.forEach(function (a) { (Array.isArray(a.tags) ? a.tags : []).forEach(function (t) { seen.add(t); }); });
+      return Array.from(seen).sort();
+    }
+    function marketView() {
+      var v = el("div", "aa-pane");
+      v.appendChild(el("h1", null, "Marketplace"));
+      v.appendChild(el("p", "aa-lead", "Apps ready to install. A marketplace app is catalogued: once it runs there is nothing more to verify."));
+      var q = el("input", "aa-input");
+      q.type = "search";
+      q.placeholder = "Search apps";
+      q.value = S.market.q;
+      q.autocomplete = "off";
+      var timer = 0;
+      q.oninput = function () { clearTimeout(timer); timer = setTimeout(function () { loadCatalogue(q.value.trim()); }, 300); };
+      var row = el("div", "aa-searchrow");
+      row.appendChild(q);
+      v.appendChild(row);
+      marketEls = { chips: el("div", "aa-chips"), status: el("div"), grid: el("div", "aa-grid") };
+      v.append(marketEls.chips, marketEls.status, marketEls.grid);
+      if (S.market.data === null && !S.market.loading && S.market.error === null) loadCatalogue(S.market.q);
+      else renderMarket();
+      return v;
+    }
+    function loadCatalogue(q) {
+      var m = S.market;
+      var seq = ++m.seq;
+      m.q = q;
+      m.loading = true;
+      m.error = null;
+      renderMarket();
+      return api("/catalogue?search=" + encodeURIComponent(q)).then(function (out) {
+        if (seq !== m.seq) return; // a newer search answered meanwhile
+        m.loading = false;
+        if (out.ok) {
+          m.data = out;
+          if (q === "") m.tags = tagsOf(out.apps);
+        } else {
+          m.data = null;
+          m.error = out.message || "The marketplace did not answer.";
+        }
+        renderMarket();
+      });
+    }
+    function renderMarket() {
+      if (!marketEls) return;
+      var m = S.market;
+      marketEls.chips.replaceChildren();
+      (m.tags.length ? m.tags : m.data ? tagsOf(m.data.apps) : []).forEach(function (t) {
+        var c = el("button", "aa-chip" + (m.tag === t ? " on" : ""), t);
+        c.onclick = function () { m.tag = m.tag === t ? null : t; renderMarket(); };
+        marketEls.chips.appendChild(c);
+      });
+      marketEls.status.replaceChildren();
+      marketEls.grid.replaceChildren();
+      if (m.error) { marketEls.status.appendChild(errorBox(m.error, function () { loadCatalogue(m.q); })); return; }
+      if (!m.data) { marketEls.status.appendChild(el("div", "aa-empty", "Reading the marketplace…")); return; }
+      var src = m.data.source || {};
+      var from = "From " + (src.repository || src.location || "the marketplace") + (src.fallbackFrom ? " (" + src.fallbackFrom.location + " is unavailable)" : "");
+      marketEls.status.appendChild(el("p", "aa-note", m.loading ? "Searching…" : from));
+      var apps = m.data.apps.filter(function (a) { return !m.tag || (Array.isArray(a.tags) && a.tags.indexOf(m.tag) >= 0); });
+      if (!apps.length) { marketEls.grid.appendChild(el("div", "aa-empty", m.q || m.tag ? "No app matches." : "The marketplace lists no apps.")); return; }
+      apps.forEach(function (a) { marketEls.grid.appendChild(appCard(a, src.location)); });
+    }
+    function thumb(a) {
+      var t = el("div", "aa-thumb");
+      function initial() { t.replaceChildren(document.createTextNode((a.name || a.id || "?").slice(0, 1).toUpperCase())); }
+      // A local marketplace's preview is a file: URL, which a page cannot load.
+      if (typeof a.preview === "string" && /^https?:/i.test(a.preview)) {
+        var img = document.createElement("img");
+        img.alt = "";
+        img.loading = "lazy";
+        img.onerror = initial;
+        img.src = a.preview;
+        t.appendChild(img);
+      } else initial();
+      return t;
+    }
+    function appCard(a, source) {
+      var card = el("div", "aa-app");
+      card.appendChild(thumb(a));
+      var body = el("div", "aa-app-body");
+      var h = el("h3", null, a.name || a.id);
+      if (a.version) h.appendChild(el("span", "aa-ver", "v" + a.version));
+      body.appendChild(h);
+      if (Array.isArray(a.tags) && a.tags.length) {
+        var tags = el("div", "aa-tags");
+        a.tags.forEach(function (t) { tags.appendChild(el("span", "aa-tag", t)); });
+        body.appendChild(tags);
+      }
+      if (a.description) body.appendChild(el("p", "aa-desc", a.description));
+      body.appendChild(a.compatible === true ? el("div", "aa-compat yes", "✓ Runs here")
+        : a.compatible === false ? el("div", "aa-compat no", "Not installable here: " + (a.reason || "no reason given"))
+          : el("div", "aa-compat", "Its requirements are not listed"));
+      var fields = Array.isArray(a.customizable) ? a.customizable : [];
+      var label = a.name || a.id;
+      var actions = el("div", "aa-actions");
+      if (a.compatible === false) {
+        var what = el("button", "aa-btn small", "What can be done?");
+        what.onclick = function () { inspectSource({ id: a.id, source: source }, label); };
+        actions.appendChild(what);
+      } else if (S.market.open === a.id) {
+        var form = el("div", "aa-fields");
+        var inputs = {};
+        fields.forEach(function (f) {
+          form.appendChild(el("label", null, f.label || f.key));
+          var i = el("input", "aa-input");
+          i.value = f.default || "";
+          i.placeholder = f.placeholder || "";
+          i.autocomplete = "off";
+          inputs[f.key] = i;
+          form.appendChild(i);
+        });
+        body.appendChild(form);
+        var go = el("button", "aa-btn primary small", "Install");
+        go.onclick = function () {
+          var set = {};
+          Object.keys(inputs).forEach(function (k) { set[k] = inputs[k].value; });
+          startInstall({ id: a.id, source: source, set: set }, label);
+        };
+        var cancel = el("button", "aa-btn small", "Cancel");
+        cancel.onclick = function () { S.market.open = null; renderMarket(); };
+        actions.append(go, cancel);
+      } else {
+        var install = el("button", "aa-btn primary small", "Install");
+        install.onclick = function () {
+          if (fields.length) { S.market.open = a.id; renderMarket(); }
+          else startInstall({ id: a.id, source: source }, label);
+        };
+        actions.appendChild(install);
+      }
+      body.appendChild(actions);
+      card.appendChild(body);
+      return card;
+    }
+
+    /* Import: a zip, a folder or a git URL; inspect first, then install or hand it to the agent. */
+    var importEls = null;
+    var SOURCES = [
+      ["zip", "Zip file", ""],
+      ["folder", "Folder", "A folder on the machine running Hermes, e.g. /home/me/apps/board"],
+      ["git", "Git or GitHub", "https://github.com/owner/repo, github:owner/repo@main/path, or git+https://host/repo.git#ref"],
+    ];
+    function importView() {
+      var v = el("div", "aa-pane");
+      v.appendChild(el("h1", null, "Import"));
+      v.appendChild(el("p", "aa-lead", "Bring in an app from a zip, a folder or a git repository. Inspect it first: nothing from it runs until you install it."));
+      var kinds = el("div", "aa-modes");
+      var input = el("div");
+      var go = el("button", "aa-btn primary", "Inspect");
+      function drawInput() {
+        kinds.replaceChildren();
+        SOURCES.forEach(function (spec) {
+          var b = el("button", S.imp.kind === spec[0] ? "on" : "", spec[1]);
+          b.onclick = function () { S.imp.kind = spec[0]; drawInput(); };
+          kinds.appendChild(b);
+        });
+        input.replaceChildren();
+        if (S.imp.kind === "zip") {
+          var f = el("input", "aa-input");
+          f.type = "file";
+          f.accept = ".zip,application/zip";
+          f.onchange = function () { S.imp.file = f.files && f.files[0] ? f.files[0] : null; };
+          input.appendChild(f);
+          if (S.imp.file) input.appendChild(el("p", "aa-note", "Chosen: " + S.imp.file.name));
+        } else {
+          var t = el("input", "aa-input");
+          t.placeholder = find(SOURCES, function (x) { return x[0] === S.imp.kind; })[2];
+          t.value = S.imp.from;
+          t.autocomplete = "off";
+          t.oninput = function () { S.imp.from = t.value; };
+          t.onkeydown = function (e) { if (e.key === "Enter") go.click(); };
+          input.appendChild(t);
+        }
+      }
+      go.onclick = function () {
+        S.imp.error = null;
+        if (S.imp.kind === "zip") {
+          if (!S.imp.file) { S.imp.error = "Choose a .zip file."; renderReport(); return; }
+          inspectZip(S.imp.file);
+        } else {
+          var from = S.imp.from.trim();
+          if (!from) { S.imp.error = S.imp.kind === "git" ? "Give a git or GitHub URL." : "Give a folder path."; renderReport(); return; }
+          runInspect({ from: from }, from);
+        }
+      };
+      drawInput();
+      var row = el("div", "aa-row aa-gap");
+      row.appendChild(go);
+      importEls = { go: go, report: el("div") };
+      v.append(kinds, input, row, importEls.report);
+      renderReport();
+      return v;
+    }
+    function runInspect(origin, label, uploaded) {
+      var m = S.imp;
+      m.busy = true;
+      m.error = null;
+      m.report = null;
+      m.origin = origin;
+      m.label = label;
+      m.uploaded = !!uploaded;
+      renderReport();
+      return api("/inspect", origin).then(function (out) {
+        if (m.origin !== origin) return;
+        m.busy = false;
+        if (out.ok) m.report = out.report;
+        else m.error = out.message || "The source could not be inspected.";
+        renderReport();
+      });
+    }
+    function inspectZip(file) {
+      S.imp.busy = true;
+      S.imp.report = null;
+      S.imp.error = null;
+      renderReport();
+      return upload(file).then(function (out) {
+        if (!out.ok) { S.imp.busy = false; S.imp.error = out.message || "The upload was refused."; renderReport(); return; }
+        return runInspect({ from: out.file }, file.name, true);
+      });
+    }
+    /** From a marketplace card: show what an app is, and what can be done with it, in the Import panel. */
+    function inspectSource(origin, label) {
+      S.newMode = "import";
+      render();
+      runInspect(origin, label);
+    }
+    function renderReport() {
+      if (!importEls) return;
+      var m = S.imp;
+      var box = importEls.report;
+      importEls.go.disabled = m.busy;
+      box.replaceChildren();
+      if (m.busy) { box.appendChild(el("div", "aa-empty", "Inspecting… it is staged and read; nothing from it runs.")); return; }
+      if (m.error) { box.appendChild(errorBox(m.error)); return; }
+      var r = m.report;
+      if (!r) return;
+      var card = el("div", "aa-report");
+      var badges = el("div", "aa-badges");
+      badges.appendChild(el("span", "aa-badge", KINDS[r.kind] || r.kind));
+      badges.appendChild(el("span", "aa-badge " + (r.installable ? "ok" : "no"), r.installable ? "Installable" : "Not installable"));
+      card.appendChild(badges);
+      var name = (r.app && r.app.name) || (r.source && r.source.name) || "";
+      card.appendChild(el("h2", null, name || m.label));
+      if (!r.installable && r.reason) card.appendChild(el("p", "aa-sub", r.reason));
+      var kv = el("dl", "aa-kv");
+      function row(k, v) { if (v) { kv.appendChild(el("dt", null, k)); kv.appendChild(el("dd", null, v)); } }
+      var src = r.source || {};
+      // An upload's location is the manager's private copy: name the file that was chosen.
+      row("Source", m.uploaded ? m.label + " (uploaded)"
+        : (src.catalogueId ? "marketplace app " + src.catalogueId + " in " : "") + (src.location || m.label) + (src.ref ? " @ " + src.ref : ""));
+      row("Commit", src.commit);
+      row("SHA-256", src.sha256);
+      if (r.app) { row("Sign-in", r.app.authMode); row("Modules", (r.app.modules || []).join(", ")); }
+      if (r.toolkit) {
+        var av = r.toolkit.adapterVersion || {};
+        row("Toolkit", (r.toolkit.id || "none named") + (r.toolkit.installed ? " (installed here)" : " (not installed here)") +
+          (av.package && av.current && av.package !== av.current ? "; adapter " + av.package + " → " + av.current : ""));
+      }
+      if (r.integrity && r.kind === "agent-app") {
+        row("System files", r.integrity.canon === "drifted" ? "changed: " + (r.integrity.changed || []).join(", ") + " (install replaces them)"
+          : r.integrity.canon === "intact" ? "as its own record says" : "no record (install makes one)");
+      }
+      card.appendChild(kv);
+      if (r.pipeline) {
+        var lines = Object.keys(r.pipeline).map(function (k) { return k + ": " + (typeof r.pipeline[k] === "string" ? r.pipeline[k] : JSON.stringify(r.pipeline[k])); });
+        section(card, "What it will run (from the toolkit installed here, not from the package)", el("pre", "aa-code", lines.join("\n")));
+      }
+      if (r.capabilities && Object.keys(r.capabilities).length) section(card, "What it declares", el("pre", "aa-code", JSON.stringify(r.capabilities, null, 2)));
+      if (r.strips && r.strips.length) section(card, "What install removes", list(r.strips));
+      if (r.placeholders && r.placeholders.length) section(card, "Placeholders filled at install", list(r.placeholders));
+      if (r.warnings && r.warnings.length) section(card, "Warnings", list(r.warnings, "warn"));
+      if (r.installable) card.appendChild(installForm(m.origin, name || m.label));
+      else if (r.routes && r.routes.length) card.appendChild(handoff(m.origin, r.routes, name));
+      box.appendChild(card);
+    }
+    function installForm(origin, name) {
+      var v = el("div", "aa-section");
+      v.appendChild(el("label", null, "Name"));
+      var n = el("input", "aa-input");
+      n.value = name;
+      n.autocomplete = "off";
+      v.appendChild(n);
+      var go = el("button", "aa-btn primary aa-gap", "Install");
+      go.onclick = function () {
+        var chosen = n.value.trim();
+        startInstall(Object.assign({}, origin, chosen ? { name: chosen } : {}), chosen || name);
+      };
+      v.appendChild(go);
+      v.appendChild(el("p", "aa-note", origin.id
+        ? "A marketplace app: once it runs there is nothing more to verify."
+        : "Not from the marketplace: once it runs, have a separate agent walk-verify it before it is used for real work."));
+      return v;
+    }
+    /** A source that is not a package: say what can be done, and start the agent on it in a new app's session. */
+    function handoff(origin, routes, name) {
+      var v = el("div", "aa-section");
+      v.appendChild(el("h3", null, "What can be done instead"));
+      routes.forEach(function (route) { v.appendChild(el("div", "aa-route", ROUTES[route] || route)); });
+      v.appendChild(el("label", null, "Name for the new app"));
+      var n = el("input", "aa-input");
+      n.value = name || "";
+      n.autocomplete = "off";
+      v.appendChild(n);
+      var row = el("div", "aa-row aa-gap");
+      var err = el("div", "aa-err");
+      routes.forEach(function (route, i) {
+        var b = el("button", "aa-btn" + (i === 0 ? " primary" : ""), route === "adopt" ? "Adopt it with the agent" : "Convert it with the agent");
+        b.onclick = function () {
+          err.textContent = "";
+          var appName = n.value.trim();
+          if (!appName) { err.textContent = "Give the new app a name."; return; }
+          b.disabled = true;
+          api("/import/agent", Object.assign({ action: route === "adopt" ? "adopt" : "import", name: appName }, origin)).then(function (out) {
+            b.disabled = false;
+            if (!out.ok) { err.textContent = out.message; return; }
+            S.job = null;
+            S.active = out.path;
+            return refresh().then(function () { toggleSide(true); });
+          });
+        };
+        row.appendChild(b);
+      });
+      v.append(row, err);
+      v.appendChild(el("p", "aa-note", "The agent works in the new app’s session, in the side panel, and settles the details with you there through the importer skill."));
+      return v;
+    }
+
+    /* An install: a job on the server, polled until it ends, then the app opens in its tab. */
+    var jobEls = null;
+    var jobTimer = 0;
+    function startInstall(request, label) {
+      S.market.open = null;
+      S.job = { label: label, request: request, data: null, error: null };
+      render();
+      var job = S.job;
+      return api("/install", request).then(function (out) {
+        if (S.job !== job) return;
+        if (out.ok) job.data = out.job;
+        else job.error = out.message || "The install did not start.";
+        renderJob();
+        pollJob();
+      });
+    }
+    function pollJob() {
+      clearTimeout(jobTimer);
+      var job = S.job;
+      if (!job || !job.data || job.data.done) return;
+      jobTimer = setTimeout(function () {
+        api("/install?job=" + encodeURIComponent(job.data.id)).then(function (out) {
+          if (S.job !== job) return;
+          if (!out.ok) {
+            // A dropped poll is retried; a job the server no longer knows is reported.
+            if (out.status === 404) { job.error = out.message; renderJob(); }
+            else pollJob();
+            return;
+          }
+          job.data = out.job;
+          renderJob();
+          if (job.data.done) finished(job);
+          else pollJob();
+        });
+      }, 1000);
+    }
+    function finished(job) {
+      var r = job.data.result;
+      if (!job.data.ok || !r || S.active !== "new") return;
+      // Installed and serving: show it in its own tab.
+      refresh().then(function () {
+        if (S.job !== job || S.active !== "new") return;
+        S.job = null;
+        S.active = r.dir;
+        render();
+      });
+    }
+    function jobView() {
+      var v = el("div", "aa-pane");
+      jobEls = { box: v };
+      renderJob();
+      return v;
+    }
+    function renderJob() {
+      if (!jobEls || !S.job) return;
+      var job = S.job;
+      var d = job.data;
+      var r = d && d.result;
+      var box = jobEls.box;
+      box.replaceChildren();
+      var ended = !!(d && d.done) || !!job.error;
+      var installed = !!(r && r.dir);
+      box.appendChild(el("h1", null, !ended ? "Installing “" + job.label + "”"
+        : d && d.ok ? "Installed “" + job.label + "”"
+          : installed ? "“" + job.label + "” needs fixing" : "The install of “" + job.label + "” stopped"));
+      var steps = new Map(((d && d.steps) || []).map(function (s) { return [s.step, s]; }));
+      var ol = el("ol", "aa-steps");
+      S.meta.steps.forEach(function (name) {
+        var s = steps.get(name);
+        var state = s ? s.status : "pending";
+        var li = el("li", state);
+        li.appendChild(el("span", "aa-ic", STEP_ICONS[state] || ""));
+        li.appendChild(el("span", "aa-nm", name));
+        var detail = s ? s.error || s.reason || "" : "";
+        if (detail) li.appendChild(el("span", "aa-dt", detail));
+        ol.appendChild(li);
+      });
+      box.appendChild(ol);
+      if (!ended) {
+        box.appendChild(el("p", "aa-note", "A download and the app’s dependencies can take several minutes. This page follows the install until it ends; leaving it does not stop it."));
+        return;
+      }
+      var row = el("div", "aa-row");
+      var back = el("button", "aa-btn", "Back");
+      back.onclick = function () { S.job = null; render(); };
+      var open = el("button", "aa-btn primary", "Open it");
+      open.onclick = function () { S.job = null; S.active = r.dir; render(); };
+      if (d && d.ok) {
+        box.appendChild(el("p", "aa-sub", r.url ? "It is serving at " + r.url + "." : "It is installed."));
+        if (r.next && r.next.length) section(box, "Still to do", list(r.next));
+        row.append(open, back);
+      } else if (installed) {
+        box.appendChild(el("p", "aa-sub", "It is installed but does not pass its gate, so it stays registered to be fixed."));
+        var failures = (r.gate && r.gate.failures) || [];
+        if (failures.length) section(box, "What the gate found", list(failures.map(function (f) { return (f.step ? f.step + ": " : "") + (f.message || ""); })));
+        row.append(open, back);
+      } else {
+        box.appendChild(errorBox(job.error || (d && d.error) || "The install failed."));
+        if (r && r.routes && r.routes.length) {
+          var origin = {};
+          ["id", "from", "source"].forEach(function (k) { if (job.request[k]) origin[k] = job.request[k]; });
+          box.appendChild(handoff(origin, r.routes, job.request.name || ""));
+        }
+        var retry = el("button", "aa-btn primary", "Retry");
+        retry.onclick = function () { startInstall(job.request, job.label); };
+        row.append(retry, back);
+      }
+      box.appendChild(row);
     }
 
     /* ── Session panel ── */
@@ -548,7 +1061,7 @@
     function loadMeta() {
       return api("/meta").then(function (meta) {
         if (!meta.ok) return;
-        S.meta = { blueprints: meta.blueprints || [], build: meta.build || "dev", loaded: true };
+        S.meta = { blueprints: meta.blueprints || [], steps: meta.steps || [], build: meta.build || "dev", loaded: true };
         viewKey = "";
       });
     }
@@ -558,6 +1071,7 @@
 
     function dispose() {
       timers.forEach(clearInterval);
+      clearTimeout(jobTimer);
       disposers.forEach(function (d) { d(); });
       root.replaceChildren();
     }

@@ -47,13 +47,13 @@ const TOOLKITS: ToolkitSpec[] = [
     noBuild: true,
     incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
   },
-  // Ships the adapter hooks, the starter migration and a React View, but
-  // `install` prints "download the pocketbase binary" rather than fetching it,
-  // so a fresh scaffold has no runtime until someone does.
+  // Runtime, model and View are complete — `install` fetches the pinned
+  // PocketBase itself — but it ships the requirements template unfilled, the
+  // same stance as python-fastapi.
   {
     id: "blueprint-pocketbase-react",
     noBuild: true,
-    incompleteBecause: "ships adapter hooks, a starter migration and a React View; the PocketBase binary is added by hand",
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
   },
   // The native-port blueprints (Go, Rust, Ruby): runtime, model and View are
   // complete, but each ships the requirements template unfilled — the spec is
@@ -72,6 +72,15 @@ const TOOLKITS: ToolkitSpec[] = [
     id: "blueprint-rails-vue",
     noBuild: true,
     incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
+  },
+  // Adopts a foreign app as-is: the sidecar adapter (@a2app/reverse-proxy) in
+  // front of an app the author places in upstream/. A fresh scaffold has no app
+  // behind it, so there is nothing yet to map, run, or specify. Its build is
+  // `npm install` of the sidecar, so the scaffold is checked without it.
+  {
+    id: "blueprint-sidecar",
+    noBuild: true,
+    incompleteBecause: "ships the sidecar wiring with no app behind it; the app to adopt, its mapping and its spec are the author's",
   },
 ];
 

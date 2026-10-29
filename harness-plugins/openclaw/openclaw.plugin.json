@@ -1,7 +1,7 @@
 {
   "id": "a2app",
   "name": "Agent App Framework",
-  "description": "Build and operate full Agent Apps over the A2App protocol via the agent-app and a2app CLIs. Adds an 'Agent Apps' Control UI tab — a form to build, evolve, or operate an app — as the framework's front door.",
+  "description": "Build, operate, install and import full Agent Apps over the A2App protocol via the agent-app and a2app CLIs. Adds an 'Agent Apps' Control UI tab — build an app, install one from the marketplace or import one from a zip, folder or git URL — as the framework's front door.",
   "icon": "https://cdn.simpleicons.org/probot",
   "enabledByDefault": false,
   "configSchema": {

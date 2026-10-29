@@ -42,6 +42,10 @@ you re-verify.
 - Confirm the app is up first: `a2app <dir> identity` must answer with the
   intended `app.id` (the operate client verifies it is talking to the dev
   instance before answering).
+- **The browser is a tool your harness gives you** — navigate, click, type,
+  screenshot (in Claude Code, a browser MCP server the user has added). With
+  none available, the verdict is **blocked**: say so, name what is missing, and
+  never substitute reading the code or calling the API for driving the UI.
 
 ## Part 1 — Functional checks
 

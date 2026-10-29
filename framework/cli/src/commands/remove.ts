@@ -11,19 +11,19 @@
  *   3. Confirmation — does nothing without an explicit --yes; without it, prints
  *      exactly what would happen and stops (exit 2).
  *
- * Before deleting, the live DATA directory is copied to an OUT-OF-APP backup
- * under the framework home. An app's code is reproducible from its toolkit; its
- * data is not, so removal preserves the one irreplaceable part. (An in-app
- * backup would be deleted along with the app, which is why `backup` is not
- * reused here.)
+ * Before deleting, the live DATA directory and the app's own backups are copied
+ * OUT of the app, to `removed/<name>-<id>/{data,backups}` under the framework
+ * home. An app's code is reproducible from its toolkit; its data is not, and
+ * neither is a backup someone took on purpose — which lives inside the app and
+ * would otherwise go with it.
  *
  * For registry-only cleanup that never touches files, use `forget`.
  */
 import { renameSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { loadProject, UsageError } from "../lib/project.js";
 import { canonPaths } from "../lib/canon.js";
-import { assertNotServing, backupId, dataDir, lifecycleLock, liveExists } from "../lib/lifecycle.js";
+import { assertNotServing, backupId, backupsDir, dataDir, lifecycleLock, listBackups, liveExists } from "../lib/lifecycle.js";
 import { copyDirAtomic } from "../lib/fsx.js";
 import { withLock } from "../lib/lock.js";
 import { unregister } from "../lib/registry.js";
@@ -94,19 +94,21 @@ export async function run(args: string[], app: string): Promise<number> {
 
   // Guard 2 — liveness. Throws EnvError (exit 1) with an actionable message if
   // this app is answering on its port.
-  await assertNotServing(project);
+  await assertNotServing(project, "remove it");
 
   const src = dataDir(project.dir);
   const hasData = src !== null && liveExists(project.dir);
+  const hasBackups = listBackups(project.dir, { includeInternal: true }).length > 0;
 
   // Guard 3 — confirmation. Show the consequences and stop until --yes.
   if (!hasFlag(args, "yes")) {
     log.warn(`This will DELETE "${name}" and drop it from the registry.`);
     log.info(`  directory:  ${project.dir}`);
     log.info(`  port freed: ${port ?? "—"}`);
-    log.info(hasData ? `  data backed up under ${homePath(REMOVED_ROOT)} first` : `  no live data to back up`);
+    const kept = [...(hasData ? ["its data"] : []), ...(hasBackups ? ["its backups"] : [])];
+    log.info(kept.length > 0 ? `  ${kept.join(" and ")} kept under ${homePath(REMOVED_ROOT)} first` : `  no data or backups to keep`);
     log.info(`Re-run with --yes to proceed.`);
-    log.raw(JSON.stringify({ ok: false, removed: null, reason: "unconfirmed", dir: project.dir, hasData }, null, 2));
+    log.raw(JSON.stringify({ ok: false, removed: null, reason: "unconfirmed", dir: project.dir, hasData, hasBackups }, null, 2));
     return 2;
   }
 
@@ -118,15 +120,21 @@ export async function run(args: string[], app: string): Promise<number> {
   // whereas a rename either moves the whole tree or changes nothing. After it
   // the app is gone from its path. `unregister` takes the (different) home lock,
   // so there is no reentrant-lock deadlock.
-  const { dataBackup, aside } = await withLock(lifecycleLock(project.dir), async () => {
-    let backup: string | null = null;
+  const { dataBackup, backupsKept, aside } = await withLock(lifecycleLock(project.dir), async () => {
+    const kept = homePath(REMOVED_ROOT, `${safeName(name)}-${backupId(new Date())}`);
+    let data: string | null = null;
+    let backups: string | null = null;
     if (hasData && src !== null) {
-      backup = homePath(REMOVED_ROOT, `${safeName(name)}-${backupId(new Date())}`, "data");
-      copyDirAtomic(src, backup); // atomic + file-count verified; throws on a torn copy
+      data = join(kept, "data");
+      copyDirAtomic(src, data); // atomic + file-count verified; throws on a torn copy
+    }
+    if (hasBackups) {
+      backups = join(kept, "backups");
+      copyDirAtomic(backupsDir(project.dir), backups);
     }
     const target = `${project.dir}.removing-${process.pid}-${asideCounter++}`;
     renameWithRetry(project.dir, target);
-    return { dataBackup: backup, aside: target };
+    return { dataBackup: data, backupsKept: backups, aside: target };
   });
 
   // The app is gone from its path; drop the registry row. If this fails, the
@@ -143,11 +151,12 @@ export async function run(args: string[], app: string): Promise<number> {
   }
 
   log.ok(`removed "${name}"${port !== undefined ? ` (port ${port} released)` : ""}`);
-  if (dataBackup) log.info(`data backed up at ${dirname(dataBackup)}`);
+  if (dataBackup) log.info(`data kept at ${dataBackup}`);
+  if (backupsKept) log.info(`backups kept at ${backupsKept}`);
   if (!reclaimed) log.warn(`could not fully delete ${aside} (a process may hold it) — remove it manually later.`);
   log.raw(
     JSON.stringify(
-      { ok: true, removed: { id, name, path: project.dir, port: port ?? null }, dataBackup },
+      { ok: true, removed: { id, name, path: project.dir, port: port ?? null }, dataBackup, backups: backupsKept },
       null,
       2,
     ),

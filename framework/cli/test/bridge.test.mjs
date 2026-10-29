@@ -1076,6 +1076,52 @@ if (process.platform === "win32") {
   rmSync(dir, { recursive: true, force: true });
 }
 
+/* ------------- a refused heartbeat is read: finishing is not losing the claim */
+
+// The app refuses progress on a task that is no longer working. A run that
+// completed its own task and is still exiting must be left to exit; only a task
+// that went back to the queue (or to someone else) is a lost claim.
+{
+  const { deliverAndSettle } = await import(pathToFileURL(resolve(here, "..", "dist", "lib", "bridge.js")).href);
+  const runWhere = async (status) => {
+    const dir = mkdtempSync(join(tmpdir(), "a2app-bridge-refused-"));
+    const slow = join(dir, "slow-harness.mjs");
+    const done = join(dir, "exited-on-its-own");
+    writeFileSync(
+      slow,
+      `import { writeFileSync } from "node:fs";\nsetTimeout(() => { writeFileSync(${JSON.stringify(done)}, ""); process.exit(0); }, 900);\n`,
+    );
+    let calls = 0;
+    const client = {
+      // the "delivered to" step and the first beat are accepted, then refused
+      progressTask: async () => (++calls <= 2 ? { ok: true, status: 200, json: {} } : { ok: false, status: 409, json: { code: "task_not_claimable" } }),
+      getTask: async () => ({ ok: true, status: 200, json: { id: "tsk_refused", status } }),
+      completeTask: async () => ({ ok: true, status: 200, json: {} }),
+    };
+    const delivery = await deliverAndSettle(
+      {
+        project: { dir },
+        client,
+        profile: { id: "fake", name: "Fake", routes: [] },
+        route: { mode: "headless", command: process.execPath, args: [slow, "{prompt}"] },
+        prompt: { appRef: dir, appName: "Refused", appId: "refused", closesOnExit: true, cwdIsApp: true },
+        taskTimeoutMs: 10_000,
+        heartbeatMs: 100,
+        capabilities: null,
+        dryRun: false,
+      },
+      task("tsk_refused", "summarize", {}),
+    );
+    const exited = existsSync(done);
+    rmSync(dir, { recursive: true, force: true });
+    return { code: delivery.code, exited };
+  };
+  const finishing = await runWhere("completed");
+  check("a run that completed its own task is left to exit", finishing, { code: "delivered", exited: true });
+  const lost = await runWhere("submitted");
+  check("a run whose task went back to the queue is abandoned", lost, { code: "claim_lost", exited: false });
+}
+
 /* ------------------- a harness that cannot be started fails the task at once */
 
 // spawn() throws synchronously for some failures (EINVAL on Windows batch
@@ -1093,6 +1139,21 @@ await withApp([task("tsk_throw", "summarize", {})], async ({ port, state }) => {
   check("a harness that cannot be started fails the pass", res.code, 1);
   check("…and the task, at once", state.get("tsk_throw").status, "failed");
   check("…saying it could not be started", state.get("tsk_throw").reason, "harness_spawn_failed");
+  rmSync(home, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+/* -------------------------- closing a task with a summary, no JSON to quote */
+
+// A JSON argument does not survive every shell (Windows PowerShell strips its
+// inner quotes), and a summary is what a result most often is.
+await withApp([{ ...task("tsk_sum", "summarize", {}), status: "working" }, { ...task("tsk_bad", "summarize", {}), status: "working" }], async ({ port, state }) => {
+  const dir = makeAppDir(port);
+  const home = makeHome([], null);
+  const done = await cli(A2APP, [dir, "tasks", "complete", "tsk_sum", "--summary", "two notes merged"], { A2APP_HOME: home });
+  check("tasks complete --summary closes the task with that summary", [done.code, state.get("tsk_sum").result], [0, { summary: "two notes merged" }]);
+  const bad = await cli(A2APP, [dir, "tasks", "complete", "tsk_bad", "--result", "{not json"], { A2APP_HOME: home });
+  check("…and a --result that is not JSON is a usage error, not a crash", [bad.code, state.get("tsk_bad").status], [2, "working"]);
   rmSync(home, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 });

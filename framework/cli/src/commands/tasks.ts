@@ -4,7 +4,7 @@
  * a2app <app> tasks get <id>                        task status + pollAfterMs
  * a2app <app> tasks claim <id> [--as <credentialId>] atomically claim
  * a2app <app> tasks progress <id> [--step "..."] [--percent N]
- * a2app <app> tasks complete <id> --result '{...}' | --reason <code>
+ * a2app <app> tasks complete <id> --summary "..." | --result '{...}' | --reason <code>
  * a2app <app> tasks cancel <id>
  *
  * The app-to-agent queue: the app triggers work, the agent polls, claims, and
@@ -63,11 +63,10 @@ export async function run(args: string[], app: string): Promise<number> {
     }
     case "complete": {
       const reason = flag(args, "reason");
-      const resultJson = flag(args, "result");
       const payload =
         reason !== undefined
           ? ({ status: "failed", reason } as const)
-          : ({ status: "completed", result: resultJson ? JSON.parse(resultJson) : {} } as const);
+          : ({ status: "completed", result: completionResult(args) } as const);
       return emit(...(await asPair(client.completeTask(id!, payload))));
     }
     case "cancel":
@@ -126,6 +125,26 @@ async function next(args: string[], client: A2AppClient): Promise<number> {
     const gap = Math.min(body?.pollAfterMs ?? FALLBACK_POLL_MS, Math.max(waitMs - elapsed, 50));
     await new Promise((r) => setTimeout(r, gap));
   }
+}
+
+/**
+ * A completed task's result: `--result` JSON, with `--summary` as its summary.
+ * `--summary` exists because a JSON argument does not survive every shell
+ * (Windows PowerShell strips its inner quotes), and a summary is what a result
+ * most often is.
+ */
+function completionResult(args: string[]): Record<string, unknown> {
+  const json = flag(args, "result");
+  let result: Record<string, unknown> = {};
+  if (json !== undefined) {
+    try {
+      result = JSON.parse(json) as Record<string, unknown>;
+    } catch (err) {
+      throw new UsageError(`--result is not valid JSON (${(err as Error).message}); for a plain summary use --summary "…"`);
+    }
+  }
+  const summary = flag(args, "summary");
+  return summary === undefined ? result : { ...result, summary };
 }
 
 async function asPair(p: Promise<A2AppResponse>): Promise<[number, string]> {

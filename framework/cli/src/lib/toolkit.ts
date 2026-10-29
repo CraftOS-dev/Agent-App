@@ -22,8 +22,8 @@
  * The app records which toolkit it came from in `.a2app/toolkit.json`
  * `{ "id": "...", "source": "<abs path>" }` so sync commands can find it again.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertInside, assertRealInside, copyTree } from "./fsx.js";
 
@@ -34,6 +34,8 @@ export interface GateStep {
 
 export interface ToolkitManifest {
   id: string;
+  /** what the toolkit builds with, in a sentence or two */
+  description?: string;
   template?: string;
   adapterVersionFrom?: string;
   systemPaths: string[];
@@ -79,15 +81,29 @@ function toolkitSearchRoots(): string[] {
   return roots;
 }
 
-/** Resolve a `--blueprint` value (path or bare id) to a toolkit directory. */
-export function resolveToolkit(idOrPath: string): ResolvedToolkit {
+/**
+ * Resolve a `--blueprint` value (path or bare id) to a toolkit directory.
+ *
+ * `exclude` names trees no toolkit may be taken from. Installing a package
+ * passes the package itself: the search roots include the working directory,
+ * so a package imported in place from its own folder could otherwise ship a
+ * folder named after the toolkit it records and have its own code found first,
+ * as the "trusted" toolkit.
+ */
+export function resolveToolkit(idOrPath: string, exclude: string[] = []): ResolvedToolkit {
   const candidates: string[] = [];
   if (isAbsolute(idOrPath) || idOrPath.startsWith(".")) {
     candidates.push(resolve(idOrPath));
   } else {
     for (const root of toolkitSearchRoots()) candidates.push(join(root, idOrPath));
   }
+  const excluded = (dir: string): boolean =>
+    exclude.some((tree) => {
+      const rel = relative(resolve(tree), resolve(dir));
+      return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+    });
   for (const dir of candidates) {
+    if (excluded(dir)) continue;
     const file = join(dir, "a2app.toolkit.json");
     if (existsSync(file)) {
       return { source: dir, manifest: JSON.parse(readFileSync(file, "utf8")) as ToolkitManifest };
@@ -96,6 +112,81 @@ export function resolveToolkit(idOrPath: string): ResolvedToolkit {
   throw new Error(
     `toolkit "${idOrPath}" not found (looked for a2app.toolkit.json in: ${candidates.join(", ")})`,
   );
+}
+
+/**
+ * Every toolkit a bare id can name here, each as {@link resolveToolkit} would
+ * resolve it: the first found in search order wins, sorted by id.
+ */
+export function availableToolkits(): ResolvedToolkit[] {
+  const found = new Map<string, ResolvedToolkit>();
+  for (const root of toolkitSearchRoots()) {
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      continue; // a search root that does not exist here
+    }
+    for (const name of names) {
+      const file = join(root, name, "a2app.toolkit.json");
+      if (found.has(name) || !isToolkitId(name) || !existsSync(file)) continue;
+      try {
+        found.set(name, { source: join(root, name), manifest: JSON.parse(readFileSync(file, "utf8")) as ToolkitManifest });
+      } catch {
+        /* an unreadable manifest is not a toolkit anyone can scaffold from */
+      }
+    }
+  }
+  return [...found.values()].sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
+}
+
+/**
+ * Whether a value is a toolkit id as a package may name one: a bare folder
+ * name. A package's `.a2app/toolkit.json` is untrusted, and {@link resolveToolkit}
+ * reads anything starting with `.` or a drive as a path — so a package naming
+ * `../evil` would choose its own code. Only a bare id is ever looked up.
+ */
+export function isToolkitId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && !value.includes("..");
+}
+
+/**
+ * The locally installed toolkit with this bare id, never taken from inside
+ * `untrusted`; null when there is none. This is how a package's toolkit is
+ * chosen (framework packaging §4): by id, from this machine.
+ */
+export function installedToolkit(id: string, untrusted: string[] = []): ResolvedToolkit | null {
+  if (!isToolkitId(id)) return null;
+  try {
+    return resolveToolkit(id, untrusted);
+  } catch {
+    return null;
+  }
+}
+
+/** The folder a toolkit's template files are copied from. */
+export function templateRoot(tk: ResolvedToolkit): string {
+  return tk.manifest.template ? join(tk.source, tk.manifest.template) : tk.source;
+}
+
+/**
+ * npm never packs a file named `.gitignore`, so the toolkits bundled into the
+ * CLI package carry each one a second time under this name
+ * (scripts/bundle-blueprints.mjs). Copying a template writes it back as
+ * `.gitignore`, and reading a template's rules accepts either spelling.
+ */
+const PACKED_GITIGNORE = "_gitignore";
+
+/** A template entry's name in the app: the packed `.gitignore` gets its dot back. */
+function unpackName(name: string): string {
+  return name === PACKED_GITIGNORE ? ".gitignore" : name;
+}
+
+/** The template's own `.gitignore`, in whichever spelling this copy of the toolkit has. */
+export function templateIgnoreFile(tk: ResolvedToolkit): string {
+  const root = templateRoot(tk);
+  const plain = join(root, ".gitignore");
+  return existsSync(plain) ? plain : join(root, PACKED_GITIGNORE);
 }
 
 /** Read the toolkit an app was scaffolded from, re-resolving its source. */
@@ -125,17 +216,17 @@ export function recordProjectToolkit(projectDir: string, tk: ResolvedToolkit): v
 /** Copy a set of paths from the toolkit template into the project. Returns the
  *  list of files actually written. */
 export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: string[]): string[] {
-  const templateRoot = tk.manifest.template ? join(tk.source, tk.manifest.template) : tk.source;
+  const root = templateRoot(tk);
   const written: string[] = [];
   for (const rel of paths) {
     // Contain both ends: a toolkit's declared path list is untrusted (especially
     // on import), so it must neither read outside the template nor write outside
     // the project. assertInside throws on a `../` or absolute escape.
-    const src = assertInside(templateRoot, rel, "template path");
+    const src = assertInside(root, rel, "template path");
     if (!existsSync(src)) continue;
     const dest = assertRealInside(projectDir, rel, "vendored path");
     mkdirSync(dirname(dest), { recursive: true });
-    copyTree(src, dest);
+    copyTree(src, dest, unpackName);
     written.push(rel);
   }
   return written;
@@ -146,9 +237,8 @@ export function vendorPaths(tk: ResolvedToolkit, projectDir: string, paths: stri
 export function adapterVersionOf(tk: ResolvedToolkit): string {
   const rel = tk.manifest.adapterVersionFrom;
   if (!rel) return "0.1.0";
-  const templateRoot = tk.manifest.template ? join(tk.source, tk.manifest.template) : tk.source;
   try {
-    const src = readFileSync(join(templateRoot, rel), "utf8");
+    const src = readFileSync(join(templateRoot(tk), rel), "utf8");
     const m = src.match(/ADAPTER_VERSION\s*=\s*['"]([^'"]+)['"]/);
     return m?.[1] ?? "0.1.0";
   } catch {

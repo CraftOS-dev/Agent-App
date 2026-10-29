@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased — protocol 0.2
+## 0.2.0 — protocol 0.2
+
+`agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and
+`@a2app/reverse-proxy` are released together at 0.2.0; the react-node and
+sidecar blueprints depend on `^0.2.0`.
 
 Agents get their own credentials, approved by the person they act for, and can
 never do more than that person can. The normative text is
@@ -40,7 +44,7 @@ never do more than that person can. The normative text is
   (32 checks): black-box suites a running starter must pass. Every starter
   passes the multi-user suite. The starter suite is passed by react-node, go-react,
   python-fastapi, rust-react and rails-vue. pocketbase-react, which serves records
-  through PocketBase itself, passes 19 of the 32.
+  through PocketBase itself, passes 20 of the 32.
 - **The native adapters match the reference** (go-react, python-fastapi,
   rust-react, rails-vue):
   - operation arguments are guarded;
@@ -52,8 +56,36 @@ never do more than that person can. The normative text is
     a restart;
   - every app has viewers, `dataVersion`, `targetParam` and describe budgets,
     and a Host check on every path.
+- **Installing apps** ([spec/v0_2/packaging.md](spec/v0_2/packaging.md)). Every
+  source goes through one pipeline, so every harness gets the same result: the
+  app is acquired into staging, inspected, sanitized, re-vendored from a local
+  toolkit, placed, registered, gated and served.
+  - `agent-app catalogue`: browse a marketplace (default
+    `CraftOS-dev/agent-app-collection`, falling back to
+    `living-ui-marketplace`).
+  - `agent-app install <id>`: install a marketplace app, delivered as CraftBot
+    delivers it. No walk-verify is owed.
+  - `agent-app install --from <zip|folder|github:…|git+…>`: install from any
+    other source. These are untrusted, so a walk-verify is owed.
+  - `agent-app inspect`: what a source is and what installing it would run.
+  - `agent-app <dir> export`: package an app.
+  - `agent-app <dir> import`: the same pipeline, in place.
+- **Adopting a foreign app as-is**: `blueprint-sidecar` runs any HTTP app
+  unchanged behind the sidecar adapter (`@a2app/reverse-proxy`, now runnable as
+  `a2app-sidecar`), with the full 0.2 auth in front of it.
+- **pocketbase-react runs PocketBase 0.39.7.** `pipeline.install` fetches the
+  pinned release itself and verifies it against checksums embedded in the
+  launcher.
 - A local app is now addressed the same way as a remote one: `A2APP_TOKEN`, then
   the stored credential for the live app, then the app's own `.agent-token`.
+- `agent-app blueprints` lists what an app can be scaffolded on.
+- `agent-app <dir> dev --install` runs the pipeline's install first, which a
+  fresh scaffold needs.
+- `a2app <app> tasks complete <id> --summary "…"` closes a task with a summary,
+  no JSON to quote.
+- `a2app <app> data <entity> create|update` also takes fields as `field=value`.
+- The harness tools' `agent_app_build` takes `authMode`, so a multi-user app can
+  be scaffolded through them.
 
 ### Removed
 
@@ -73,9 +105,41 @@ for, and nothing else is sent.
 - Clients accept protocol `0.1` and `0.2`.
 - `agent-app <app> bridge` always uses the app's admin credential, and gives the
   harness the task's credential: `A2APP_TOKEN` for a headless run,
-  `credential.token` in the body posted to an inbound or gateway route.
+  `credential.token` in the body posted to an inbound or gateway route. Its log
+  names who each run acts as.
+- `scaffold` needs `--blueprint`; without one it lists the choices instead of
+  writing a stack-free skeleton (`blueprint-base` is that).
+- The Claude Code MCP server no longer writes a `claude` profile into
+  `harnesses.json`; the bridge uses the framework's built-in one. A profile an
+  earlier version wrote replaces the built-in until it is deleted.
+- `remove` keeps the app's own backups as well as its data, under
+  `removed/<name>-<id>/` in the framework home.
 
 ### Fixed
+
+- **`agent-app <dir> import` trusted the folder it imported.** It kept the
+  shipped data (accounts, sessions, credential hashes) and took system code from
+  a toolkit the folder named. It also left partial files behind on failure. It
+  now runs the install pipeline in place. Note that it now removes `.git/` and
+  needs a toolkit installed on this machine.
+- The CLI's describe cache is kept per credential, under a hash of it, so a walk
+  never shows one agent another's reach.
+- **The bridge killed runs that had finished.** A heartbeat the app refused was
+  read as a lost claim, including the refusal a task gets once its own run has
+  completed it, so a run still exiting was killed and logged `claim_lost`. A
+  refusal is now read: a task its run completed or failed is left to exit.
+- **An app installed from npm got none of its blueprint's `.gitignore`** (npm
+  never packs one), so its export shipped the PocketBase binary. The bundled
+  blueprints carry it as `_gitignore`, written back on scaffold.
+- **`pb-serve.mjs --fetch` trusted any binary that reported the pinned
+  version**, running it to ask. A binary is now kept only when its SHA-256 is the
+  pinned release's, and anything else is replaced.
+- PocketBase's describe root named the app after PocketBase's own setting
+  ("Acme" on a fresh database) instead of the manifest.
+- A remote agent with no credential was told to read the app's `.agent-token`;
+  it is now pointed at `a2app <url> login`.
+- `--scopes a,b` from PowerShell arrived as one scope `"a b"`; scopes are now
+  separated by commas or spaces.
 
 - **A task's credential could come back to life.** Task ids came from a
   counter that restarted at boot while credentials persisted, so after a restart
@@ -104,6 +168,10 @@ of their own:
   `subtle = "2"` and `base64 = "0.22"`.
 - **go-react**: `ENTITIES` in `schema.go` can now be an ordered list (`[]M` with
   `"name"`), which `describe` follows. A map still compiles, listed by name.
+- **pocketbase-react**: run `agent-app <dir> toolkit-sync`. The next install
+  fetches PocketBase 0.39.7, and data created on 0.26 opens unchanged. An app's
+  create rule must not depend on the owner field, because PocketBase 0.27+
+  checks rules before the guard fills it.
 - **pocketbase-react, multi-user only**: copy
   `pb/pb_migrations/1759622300_a2app_accounts.js` from the toolkit, and give
   each collection rules on `@request.auth.id` (see the starter's `tasks`

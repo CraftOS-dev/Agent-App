@@ -13,7 +13,7 @@
  * AGENT_APP_CLI (build/evolve, default `agent-app`).
  */
 import { createInterface } from "node:readline";
-import { a2appTools, PROMPT_PLACEHOLDER, registerHarnessProfile, type HarnessTool } from "@a2app/integration-starter";
+import { a2appTools, type HarnessTool } from "@a2app/integration-starter";
 
 const CLI = process.env.A2APP_CLI ?? "a2app";
 // Build/evolve lives in a second binary (framework spec 5.1); the engine routes
@@ -25,27 +25,11 @@ const PROTOCOL_VERSION = "2024-11-05";
 const tools: HarnessTool[] = a2appTools(CLI, FRAMEWORK_CLI);
 const byName = new Map(tools.map((t) => [t.name, t]));
 
-// How `agent-app <dir> bridge` starts Claude Code when an app queues work. The
-// framework's built-in `claude -p` profile passes no permission flags, and in
-// print mode every Bash call that would prompt is denied — so the agent could
-// not run a single `a2app` command, would exit 0, and the bridge would record
-// the task as completed. This profile, under the same id, replaces the built-in:
-// `dontAsk` denies anything not listed instead of prompting, and the one listed
-// rule lets the agent operate the app through the a2app CLI and nothing else.
-// Written once; an entry already in the file (the user's own) is kept.
-const registration = registerHarnessProfile({
-  id: "claude",
-  name: "Claude Code",
-  routes: [
-    {
-      mode: "headless",
-      command: "claude",
-      args: ["-p", PROMPT_PLACEHOLDER, "--permission-mode", "dontAsk", "--allowedTools", "Bash(a2app *)"],
-    },
-  ],
-});
-// stdout carries JSON-RPC, so anything said here goes to stderr.
-if (registration.status !== "kept") process.stderr.write(`a2app: ${registration.detail}\n`);
+// How `agent-app <dir> bridge` starts Claude Code when an app queues work is the
+// framework's built-in `claude` profile (framework/cli/src/lib/harness.ts): it
+// grants the a2app CLI and denies file edits. Nothing is registered here — an
+// entry in harnesses.json under the same id would replace the built-in for good,
+// and keep any later fix to it from ever arriving.
 
 interface JsonRpc {
   jsonrpc: "2.0";
@@ -86,10 +70,15 @@ async function handle(msg: JsonRpc): Promise<JsonRpc | null> {
       if (!tool) return fail(id, -32602, `unknown tool: ${name}`);
       const args = (params?.arguments as Record<string, unknown>) ?? {};
       const r = await tool.handler(args);
-      const text = r.stdout.trim() || r.stderr.trim() || `exit ${r.code}`;
-      // A guard rejection (exit 1) is a valid, useful result the model acts on —
-      // only an unreachable/crashed CLI (exit 3 or spawn failure) is an MCP error.
-      return ok(id, { content: [{ type: "text", text }], isError: r.code === 3 || r.code < 0 });
+      // The CLI's own words reach the model either way: its result document, and
+      // when it failed, what it said on stderr (a usage error prints only that).
+      const out = r.stdout.trim();
+      const err = r.stderr.trim();
+      const text = (r.ok ? out || err : [out, err].filter((s) => s !== "").join("\n")) || `exit ${r.code}`;
+      // Any non-zero exit is a failed call (1 rejected, 2 usage, 3 unreachable,
+      // or the CLI could not start): `isError` tells the client so, and the text
+      // still carries what the model needs to act on it.
+      return ok(id, { content: [{ type: "text", text }], isError: r.code !== 0 });
     }
     default:
       return id === undefined || id === null ? null : fail(id, -32601, `method not found: ${method}`);

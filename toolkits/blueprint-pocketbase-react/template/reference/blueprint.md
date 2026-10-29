@@ -46,7 +46,7 @@ that work until it is done. Replace all three with your own.
 | `ui/public/tokens.css` · `ui/public/ui.css` | **YOURS** | the kit design-token sheet + component styles, copied through the build verbatim. Re-point token values; keep the names stable. |
 | `ui/vite.config.js` · `ui/package.json` | build | the View build: React plugin, output to `../pb/pb_public`, dev-server proxy to the running app. |
 | `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]` **and their `entities[]`** (the collection→module map you maintain), `authMode`, `pipeline`. |
-| `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, hands migrations the app's mode (`A2APP_AUTH_MODE`), ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote). Never edit. |
+| `pb-serve.mjs` | SYSTEM (hash-locked) | the cross-platform launcher `pipeline.start` runs. Reads `PORT`/`A2APP_DATA_DIR`/`A2APP_ENV`, hands migrations the app's mode (`A2APP_AUTH_MODE`), ensures the superuser, snapshots the View for live boots, and runs `pocketbase serve` (or `--migrate` for promote, `--fetch` for install). Never edit. |
 | `pb/pb_hooks/_a2app.pb.js` | SYSTEM (hash-locked) | the adapter hook REGISTRATIONS — thin one-liner handlers that `require()` the impl module (PocketBase runs each handler isolated from file scope). Never edit. |
 | `pb/pb_hooks/_a2app_impl.js` | SYSTEM (hash-locked) | the adapter IMPLEMENTATION: identity, describe, the record guards, operations, the task queue and event log, credentials, accounts, sessions and device sign-in, loaded via `require()` from the handlers. Never edit. |
 | `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep, scopes and the ceiling, credentials, cookies, user codes, sign-in limits, device polling and confirmation) + `--selftest`. Never edit. |
@@ -57,7 +57,7 @@ that work until it is done. Replace all three with your own.
 
 | Path | Owner | What it is |
 |---|---|---|
-| `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary, **pinned to v0.26.6** (the adapter targets the 0.26 JSVM API). You download it (see pipeline `install`); nothing runs without it. `pb-serve.mjs` picks the right name per platform and refuses to launch a non‑0.26.x build. Git-ignored. |
+| `pb/pocketbase` (`pb/pocketbase.exe` on Windows) | runtime | the PocketBase binary, **pinned to v0.39.7** (the adapter targets the 0.39 JSVM API). The pipeline's `install` fetches it (`node pb-serve.mjs --fetch`: the official release for this OS/arch, checked against the SHA-256 the launcher carries); nothing runs without it. `pb-serve.mjs` picks the right name per platform and refuses to launch a non‑0.39.x build. Git-ignored. |
 | `pb/pb_migrations/*.js` | **YOURS** | every further collection (entity) change, as a new PocketBase JS migration. |
 | `pb/pb_hooks/<name>.pb.js` | **YOURS** | your own hooks, if you need any beyond operations: a record event hook, a cron job, an outbound sync. Never touch `_a2app*`. |
 | `pb/pb_public/**` | build output | the COMPILED React View (`npm --prefix ui run build`); PocketBase serves it statically. Git-ignored; edit `ui/src/`, never this. |
@@ -96,8 +96,8 @@ model it as your own collection field, migration, or operation hook instead.
 Entities are PocketBase **collections**. Create and evolve them with PocketBase
 JS migrations under `pb/pb_migrations/` (or the admin UI, which writes a migration
 for you). The exact migration API is PocketBase's own and moves between PocketBase
-versions — follow the PocketBase JS-migrations documentation for the binary you
-downloaded rather than guessing. The framework rules on top of it:
+versions — follow the PocketBase JS-migrations documentation for the pinned
+version (v0.39.7) rather than guessing. The framework rules on top of it:
 
 - **Additive only. A migration filename is its identity in the live database.**
   Never edit, rename, or delete a migration that has already been applied (after
@@ -215,6 +215,8 @@ For tight iteration `npm --prefix ui run dev` runs Vite's dev server with
   credential: on a single-user app the View is trusted, on a multi-user app the
   person's session carries it.
 - `GET /api/_a2app/tasks/<id>` — follow work queued for an agent.
+- `GET /api/_a2app/whoami` — who is using the app: `principalName` and `role` of
+  the signed-in person on a multi-user app; the owner on `authMode: none`.
 - `GET /api/_a2app` — identity (app name, versions, `authMode`, `accountUrl`).
 
 `ui/src/api.js` sends a person who is not signed in to the account page (on
@@ -370,7 +372,12 @@ its own:
 
   A member then lists, reads, changes and deletes only its own records (anyone
   else's answer 404, and a list is filtered before it is paged); an owner sees
-  all. **Every collection you add needs rules like these on a multi-user app**:
+  all. **Keep the owner field out of the create rule.** PocketBase checks a
+  collection's API rules before its record request hooks, so the create rule
+  is decided before the adapter fills the owner: `owner = @request.auth.id`
+  there refuses every create. `@request.auth.id != ""` is the create rule; the
+  adapter sets the owner, and refuses a client that tries to.
+  **Every collection you add needs rules like these on a multi-user app**:
   the adapter turns away anyone not signed in, but a public (`""`) rule shows
   every record to every signed-in person and every agent acting for one. The
   rules are written when the migration runs, so an app switched to multi-user
@@ -421,11 +428,16 @@ also what stops a page whose DNS re-resolves to 127.0.0.1 from reading the app.
 
 `manifest.json`'s `pipeline`:
 
-- `install` = `npm --prefix ui install`, then a reminder to **download PocketBase v0.26.6 into `./pb`** — do
-  this before serving, or `start` has nothing to run. The adapter targets the 0.26
-  JSVM API (`onRecordCreateRequest`/`e.next()`, `$app.find*`, `collection.fields`,
-  `e.requestInfo().body`), so **only 0.26.x is supported** — the launcher asserts
-  the binary's version and refuses anything else.
+- `install` = `node pb-serve.mjs --fetch`, then `npm --prefix ui install`. The
+  fetch downloads the official **PocketBase v0.39.7** release for this OS/arch,
+  refuses it unless its SHA-256 matches the one `pb-serve.mjs` carries, and puts
+  only the binary at `pb/pocketbase` (`.exe` on Windows); when that exact binary
+  is already there (by its SHA-256, never by running it) it does nothing, and
+  anything else there is replaced. An OS/arch the release does not ship is refused
+  by name: build v0.39.7 from source and place it there yourself. The adapter
+  targets the 0.39 JSVM API (`onRecordCreateRequest`/`e.next()`, `$app.find*`,
+  `collection.fields`, `e.requestInfo().body`), so **only 0.39.x is supported**
+  — the launcher asserts the binary's version and refuses anything else.
 - `build` = `npm --prefix ui run build` (compiles the React View into
   `pb/pb_public/`), then `node --check pb/pb_hooks/_a2app.pb.js`.
 - `start` = `node pb-serve.mjs` — the launcher runs `pocketbase serve` bound to the
@@ -466,9 +478,12 @@ pop its admin-installer page.
 
 ## Footguns for this stack
 
-- **Get the binary first, and it must be v0.26.6.** Nothing runs until
-  `pb/pocketbase` exists, and the launcher rejects any non‑0.26.x build (the
-  adapter is written against the 0.26 JSVM API).
+- **The binary comes from `install`, and it must be v0.39.x.** Nothing runs
+  until `pb/pocketbase` exists (`node pb-serve.mjs --fetch` puts the pinned
+  v0.39.7 there), and the launcher rejects any non‑0.39.x build (the adapter is
+  written against the 0.39 JSVM API).
+- **API rules run before the record hooks.** A create rule cannot name a field
+  the adapter fills (the `ownedBy` field): see **Accounts and whose records**.
 - **The starter migration is applied on the first boot.** From then on change
   `tasks` with a new migration file, never by editing
   `1759622400_created_tasks.js`.

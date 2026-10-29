@@ -18,7 +18,7 @@
     {
       "name": "importer",
       "activity": "importer",
-      "description": "Bring an existing app into the framework: an Agent App zip, a marketplace app, or a foreign codebase that needs an adapter written from observed behavior.",
+      "description": "Bring an app in, or send one out: install a marketplace app (catalogue, confirm, install; no walk-verify), install an Agent App package from a zip, folder or git repository (inspect first, walk-verify after), convert a Living UI app or foreign code by rebuilding it, adopt a foreign app as it is behind the sidecar adapter, export an app to share.",
       "path": "importer/SKILL.md"
     },
     {

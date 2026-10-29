@@ -18,8 +18,10 @@
 import { A2AppClient } from "@a2app/sdk";
 import { isRemoteAddress, loadProject, operateTarget, readAgentToken, UsageError, type Project } from "./project.js";
 import { credentialFor, originOf, pinAppId, pinnedAppId } from "./remote.js";
+import { credentialKey } from "./describeCache.js";
 import { homePath } from "./home.js";
 import { log } from "./log.js";
+import type { Caller } from "./refusal.js";
 
 /** An app on this machine: its files are here, so anything may be done to it. */
 export interface LocalTarget {
@@ -187,12 +189,17 @@ export async function verifyRemote(client: A2AppClient, target: RemoteTarget): P
  * before checking what answered has already acted on an unknown app.
  */
 export async function clientForTarget(target: Target): Promise<A2AppClient> {
+  return (await openClient(target)).client;
+}
+
+/** A client, and the credential it presents (needed by whatever is keyed by the caller's reach). */
+async function openClient(target: Target): Promise<{ client: A2AppClient; token: string | null }> {
   if (target.kind === "local") return localClient(target.project);
 
   const token = credentialFor(target.origin, target.expectedAppId, (m) => log.warn(m));
   const client = new A2AppClient({ baseUrl: target.baseUrl, token, agentName: process.env["A2APP_AGENT"] ?? "a2app-cli" });
   await verifyRemote(client, target);
-  return client;
+  return { client, token };
 }
 
 /**
@@ -202,21 +209,30 @@ export async function clientForTarget(target: Target): Promise<A2AppClient> {
  * `.agent-token`. A stored credential belongs to the live app's store, so a dev
  * candidate — a fresh store of its own — is reached with the app's own token.
  */
-async function localClient(project: Project): Promise<A2AppClient> {
+async function localClient(project: Project): Promise<{ client: A2AppClient; token: string | null }> {
   const route = await operateTarget(project);
   const delegated =
     route.env === "live"
       ? credentialFor(originOf(project.baseUrl), project.manifest.id, (m) => log.warn(m))
       : process.env["A2APP_TOKEN"]?.trim() || null;
-  return new A2AppClient({
-    baseUrl: route.baseUrl,
-    token: delegated ?? readAgentToken(project.dir),
-    agentName: process.env["A2APP_AGENT"] ?? "a2app-cli",
-  });
+  const token = delegated ?? readAgentToken(project.dir);
+  return {
+    client: new A2AppClient({ baseUrl: route.baseUrl, token, agentName: process.env["A2APP_AGENT"] ?? "a2app-cli" }),
+    token,
+  };
 }
 
-/** Resolve and connect in one step — what every operate command does. */
-export async function connect(app: string): Promise<{ target: Target; client: A2AppClient }> {
+/**
+ * Resolve and connect in one step — what every operate command does.
+ *
+ * `credential` names the credential the client presents, as a hash
+ * ({@link credentialKey}) and never the token: describe answers for the caller,
+ * so anything that remembers what describe said must remember it per credential.
+ * `caller` is what a refusal's advice depends on ({@link reportRefusal}).
+ */
+export async function connect(app: string): Promise<{ target: Target; client: A2AppClient; credential: string; caller: Caller }> {
   const target = resolveTarget(app);
-  return { target, client: await clientForTarget(target) };
+  const { client, token } = await openClient(target);
+  const caller = { remoteOrigin: target.kind === "remote" ? target.origin : null, sentCredential: token !== null };
+  return { target, client, credential: credentialKey(token), caller };
 }

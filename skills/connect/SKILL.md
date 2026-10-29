@@ -142,6 +142,11 @@ and they approve it.
 
     a2app https://crm.example.com login --name "Claude in Acme repo" --scopes data:deals:read
 
+Scopes are named from what the app's walk shows you: `data:<entity>:read`,
+`data:<entity>:write` and `op:<operation>`, separated by commas (or spaces).
+Ask for only what the task needs; with no `--scopes` you ask for everything the
+person can do.
+
 The command prints a link and a code (`XXXX-XXXX`). The person opens the link,
 signs in to the app as themselves, checks that the code matches, and approves —
 narrowing the scopes if they choose. Approving produces a confirmation code, and
@@ -301,7 +306,8 @@ rather than by trusting you to remember:
   decides which build is live — belongs to the host.
 - **No import.** Importing is how a codebase becomes *your* Agent App. Connecting
   is how you use *someone else's*. If you want your own copy, ask the owner for
-  the source — that is a separate act, with the owner's consent, and not a side
+  it: they export a package (`agent-app <dir> export`) and you install it with
+  the importer skill — a separate act, with the owner's consent, and not a side
   effect of connecting.
 - **Revocation is theirs.** Losing access mid-task is normal and is not an
   error to route around.

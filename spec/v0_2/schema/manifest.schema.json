@@ -55,6 +55,21 @@
       "minimum": 1,
       "maximum": 65535,
       "description": "the app's launch port: the app binds it (an env override such as PORT may take precedence) and every operate command reaches the app there (framework section 5.5)"
+    },
+    "source": {
+      "type": "object",
+      "description": "provenance written at install (framework packaging §4): where this app came from",
+      "required": ["kind", "installedAt"],
+      "properties": {
+        "kind": { "enum": ["marketplace", "zip", "folder", "github", "git"] },
+        "location": { "type": "string", "description": "the marketplace (github:<owner>/<repo>, or its directory), the zip file, the folder, github:<owner>/<repo>[/<path>], or the git URL" },
+        "ref": { "type": "string" },
+        "catalogueId": { "type": "string" },
+        "version": { "type": "string", "description": "the catalogue entry's version" },
+        "sha256": { "type": "string", "description": "of the archive the app came from (marketplace, zip, github)" },
+        "commit": { "type": "string", "description": "the commit a git source was cloned at" },
+        "installedAt": { "type": "string" }
+      }
     }
   }
 }

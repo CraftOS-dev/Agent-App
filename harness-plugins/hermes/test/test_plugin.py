@@ -42,14 +42,59 @@ const fs = require("fs");
 const BIN = %(bin)s;
 const argv = process.argv.slice(2);
 if (process.env.FAKE_CALLS) fs.appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ bin: BIN, argv, cwd: process.cwd() }) + "\\n");
+const flag = (name) => { const at = argv.indexOf("--" + name); return at < 0 ? undefined : argv[at + 1]; };
+const STEPS = ["acquire", "inspect", "sanitize", "revendor", "customize", "place", "register", "dependencies", "gate", "serve", "open"];
+// install: one step line per step ($FAKE_STEP_MS apart) with --events, then the
+// result; a --from naming "foreign" is not a package and stops at inspect; an
+// id and --from together are a usage error with no JSON, as in the real CLI.
+function install() {
+  const id = argv[1] !== undefined && !argv[1].startsWith("--") ? argv[1] : undefined;
+  const from = flag("from");
+  if ((id === undefined) === (from === undefined)) { console.error("✗ Name a catalogue id or --from <source>, not both"); process.exitCode = 2; return; }
+  const events = argv.includes("--events");
+  const emit = (line) => { if (events) console.log(JSON.stringify(line)); };
+  const finish = (doc, code) => { if (events) emit({ event: "result", ...doc }); else console.log(JSON.stringify(doc)); process.exitCode = code; };
+  const delay = Number(process.env.FAKE_STEP_MS || 0);
+  let at = 0;
+  const next = () => {
+    const step = STEPS[at++];
+    if (step === undefined) {
+      const name = flag("name") || "Installed App";
+      return finish({ ok: true, id: "0123456789ab", name, dir: "/apps/" + (flag("name") || id || "imported"), port: 8123, url: "http://127.0.0.1:8123/",
+        trust: id !== undefined ? "catalogued" : "untrusted", gate: { ok: true }, served: true, next: id !== undefined ? [] : ["walk-verify: a verifier agent runs the walk-verify skill"], argv }, 0);
+    }
+    if (step === "inspect" && (from || "").includes("foreign")) {
+      emit({ event: "step", step, status: "start" });
+      emit({ event: "step", step, status: "failed", error: "not an Agent App package" });
+      return finish({ ok: false, step, error: "not an Agent App package", kind: "foreign", reason: "not an Agent App package", routes: ["adopt", "convert"] }, 1);
+    }
+    if (step === "open") { emit({ event: "step", step, status: "skipped", reason: "pass --open to show it to someone" }); return next(); }
+    emit({ event: "step", step, status: "start" });
+    setTimeout(() => { emit({ event: "step", step, status: "done" }); next(); }, delay);
+  };
+  next();
+}
 if (BIN === "agent-app" && argv[0] === "skills" && argv[1] === "--path") { console.log(process.env.FAKE_SKILLS_DIR || ""); process.exit(process.env.FAKE_SKILLS_DIR ? 0 : 1); }
 if (BIN === "agent-app" && argv[0] === "list") {
   const f = process.env.FAKE_REGISTRY;
   console.log(f && fs.existsSync(f) ? fs.readFileSync(f, "utf8") : JSON.stringify({ ok: true, apps: [] }));
   process.exit(0);
 }
-if (argv.includes("BAD")) { console.log(JSON.stringify({ ok: false, error: { code: "invalid_enum", field: "status" } })); console.error("rejected by the guard"); process.exit(1); }
-console.log(JSON.stringify({ ok: true, bin: BIN, argv }));
+if (BIN === "agent-app" && argv[0] === "catalogue") {
+  if (flag("source") === "unreachable") { console.error("✗ the marketplace is unreachable"); process.exit(3); }
+  console.log(JSON.stringify({ ok: true, source: { kind: "github", location: "github:acme/market@main" }, apps: [
+    { id: "kanban-board", name: "Kanban Board", folder: "kanban-board", tags: ["productivity"], customizable: [{ key: "APP_TITLE", label: "Board title" }], compatible: true },
+  ], bin: BIN, argv }));
+} else if (BIN === "agent-app" && argv[0] === "inspect") {
+  const foreign = (flag("from") || "").includes("foreign");
+  console.log(JSON.stringify({ ok: true, kind: foreign ? "foreign" : "agent-app", installable: !foreign, routes: foreign ? ["adopt", "convert"] : [], bin: BIN, argv }));
+} else if (BIN === "agent-app" && argv[0] === "install") {
+  install();
+} else if (argv.includes("BAD")) {
+  console.log(JSON.stringify({ ok: false, error: { code: "invalid_enum", field: "status" } })); console.error("rejected by the guard"); process.exit(1);
+} else {
+  console.log(JSON.stringify({ ok: true, bin: BIN, argv }));
+}
 """
 
 FAKE_HERMES = """
@@ -177,6 +222,9 @@ class Sandbox:
         for binary in ("agent-app", "a2app"):
             (self.dir / f"{binary}.js").write_text(FAKE_CLI % {"bin": json.dumps(binary)}, encoding="utf-8")
         self.saved = dict(os.environ)
+        # Uploads go to the temporary directory: this sandbox's own.
+        self.saved_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(self.dir)
         os.environ.update({
             "A2APP_HOME": str(self.home),
             "AGENT_APP_CLI": str(self.dir / "agent-app.js"),
@@ -198,6 +246,7 @@ class Sandbox:
     def close(self) -> None:
         os.environ.clear()
         os.environ.update(self.saved)
+        tempfile.tempdir = self.saved_tempdir
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -215,9 +264,9 @@ class PluginRegistration(unittest.TestCase):
     def call(self, tool: str, **args) -> str:
         return self.ctx.tools[tool]["handler"](args, task_id="t1", session_id="s1")
 
-    def test_registers_the_engines_seventeen_tools(self) -> None:
+    def test_registers_the_engines_twenty_two_tools(self) -> None:
         names = set(self.ctx.tools)
-        self.assertEqual(len(names), 17)
+        self.assertEqual(len(names), 22)
         if STARTER_DIST.parent.parent.joinpath("src", "index.ts").exists():
             import re
             ts = (STARTER_DIST.parent.parent / "src" / "index.ts").read_text(encoding="utf-8")
@@ -242,6 +291,21 @@ class PluginRegistration(unittest.TestCase):
         self.assertEqual((out["bin"], out["argv"]), ("agent-app", ["crm", "scaffold", "--blueprint", "blueprint-base", "--name", "CRM"]))
         out = json.loads(self.call("agent_app_open", dir="crm", printOnly=True))
         self.assertEqual((out["bin"], out["argv"]), ("agent-app", ["crm", "open", "--print-only"]))
+
+    def test_package_tools_shell_agent_app_with_the_clis_argv(self) -> None:
+        out = json.loads(self.call("agent_app_catalogue", search="kanban board", source=""))
+        self.assertEqual((out["bin"], out["argv"]), ("agent-app", ["catalogue", "--search", "kanban board"]))
+        out = json.loads(self.call("agent_app_inspect", id="kanban-board", source="github:acme/market@dev"))
+        self.assertEqual(out["argv"], ["inspect", "kanban-board", "--source", "github:acme/market@dev"])
+        out = json.loads(self.call("agent_app_install", id="kanban-board", set={"APP_TITLE": 'Team "A" & co'}, name="Team", noStart=True))
+        self.assertEqual(out["argv"], ["install", "kanban-board", "--name", "Team", "--set", 'APP_TITLE=Team "A" & co', "--no-start"])
+        self.assertEqual(out["trust"], "catalogued", "the tool returns the CLI's result as it is")
+        out = json.loads(self.call("agent_app_export", dir="crm", out="crm.zip"))
+        self.assertEqual((out["bin"], out["argv"]), ("agent-app", ["crm", "export", "--out", "crm.zip"]))
+        self.assertEqual(json.loads(self.call("agent_app_list_apps")), {"ok": True, "apps": []})
+        refused = self.call("agent_app_install", **{"from": "./foreign-site"})
+        self.assertEqual(json.loads(refused.splitlines()[0])["routes"], ["adopt", "convert"], "a source that is not a package says where to take it")
+        self.assertIn("not both", self.call("agent_app_install", id="a", **{"from": "b"}), "a usage error reaches the model as the CLI said it")
 
     def test_a_guard_rejection_reaches_the_model(self) -> None:
         text = self.call("agent_app_update", dir="crm", entity="deals", id="BAD", fields={"status": "nope"})
@@ -342,8 +406,76 @@ class Engine(unittest.TestCase):
         e = self.engine
         self.assertEqual(e.bin_for(["./app", "bridge", "start"]), os.environ["AGENT_APP_CLI"])
         self.assertEqual(e.bin_for(["list", "--json"]), os.environ["AGENT_APP_CLI"])
+        self.assertEqual(e.bin_for(["install", "--from", "./board.zip"]), os.environ["AGENT_APP_CLI"], "a registry verb stands first")
+        self.assertEqual(e.bin_for(["catalogue"]), os.environ["AGENT_APP_CLI"])
+        self.assertEqual(e.bin_for(["./app", "export"]), os.environ["AGENT_APP_CLI"])
+        self.assertEqual(e.bin_for(["./app", "credential", "list"]), os.environ["AGENT_APP_CLI"])
+        self.assertEqual(e.bin_for(["./app", "login"]), os.environ["A2APP_CLI"], "login is an a2app command")
         self.assertEqual(e.bin_for(["./app", "tasks", "next"]), os.environ["A2APP_CLI"])
         self.assertEqual(e.bin_for(["./app"]), os.environ["A2APP_CLI"])
+
+    def test_install_events_are_read_line_by_line(self) -> None:
+        e = self.engine
+        self.assertEqual(e.parse_install_event('{"event":"step","step":"gate","status":"skipped","reason":"--no-start"}'),
+                         {"event": "step", "step": "gate", "status": "skipped", "reason": "--no-start"})
+        for line in ("", "▸ acquire", "{not json", "[]", '{"event":"step","step":"gate","status":"paused"}', '{"event":"result"}'):
+            self.assertIsNone(e.parse_install_event(line), line)
+        seen: list[dict] = []
+        result, doc = e.run_install({"id": "kanban-board", "set": {"APP_TITLE": "Team"}}, seen.append)
+        self.assertEqual(result.code, 0)
+        self.assertEqual([x["step"] for x in seen if x["status"] != "start"], list(e.INSTALL_STEPS))
+        self.assertEqual(doc["argv"], ["install", "kanban-board", "--set", "APP_TITLE=Team", "--events"])
+        self.assertNotIn("event", doc, "the result is the CLI's document, without the event key")
+        result, doc = e.run_install({"id": "a", "from": "b"}, seen.append)
+        self.assertEqual((result.code, doc), (2, None), "a usage error prints no result")
+        self.assertIn("not both", e.failure_of(result, doc))
+
+    def test_install_jobs_follow_the_pipeline(self) -> None:
+        e = self.engine
+        os.environ["FAKE_STEP_MS"] = "40"
+        jobs = e.InstallJobs()
+        ended: list[dict] = []
+        job = jobs.start({"from": "./board.zip", "name": "Board"}, on_end=ended.append)
+        self.assertFalse(job["done"], "starting a job does not wait for the install")
+        midway = None
+        deadline = time.time() + 30
+        while not jobs.get(job["id"])["done"]:
+            self.assertLess(time.time(), deadline, "the install did not end")
+            polled = jobs.get(job["id"])
+            if polled["steps"] and midway is None:
+                midway = [step["step"] for step in polled["steps"]]
+            time.sleep(0.01)
+        self.assertTrue(midway is not None and len(midway) < len(e.INSTALL_STEPS), "a poll sees the steps as they happen")
+        done = jobs.get(job["id"])
+        self.assertEqual((done["ok"], done["code"], done["error"]), (True, 0, None))
+        self.assertEqual([step["step"] for step in done["steps"]], list(e.INSTALL_STEPS))
+        self.assertEqual((done["result"]["trust"], done["result"]["name"]), ("untrusted", "Board"))
+        self.assertEqual(ended, [done])
+        os.environ["FAKE_STEP_MS"] = "0"
+        failed = jobs.start({"from": "./foreign-site"})
+        while not jobs.get(failed["id"])["done"]:
+            time.sleep(0.01)
+        failed = jobs.get(failed["id"])
+        self.assertEqual((failed["ok"], failed["code"], failed["error"]), (False, 1, "not an Agent App package"))
+        self.assertEqual(failed["result"]["routes"], ["adopt", "convert"])
+        self.assertIsNone(jobs.get("nope"))
+
+    def test_uploads_are_bounded_and_private(self) -> None:
+        e = self.engine
+        upload = e.Upload(declared=4)
+        upload.write(b"PK\x03\x04")
+        path = upload.finish()
+        self.assertTrue(e.is_upload(path))
+        self.assertEqual(Path(path).read_bytes(), b"PK\x03\x04")
+        self.assertEqual(Path(path).parent, Path(tempfile.gettempdir()) / "a2app-uploads")
+        self.assertFalse(e.is_upload(str(self.box.dir / "elsewhere.zip")))
+        self.assertFalse(e.is_upload(str(e.uploads_dir())))
+        with self.assertRaises(e.UploadTooLarge):
+            e.Upload(declared=e.UPLOAD_LIMIT + 1)
+        growing = e.Upload()
+        with unittest.mock.patch.object(e, "UPLOAD_LIMIT", 3), self.assertRaises(e.UploadTooLarge):
+            growing.write(b"four")
+        self.assertFalse(growing.path.exists(), "a refused upload leaves nothing behind")
 
     def test_harness_file_rules(self) -> None:
         e, file = self.engine, self.box.home / "harnesses.json"
@@ -406,10 +538,19 @@ class Engine(unittest.TestCase):
             ["agent_app_complete_task", {"dir": "crm", "id": "T1", "result": {"summary": "done"}}],
             ["agent_app_complete_task", {"dir": "crm", "id": "T1", "reason": "blocked"}],
             ["agent_app_build", {"dir": "crm"}],
+            ["agent_app_build", {"dir": "crm", "blueprint": "blueprint-base", "name": "CRM", "authMode": "multi-user"}],
             ["agent_app_validate", {"dir": "crm", "noBuild": True}],
             ["agent_app_serve", {"dir": "crm", "install": True, "open": True}],
             ["agent_app_stop", {"dir": "crm"}],
             ["agent_app_open", {"dir": "crm"}],
+            ["agent_app_catalogue", {"search": "kanban board", "source": "github:acme/market@dev"}],
+            ["agent_app_catalogue", {"search": "  "}],
+            ["agent_app_inspect", {"id": "kanban-board", "source": "./market"}],
+            ["agent_app_inspect", {"from": "https://github.com/acme/board/tree/main/app"}],
+            ["agent_app_install", {"id": "kanban-board", "set": {"APP_TITLE": "Team & co", "N": 2}, "name": "Team", "noStart": True}],
+            ["agent_app_install", {"from": "./board.zip", "into": "./board", "source": None, "open": True}],
+            ["agent_app_export", {"dir": "crm"}],
+            ["agent_app_export", {"dir": "crm", "out": "out/crm.zip"}],
         ]
         kickoffs = [
             {"action": "build", "name": "Acme CRM", "requirement": "Track deals.", "blueprint": "blueprint-base", "port": "8123"},
@@ -417,11 +558,19 @@ class Engine(unittest.TestCase):
             {"action": "build", "name": "", "requirement": "x"},
             {"action": "modify", "dir": "/a/crm", "requirement": "Add a report."},
             {"action": "operate", "dir": "/a/crm", "requirement": "Close won deals."},
+            {"action": "install", "id": "kanban-board"},
+            {"action": "install", "id": "kanban-board", "source": "github:acme/market"},
+            {"action": "install", "from": "./board.zip"},
+            {"action": "import", "from": "./crm-src", "requirement": "Keep the pipeline view."},
+            {"action": "import", "id": "kanban-online", "source": "github:acme/market@main"},
+            {"action": "adopt", "from": "./site"},
+            {"action": "adopt", "id": "a", "from": "b"},
+            {"action": "import"},
             {"action": "nope"},
         ]
         script = self.box.dir / "parity.mjs"
         script.write_text(textwrap.dedent(f"""
-            import {{ a2appTools, buildKickoffPrompt }} from {json.dumps(STARTER_DIST.as_uri())};
+            import {{ a2appTools, buildKickoffPrompt, FRAMEWORK_BLUEPRINTS, FRAMEWORK_VERBS, INSTALL_STEPS, REGISTRY_VERBS }} from {json.dumps(STARTER_DIST.as_uri())};
             const [cases, kickoffs] = JSON.parse(process.argv[2]);
             const tools = a2appTools(process.env.A2APP_CLI, process.env.AGENT_APP_CLI);
             const argv = [];
@@ -429,15 +578,27 @@ class Engine(unittest.TestCase):
               const r = await tools.find((t) => t.name === name).handler(args);
               argv.push(JSON.parse(r.stdout));
             }}
-            console.log(JSON.stringify({{ argv, kickoffs: kickoffs.map((k) => {{ const r = buildKickoffPrompt(k); return r.kind === "kickoff" ? r.prompt : r.message; }}) }}));
+            console.log(JSON.stringify({{
+              argv,
+              kickoffs: kickoffs.map((k) => {{ const r = buildKickoffPrompt(k); return r.kind === "kickoff" ? [r.activity, r.prompt] : ["error", r.message]; }}),
+              tools: tools.map((t) => [t.name, t.description, t.parameters]),
+              tables: {{ verbs: [...FRAMEWORK_VERBS].sort(), registry: [...REGISTRY_VERBS].sort(), blueprints: [...FRAMEWORK_BLUEPRINTS], steps: [...INSTALL_STEPS] }},
+            }}));
         """), encoding="utf-8")
         proc = subprocess.run([NODE, str(script), json.dumps([cases, kickoffs])], capture_output=True, text=True, encoding="utf-8", check=True)
         ts = json.loads(proc.stdout)
         tools = {t.name: t for t in self.engine.a2app_tools()}
         py_argv = [json.loads(tools[name].call(args).stdout) for name, args in cases]
         self.assertEqual(py_argv, ts["argv"])
-        py_kick = [(lambda r: r["prompt"] if r["kind"] == "kickoff" else r["message"])(self.engine.build_kickoff_prompt(k)) for k in kickoffs]
+        py_kick = [(lambda r: [r["activity"], r["prompt"]] if r["kind"] == "kickoff" else ["error", r["message"]])(self.engine.build_kickoff_prompt(k)) for k in kickoffs]
         self.assertEqual(py_kick, ts["kickoffs"])
+        # The prose is the port's own; the names and schemas are the contract.
+        self.assertEqual([[t.name, t.parameters] for t in self.engine.a2app_tools()], [[name, params] for name, _words, params in ts["tools"]], "same tools and schemas")
+        e = self.engine
+        self.assertEqual(
+            {"verbs": sorted(e.FRAMEWORK_VERBS), "registry": sorted(e.REGISTRY_VERBS), "blueprints": list(e.FRAMEWORK_BLUEPRINTS), "steps": list(e.INSTALL_STEPS)},
+            ts["tables"], "the router, the build form's stacks and the install steps are the TypeScript engine's",
+        )
 
 
 try:
@@ -510,7 +671,69 @@ class DashboardApi(unittest.TestCase):
         meta = TestClient(app).get("/api/plugins/agent-app/meta").json()
         self.assertTrue(meta["ok"])
         self.assertIn("blueprint-react-node", meta["blueprints"])
+        self.assertEqual(meta["steps"][0], "acquire")
+        self.assertEqual(len(meta["steps"]), 11, "the progress view's rows")
         self.assertEqual(meta["build"], "dev")
+
+    def test_marketplace_and_import_routes_run_the_cli(self) -> None:
+        api = "/api/plugins/agent-app"
+        r = self.client.get(api + "/catalogue", params={"search": "kanban"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["argv"], ["catalogue", "--search", "kanban"])
+        r = self.client.get(api + "/catalogue", params={"source": "unreachable"})
+        self.assertEqual((r.status_code, r.json()["ok"], r.json()["code"]), (502, False, 3), "an unreachable marketplace is a 502 with the CLI's message")
+        self.assertIn("unreachable", r.json()["message"])
+
+        r = self.client.post(api + "/inspect", json={"from": "./foreign-site"})
+        self.assertEqual(r.json()["report"]["routes"], ["adopt", "convert"])
+        r = self.client.post(api + "/inspect", json={"id": "kanban-board", "source": "github:acme/market@main", "extra": 1})
+        self.assertEqual(r.json()["report"]["argv"], ["inspect", "kanban-board", "--source", "github:acme/market@main"])
+
+        # An upload is the zip itself, kept privately until it is installed.
+        r = self.client.post(api + "/upload", content=b"PK\x03\x04zip", headers={"Content-Type": "application/zip"})
+        self.assertEqual(r.status_code, 200, r.text)
+        upload = r.json()["file"]
+        self.assertEqual(Path(upload).read_bytes(), b"PK\x03\x04zip")
+        r = self.client.post(api + "/upload", content=b"x", headers={"Content-Type": "application/zip", "Content-Length": str(600 * 1024 * 1024)})
+        self.assertEqual(r.status_code, 413, "a declared size over the limit is refused before it is read")
+
+        # An install is a job: the route answers at once, and polls follow it to its end.
+        self.assertEqual(self.client.post(api + "/install", json={}).status_code, 400)
+        r = self.client.post(api + "/install", json={"from": upload, "name": "Board", "set": {"APP_TITLE": "Team", "BAD": 5}})
+        self.assertEqual(r.status_code, 200, r.text)
+        job = r.json()["job"]
+        deadline = time.time() + 30
+        while not job["done"]:
+            self.assertLess(time.time(), deadline, "the install did not end")
+            time.sleep(0.05)
+            job = self.client.get(api + "/install", params={"job": job["id"]}).json()["job"]
+        self.assertEqual((job["ok"], job["code"], job["error"]), (True, 0, None))
+        self.assertEqual(job["steps"][-1], {"step": "open", "status": "skipped", "reason": "pass --open to show it to someone"})
+        self.assertEqual(job["result"]["argv"], ["install", "--from", upload, "--name", "Board", "--set", "APP_TITLE=Team", "--events"])
+        self.assertFalse(Path(upload).exists(), "an upload is removed once it is installed")
+        self.assertEqual(self.client.get(api + "/install", params={"job": "nope"}).status_code, 404)
+
+    def test_a_source_that_is_not_a_package_goes_to_the_importer_skill(self) -> None:
+        api = "/api/plugins/agent-app"
+        r = self.client.post(api + "/import/agent", json={"action": "adopt", "from": "./foreign-site"})
+        self.assertEqual((r.status_code, r.json()["message"]), (400, "Give the app a name."))
+        r = self.client.post(api + "/import/agent", json={"action": "adopt", "from": "./foreign-site", "name": "Old Site", "requirement": "Keep the blog."})
+        self.assertEqual(r.status_code, 200, r.text)
+        path = r.json()["path"]
+        self.assertEqual(Path(path), self.apps_dir / "old-site")
+        self.wait_idle(path)
+        turn = self.turns()[0]
+        self.assertTrue(turn["message"].startswith("Adopt the app at `./foreign-site` as an Agent App without rewriting it."))
+        self.assertIn("Keep the blog.", turn["message"])
+        self.assertIn("**importer** skill", turn["message"])
+        self.assertTrue(turn["message"].endswith(f"Create the app at `{path}`: pass that directory to every agent-app command."))
+        self.assertEqual(self.manager.sessions.ensured, [(self.api.session_id_for(path), "Agent App: Old Site")])
+        rows = self.client.get(api + "/apps").json()["rows"]
+        self.assertEqual([(x["name"], x["buildEnded"]) for x in rows], [("Old Site", True)])
+        r = self.client.post(api + "/import/agent", json={"action": "import", "id": "kanban-online", "source": "github:acme/market", "name": "Kanban"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.wait_idle(r.json()["path"])
+        self.assertTrue(self.turns()[1]["message"].startswith("Convert the marketplace app `kanban-online` from the marketplace `github:acme/market` into a new Agent App."))
 
     def test_build_runs_the_creator_kickoff_in_the_apps_session(self) -> None:
         bad = self.client.post("/api/plugins/agent-app/build", json={"name": "", "requirement": "x"})
@@ -714,9 +937,13 @@ class WebuiBackend(unittest.TestCase):
         self.mod = load_module("agent_app_webui_backend_under_test", PLUGIN / "webui_backend.py")
         self.calls: list[tuple] = []
 
-        def dispatch(method, path, query, body):
+        def dispatch(method, path, query, body, stream=None, length=None):
+            if stream is not None:  # an upload: the bytes, as they arrive
+                body = b"".join(stream)
+                if length != len(body):
+                    raise AssertionError("the upload's length")
             self.calls.append((method, path, query, body))
-            return 200, {"ok": True, "path": path}
+            return (413 if body == b"too big" else 200), {"ok": True, "path": path}
 
         self.backend = self.mod.Backend(dispatch, self.TOKEN, self.mod.allowed_origins({"HERMES_WEBUI_PORT": "8787"}))
         self.port = self.backend.server.server_address[1]
@@ -771,6 +998,34 @@ class WebuiBackend(unittest.TestCase):
         self.assertEqual(status, 204)
         self.assertIn("Authorization", headers["access-control-allow-headers"])
         self.assertEqual(self.request("OPTIONS", "/api/plugins/agent-app/build", token=None, origin="https://evil.example")[0], 403)
+
+    def test_an_upload_is_streamed_to_the_manager_not_parsed(self) -> None:
+        import http.client
+
+        data = b"PK\x03\x04" + bytes(range(256)) * 600  # past the JSON body limit's chunking, and not JSON
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", "/api/plugins/agent-app/upload", body=data, headers={
+            "Host": f"127.0.0.1:{self.port}", "Origin": "http://127.0.0.1:8787",
+            "Authorization": f"Bearer {self.TOKEN}", "Content-Type": "application/zip",
+        })
+        res = conn.getresponse()
+        res.read()
+        conn.close()
+        self.assertEqual(res.status, 200)
+        self.assertEqual(self.calls[-1], ("POST", "/upload", "", data))
+        status, headers, _ = self.request("POST", "/api/plugins/agent-app/upload", body=b"too big")
+        self.assertEqual(status, 413)
+        self.assertEqual(headers.get("connection"), "close", "a refused upload's unread body never reaches the next request")
+        # No length, no upload.
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.putrequest("POST", "/api/plugins/agent-app/upload", skip_host=True)
+        for k, v in (("Host", f"127.0.0.1:{self.port}"), ("Authorization", f"Bearer {self.TOKEN}")):
+            conn.putheader(k, v)
+        conn.endheaders()
+        res = conn.getresponse()
+        res.read()
+        conn.close()
+        self.assertEqual(res.status, 411)
 
     def test_rejects_a_body_that_is_not_json_and_paths_outside_the_api(self) -> None:
         self.assertEqual(self.request("POST", "/api/plugins/agent-app/build", body=b"{nope")[0], 400)
@@ -831,6 +1086,12 @@ class WebuiStart(unittest.TestCase):
         self.assertTrue(meta["ok"])
         self.assertIn("blueprint-react-node", meta["blueprints"])
         self.assertEqual(Path(meta["appsDir"]).resolve(), (self.box.home / "apps").resolve())
+        # The import panel's upload, through the real Manager.
+        req = urllib.request.Request(runtime["base"] + "/api/plugins/agent-app/upload", data=b"PK zip", method="POST",
+                                     headers={"Authorization": "Bearer " + runtime["token"], "Content-Type": "application/zip"})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            uploaded = json.loads(res.read())
+        self.assertEqual(Path(uploaded["file"]).read_bytes(), b"PK zip")
 
     def test_register_never_waits_for_the_backend(self) -> None:
         # The web UI loads plugins midway through its own imports and gives

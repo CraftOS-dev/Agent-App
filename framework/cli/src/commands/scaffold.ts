@@ -1,5 +1,5 @@
 /**
- * agent-app <dir> scaffold [--blueprint <id|path>] [--name "..."] [--port N]
+ * agent-app <dir> scaffold --blueprint <id|path> [--name "..."] [--port N] [--auth-mode none|multi-user]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
  * versions, write the ownership canon, and provision the agent credential.
@@ -9,7 +9,7 @@
  * existing app — same first-positional slot as every other command (spec 5.1).
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
 import { flag, hasFlag } from "../lib/args.js";
@@ -18,7 +18,15 @@ import { writeFileAtomic } from "../lib/home.js";
 import { linkLocalPackages } from "../lib/localPackages.js";
 import { AGENT_APP_VERSION } from "../lib/manifest.js";
 import { UsageError } from "../lib/project.js";
-import { adapterVersionOf, recordProjectToolkit, resolveToolkit, vendorPaths, type ResolvedToolkit } from "../lib/toolkit.js";
+import { ensureIgnoreRules, writeHarnessGuides } from "../lib/scaffoldFiles.js";
+import {
+  adapterVersionOf,
+  availableToolkits,
+  recordProjectToolkit,
+  resolveToolkit,
+  vendorPaths,
+  type ResolvedToolkit,
+} from "../lib/toolkit.js";
 import { reserveApp, unregister } from "../lib/registry.js";
 import { log } from "../lib/log.js";
 import { readJsonFile } from "../lib/json.js";
@@ -61,7 +69,24 @@ export async function run(args: string[], app: string): Promise<number> {
   }
 
   const name = flag(args, "name") ?? basename(dir);
+  // Every app is built on a blueprint (`blueprint-base` is the one with no
+  // stack). Without one there is nothing to build on, so the choice is asked
+  // for by name rather than made silently.
   const blueprintId = flag(args, "blueprint");
+  if (blueprintId === undefined) {
+    const ids = availableToolkits().map((t) => t.manifest.id);
+    throw new UsageError(
+      `scaffold needs --blueprint <id>: one of ${ids.join(", ")}. ` +
+        `\`agent-app blueprints\` says what each is built with.`,
+    );
+  }
+  let tk: ResolvedToolkit;
+  try {
+    tk = resolveToolkit(blueprintId);
+  } catch (err) {
+    // An unknown blueprint is a usage mistake (exit 2), not a rejection.
+    throw new UsageError(err instanceof Error ? err.message : String(err));
+  }
 
   mkdirSync(dir, { recursive: true });
 
@@ -69,27 +94,12 @@ export async function run(args: string[], app: string): Promise<number> {
   // entry / claimed port, nor leave a half-written app that reads as "present".
   let reserved = false;
   try {
-    let tk: ResolvedToolkit | null = null;
-    let systemPaths: string[] = ["manifest.json"];
-    let adapterVersion = "0.1.0";
-
-    if (blueprintId !== undefined) {
-      try {
-        tk = resolveToolkit(blueprintId);
-      } catch (err) {
-        // An unknown blueprint is a usage mistake (exit 2), not a rejection.
-        throw new UsageError(err instanceof Error ? err.message : String(err));
-      }
-      vendorPaths(tk, dir, allTemplateFiles(tk));
-      ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
-      recordProjectToolkit(dir, tk);
-      systemPaths = tk.manifest.systemPaths;
-      adapterVersion = adapterVersionOf(tk);
-      log.step(`scaffolded from blueprint "${tk.manifest.id}"`);
-    } else {
-      scaffoldMinimal(dir, name);
-      log.step("scaffolded a minimal Agent App skeleton (no blueprint)");
-    }
+    vendorPaths(tk, dir, allTemplateFiles(tk));
+    ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
+    recordProjectToolkit(dir, tk);
+    const systemPaths = tk.manifest.systemPaths;
+    const adapterVersion = adapterVersionOf(tk);
+    log.step(`scaffolded from blueprint "${tk.manifest.id}"`);
 
     // Fresh identity + stamped versions, merged over the blueprint's manifest.
     const manifestPath = join(dir, "manifest.json");
@@ -123,7 +133,7 @@ export async function run(args: string[], app: string): Promise<number> {
         id: manifest.id as string,
         name,
         path: dir,
-        ...(tk ? { blueprint: tk.manifest.id } : {}),
+        blueprint: tk.manifest.id,
         createdAt: new Date().toISOString(),
       },
       preferred,
@@ -145,18 +155,15 @@ export async function run(args: string[], app: string): Promise<number> {
     // the repo fails `npm install` — and so fails its build gate — before its
     // author has touched it. A no-op when the blueprint ships without a source
     // tree beside it, which is the published-CLI case.
-    if (tk !== null) {
-      const linked = linkLocalPackages(dir, tk.source);
-      for (const dep of linked) {
-        log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
-      }
+    for (const dep of linkLocalPackages(dir, tk.source)) {
+      log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
     }
 
     // Strip any credential that slipped in from a template, then mint a fresh one.
     stripCredentials(dir);
     mintAgentToken(dir);
 
-    writeHarnessGuides(dir, name, tk !== null);
+    writeHarnessGuides(dir, name);
 
     writeSystemHashes(dir, systemPaths);
 
@@ -184,311 +191,9 @@ export async function run(args: string[], app: string): Promise<number> {
   }
 }
 
-/**
- * Harness-facing pointer files: `AGENTS.md` (the common convention) and a
- * `CLAUDE.md` that defers to it.
- *
- * These are NOT framework files — an app is conforming without them, and they
- * are agent-accessible, never canonized. They exist because discovery is the
- * framework's weakest link: an agent dropped into an app directory by a harness
- * with no plugin has no way to learn that `agent-app` builds and launches this app and
- * `a2app` operates it. The scaffolded app tells it.
- *
- * A blueprint that ships its own guidance wins: an existing file is never
- * overwritten.
- */
-function writeHarnessGuides(dir: string, name: string, fromBlueprint: boolean): void {
-  const agents = join(dir, "AGENTS.md");
-  if (!existsSync(agents)) {
-    writeFileSync(
-      agents,
-      [
-        `# ${name} — agent guide`,
-        "",
-        "This is an **Agent App**: app code plus an A2App adapter plus framework files.",
-        "It is built, launched, and operated through two CLIs — never by hand:",
-        "",
-        "- `agent-app` — build, evolve, manage.",
-        "- `a2app` — operate a running app (the A2App protocol client; operate only).",
-        "",
-        "## Read first",
-        "",
-        // The stack map comes first: before writing any code, an agent reads
-        // `reference/blueprint.md` to learn this stack's file ownership, schema
-        // API, operation wiring, UI kit, and gate — so the contract is never
-        // reverse-engineered from source. Only present when scaffolded from a
-        // blueprint (a blueprint-less app has no such file to point at).
-        ...(fromBlueprint
-          ? ["- `reference/blueprint.md` — YOUR STACK'S MAP: files you own vs. system-owned, schema/migration API, operations, UI kit, gate. Read this before writing code."]
-          : []),
-        "- `AGENT_APP.md` — this app's index: plan, entities, operations, conventions, checklist.",
-        "- `reference/requirements.md` — the binding spec of what this app must do.",
-        "",
-        "Load the matching framework skill before build or evolve work:",
-        "`agent-app skills` lists them; `agent-app skills --install <dir>` installs them here.",
-        "",
-        "## Operate it (no rebuild)",
-        "",
-        "```bash",
-        "agent-app . serve                       # launch (never start a server by hand)",
-        "a2app .                                 # the app's modules — start here",
-        "a2app . <module>                        # its entities and operations",
-        "a2app . <module> <entity>               # fields, and the operations that act on it",
-        "a2app . <module> <entity> <id>          # one record, and what its state allows",
-        "a2app . <module> <entity> <id> <op> …   # invoke, at the path that identifies it",
-        "a2app . --find <term>                   # search names, get locations",
-        "a2app . data <entity> list|create|…     # raw record access",
-        "```",
-        "",
-        "The CLI is a walk: each argument names a place in the app, and every screen",
-        "ends by naming the legal next moves — read that line, you never have to guess.",
-        "",
-        "Read and write through the adapter only. Never drive the UI to operate this app;",
-        "the UI is for humans and for walk-verify.",
-        "",
-        "## Change its code",
-        "",
-        "```bash",
-        "agent-app . dev          # boot the candidate on a hidden port, fresh migration-replayed DB",
-        "agent-app . validate     # the gate — must pass; measures the dev instance, records the pass",
-        "# walk-verify: a verifier agent that is NOT the builder loads the walk-verify",
-        "# skill and drives every reference/requirements.md Feature against the dev URL.",
-        "agent-app . stop         # promote refuses while the live app is serving",
-        "agent-app . promote      # requires the gate pass; backup, apply to live, destroy dev",
-        "agent-app . serve        # bring the changed app back up",
-        "```",
-        "",
-        "While the dev instance is up, every `a2app` operate command targets IT — test",
-        "data lands in its disposable database, never in live data.",
-        "",
-        "Never build against the live app, never edit an applied migration, never drop a",
-        "collection holding user data, and never write a system-owned file listed in",
-        "`.a2app/system-hashes.json` — the gate fails on drift.",
-        "",
-      ].join("\n"),
-    );
-  }
-  const claude = join(dir, "CLAUDE.md");
-  if (!existsSync(claude)) {
-    writeFileSync(claude, `See [AGENTS.md](AGENTS.md) — it applies in full.\n`);
-  }
-}
-
 /** Every file under the toolkit template — the scaffold copies the whole app, not
  *  only the system paths (which is what toolkit-sync re-vendors later). */
 function allTemplateFiles(_tk: ResolvedToolkit): string[] {
   // vendorPaths copies directories recursively; "." copies the whole template.
   return ["."];
-}
-
-/**
- * Guarantee the ignore rules that keep runtime artifacts out of a repository.
- *
- * Blueprints ship their own `.gitignore`, but npm strips dotfiles named
- * `.gitignore` out of a published tarball, so a CLI installed with `npm i -g`
- * scaffolds an app carrying none at all — and the next `git add -A` publishes
- * the agent token, the principal password and the live database. The rules the
- * framework depends on are therefore written here, from the CLI, on every path.
- *
- * Existing lines are kept and only missing ones appended: a blueprint's own
- * rules (node_modules, the PocketBase binary, __pycache__) are none of the
- * framework's business, and re-running must not churn the file.
- */
-function ensureIgnoreRules(dir: string, dataDir?: string): void {
-  const rules = [
-    ".agent-token",
-    ".principal",
-    ".superuser",
-    ".a2app/serve.json",
-    ".a2app/serve.log",
-    ".a2app/dev/",
-    ".a2app/backups/",
-  ];
-  // The database lives wherever the toolkit says it does, so the rule follows
-  // the declaration rather than assuming "data/".
-  if (dataDir !== undefined && dataDir.trim() !== "") {
-    rules.push(dataDir.trim().replace(/[\/]+$/, "") + "/");
-  }
-  const file = join(dir, ".gitignore");
-  const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
-  const missing = rules.filter((rule) => !present.has(rule));
-  if (missing.length === 0) return;
-  const header = [
-    "# Written by agent-app: credentials, framework state and the live database",
-    "# are runtime artifacts and must never be committed.",
-  ];
-  const prefix = existing.trim() === "" ? "" : existing.replace(/\s*$/, "") + "\n\n";
-  writeFileSync(file, prefix + [...header, ...missing, ""].join("\n"));
-}
-
-/** A stack-free skeleton: just the framework files, so `scaffold` without a
- *  blueprint still yields a conforming artifact shell an agent then fills in. */
-function scaffoldMinimal(dir: string, name: string): void {
-  mkdirSync(join(dir, "reference"), { recursive: true });
-  ensureIgnoreRules(dir);
-  writeFileSync(
-    join(dir, "operations.json"),
-    JSON.stringify({ operations: [] }, null, 2) + "\n",
-  );
-  writeFileSync(
-    join(dir, "AGENT_APP.md"),
-    [
-      `# ${name}`,
-      "",
-      "## Plan",
-      "One paragraph describing what this app is. (Fill me in.)",
-      "",
-      "## Modules",
-      "Each module: what it covers, which entities sit in it. Decide these FIRST —",
-      "an entity cannot be declared until there is a module to hold it, and the root",
-      "screen of describe lists them.",
-      "- core — (rename me) this app's first area",
-      "",
-      "## Entities",
-      "Each entity: its module, purpose, key fields.",
-      "",
-      "## Operations",
-      "Each declared operation: its module, the entity it acts on, what it does, destructive?",
-      "",
-      "## Conventions",
-      "App-specific rules an operating agent must follow.",
-      "",
-      "## Checklist",
-      "Build and evolve tasks live in `reference/tasks.md` — one home. This section points there.",
-      "",
-    ].join("\n"),
-  );
-  writeFileSync(join(dir, "reference", "requirements.md"), requirementsTemplate(name));
-  writeFileSync(join(dir, "reference", "tasks.md"), tasksTemplate(name));
-}
-
-/** The requirements template. Every slot is a `<REPLACE: …>` marker whose text
- *  IS the fill instruction; the gate refuses a spec that still carries one, so
- *  template text can never reach verification or the user. */
-export function requirementsTemplate(name: string): string {
-  return [
-    `# Requirements: ${name}`,
-    "",
-    "PART A — REQUIREMENTS (SRS). User-approved before build; frozen after; changes via ## Changes.",
-    "",
-    "## Introduction",
-    "",
-    "### Purpose",
-    "<REPLACE: one paragraph — kind of app, its one job, who it is for, agent operates same data via A2App>",
-    "",
-    "### Scope",
-    "**Goals**",
-    "1. <REPLACE: 2–5 numbered falsifiable outcomes>",
-    "",
-    "**Core functionalities:** <REPLACE: capability nouns separated by ·>",
-    "",
-    "### Approval",
-    "Approved by the user: <REPLACE: date — written only when the user actually approved Part A>",
-    "",
-    "## Product Description",
-    "",
-    "### Product Perspective",
-    "<REPLACE: authMode and why; integrations or none; what this app deliberately is not built on>",
-    "",
-    "### User Characteristics",
-    "<REPLACE: who, which devices, how often — every device named here must have Q8/Q9 decisions>",
-    "",
-    "### Constraints",
-    "- C-1: <REPLACE: binding business rules, one C-n each — currency+format, immutability, numbering, complete fixed vocabularies>",
-    "",
-    "### Assumptions",
-    "- A-1: Volume ceiling: <REPLACE: a number — performance is judged at it>",
-    "",
-    "## Features",
-    "",
-    "### Module: <REPLACE: module name from manifest.json>",
-    "- F-<REPLACE: MOD>-1: <REPLACE: binary observable statements — \"The user can <verb>…\"; WHEN…SHALL for conditional; states the user must see are features too; one check per item, stable IDs, never renumbered>",
-    "",
-    "### Agent (via A2App)",
-    "- F-AGT-1: <REPLACE: \"The agent can <verb>…\" — the agent's own capabilities>",
-    "",
-    "## Non-Functional Requirements",
-    "- N-1: <REPLACE: app-specific measurable bars only — quality decisions go in ## Quality Conformance>",
-    "",
-    "## Data Requirements",
-    "- **<REPLACE: entity>** (module: <REPLACE: module>): <REPLACE: every field — type, required, bounds, server-set — plus the deletion/retention rule>",
-    "",
-    "## External Interfaces",
-    "- **Human (browser):** <REPLACE: each surface, per role when multi-user>",
-    "- **Agent (A2App):** <REPLACE: modules, entities, \"operations exactly as declared in ## Operations Design\"; state no other machine interface exists or declare it>",
-    "",
-    "## Out of Scope",
-    "- <REPLACE: exhaustive — what a reasonable builder would otherwise add; \"- None declared.\" almost never true>",
-    "",
-    "## Quality of Life",
-    "- <REPLACE: non-binding niceties, or \"None.\">",
-    "",
-    "PART B — TECHNICAL SPECIFICATION. QUALITY.md read is mandatory before writing it. Evolves during build; never silently contradicts Part A.",
-    "",
-    "## System Overview",
-    "<REPLACE: stack in one line; modules → navigation map>",
-    "",
-    "## UI Design",
-    "- **Design system:** <REPLACE: token source + this app's extensions — extended, never forked>",
-    "- **Layout:** <REPLACE: structure, max width, density>",
-    "- **Screen — <REPLACE: name>:** <REPLACE: one entry per screen — primary object · primary action · five states · narrow-width behavior>",
-    "- **Formatting:** <REPLACE: dates, money, identifiers, empty values>",
-    "",
-    "## Quality Conformance",
-    "",
-    "This app's decisions per Quality Standard section — never the rules restated. \"Standard defaults\" is not an answer for Q1–Q11. N/A only with reason. Breaking an item → ### Conventions and overrides.",
-    "",
-    "- **Q1 Completeness & IA:** <REPLACE: orientation model; one-name-per-concept; where search/filter/sort appears past a screenful>",
-    "- **Q2 Design system:** <REPLACE: tokens + extensions; semantic colour roles used; icon source; schemes resolved>",
-    "- **Q3 Layout & composition:** <REPLACE: alignment rule; density per region; numeric alignment, truncation, pagination point>",
-    "- **Q4 Interaction:** <REPLACE: affordance-state source; each destructive action + what its confirmation names; undo vs confirm; keyboard map; constrained vs validated>",
-    "- **Q5 State & feedback:** <REPLACE: per-screen state coverage; double-submit guard; ~100ms acknowledgment; how success reads back>",
-    "- **Q6 Motion:** <REPLACE: durations/easing; which transitions; reduced-motion behavior>",
-    "- **Q7 Content:** <REPLACE: voice in one line; error-copy pattern — what happened + next step; terminology>",
-    "- **Q8 Accessibility:** <REPLACE: contrast source + app-added colours checked; focus flow per composite interaction; target sizes; assistive announcements>",
-    "- **Q9 Responsiveness:** <REPLACE: width range per User Characteristics; each breakpoint + what changes; touch posture>",
-    "- **Q10 Performance:** <REPLACE: how each screen holds A-1; what is bounded/virtualized; assets>",
-    "- **Q11 Caching & freshness:** <REPLACE: static policy; data policy; in-flight dedupe; write invalidation>",
-    "- **Q12 Data integrity:** <REPLACE: each invariant + the boundary enforcing it>",
-    "- **Q13 API:** <REPLACE: app endpoints beyond the adapter + contract, or \"adapter surface only\">",
-    "- **Q14 Architecture:** <REPLACE: where UI/logic/data live; shared widgets existing exactly once>",
-    "- **Q15 Resilience:** <REPLACE: timeout values; retry policy; unreachable-backend behavior>",
-    "- **Q16 Security & privacy:** <REPLACE: authMode posture; never-logged data; closed defaults>",
-    "- **Q17 Observability:** <REPLACE: log schema + events; error-line contents; health meaning>",
-    "- **Q18 Version control:** <REPLACE: commit-unit convention>",
-    "",
-    "### Conventions and overrides",
-    "<REPLACE: overrides — item number + factual reason + revisit condition — and mirrored global rules, or \"None.\">",
-    "",
-    "## Process Flows",
-    "<REPLACE: mermaid where a lifecycle exists, or \"None — reason\">",
-    "",
-    "## Operations Design",
-    "| Operation | Module | Entity | appliesWhen | Params | Flags |",
-    "| --- | --- | --- | --- | --- | --- |",
-    "| <REPLACE: one row per operation, matching operations.json exactly> | | | | | |",
-    "",
-  ].join("\n");
-}
-
-/** The tasks template — same marker rule as the requirements template. */
-export function tasksTemplate(name: string): string {
-  return [
-    `# Tasks: ${name}`,
-    "",
-    "Created only after ### Approval carries a real date. Every task cites what it",
-    "implements; tick on completion; never delete or batch-tick; ## Changes work",
-    "appends here citing the entry date.",
-    "",
-    "## Build",
-    "- [ ] T-1 (<REPLACE: F-ID or Q-entry>): <REPLACE: the work, named so a stranger could verify it happened — quality work (motion, focus flow, narrow-width, resilience) gets tasks like features>",
-    "",
-    "## Verification",
-    "- [ ] All build tasks ticked.",
-    "- [ ] Quality Conformance sweep: every Q-entry true in the running app (Q1–Q9 walked incl. narrow width + keyboard-only; Q10–Q15 at A-1 volume; Q16–Q18 by inspection).",
-    "- [ ] Self-review against QUALITY.md.",
-    "- [ ] walk-verify pass — <REPLACE: verdict, defects found, fixes — written when verification ran>",
-    "",
-  ].join("\n");
 }

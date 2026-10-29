@@ -77,7 +77,7 @@ export async function run(_args: string[], app: string): Promise<number> {
       return 1;
     }
 
-    await assertNotServing(project);
+    await assertNotServing(project, "promote");
 
     const cmd = lifecycleCommand(project.dir, "promote");
     if (cmd === null) {

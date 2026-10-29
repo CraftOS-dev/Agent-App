@@ -40,7 +40,7 @@ at the repo root), which carries these six directly.
 |---|---|
 | `creator/` | build a new Agent App |
 | `modify/` | evolve an existing one (safe-evolve: dev → gate → walk-verify → promote) |
-| `importer/` | install / import / adopt / convert an existing app |
+| `importer/` | bring an app in or send one out: the marketplace, install from a zip / folder / git repository, convert, adopt, export |
 | `operator/` | read state, operate, diagnose — no code changes |
 | `walk-verify/` | independently verify a running app against its requirements (verdicts: pass / defects / incomplete / blocked; never the builder) |
 | `connect/` | connect to a published Agent App (reserved until deployed mode) |

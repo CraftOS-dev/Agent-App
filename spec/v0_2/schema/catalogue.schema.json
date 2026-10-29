@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2app/catalogue.json",
+  "title": "A marketplace's catalogue.json: the apps it offers (framework packaging §2).",
+  "type": "object",
+  "required": ["apps"],
+  "properties": {
+    "version": { "type": "string" },
+    "apps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "folder"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "description": "what `agent-app install <id>` names" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "folder": { "type": "string", "minLength": 1, "description": "the app's folder in the repository: a relative path with no `..`, `.` or empty segment" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "version": { "type": "string" },
+          "preview": { "type": "string", "description": "image URL; defaults to <folder>/thumbnail.png on the same ref" },
+          "toolkit": { "type": "string", "description": "requirement: the toolkit the app is built on; compatible when it is installed here" },
+          "agentAppVersion": {
+            "type": ["string", "number"],
+            "description": "requirement: a string is the framework version the package is written for, compatible on the same major (and for 0.x the same minor); a number is CraftBot's Living UI format, never compatible"
+          },
+          "livingUIVersion": { "type": "number", "description": "marks a CraftBot Living UI app: never installable as is (packaging §7)" },
+          "customizable": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "label"],
+              "properties": {
+                "key": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+                "label": { "type": "string" },
+                "type": { "const": "text" },
+                "default": { "type": "string" },
+                "placeholder": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

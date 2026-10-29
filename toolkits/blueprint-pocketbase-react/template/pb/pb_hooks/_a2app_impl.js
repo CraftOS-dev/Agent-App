@@ -11,8 +11,8 @@
  * another. The PocketBase globals ($app, $os, ApiError, __hooks) and require() are
  * all available here because this module is first loaded from inside a handler.
  *
- * Runtime: PocketBase JSVM (Goja), 0.23+ API (the blueprint pins the binary to
- * v0.26.x): record hooks `onRecordCreateRequest`/`onRecordUpdateRequest` with
+ * Runtime: PocketBase JSVM (Goja) on the 0.39 line (pb-serve.mjs pins the binary
+ * to v0.39.7): record hooks `onRecordCreateRequest`/`onRecordUpdateRequest` with
  * `e.next()`, DAO on `$app`, `collection.fields` (a FieldsList — iterate via
  * `fieldNames()`/`asMap()`, type via `field.type()`), request body via
  * `e.requestInfo().body`, routes via a RequestEvent `e` (`e.json`,
@@ -303,7 +303,10 @@ function describe(e, segments) {
         problems.push('operation "' + o.name + '" declares no typed params (declare {} if it takes none)');
       }
     }
-    return { modules: mods, operations: ops, entityModule: map, problems: problems };
+    // The app's id and name come from the manifest, as in identity — never from
+    // PocketBase's settings.meta.appName, which a fresh database answers "Acme".
+    const app = manifest ? { id: manifest.id, name: manifest.name || null } : null;
+    return { app: app, modules: mods, operations: ops, entityModule: map, problems: problems };
   }
 
   /* ------------------------------------------------------------- levels */
@@ -320,10 +323,7 @@ function describe(e, segments) {
     }
     return {
       level: "root",
-      app: {
-        id: $app.settings().meta.appName || "pocketbase_app",
-        name: $app.settings().meta.appName || null,
-      },
+      app: appPart.app,
       modules: rows,
       conventions: conventions(),
       next: ["describe/{module}", "describe?find={term}"],
@@ -558,7 +558,8 @@ function describe(e, segments) {
  * On create it also records whose record this is (spec/v0_2/auth.md §5): the
  * `ownedBy` field the app declares gets the caller's principal — the account
  * `nativeGate` made `e.auth`, or `owner`. PocketBase's collection rules then
- * decide who sees it.
+ * decide who sees it. The create rule itself was checked before this hook ran
+ * (PocketBase 0.27+), so it cannot depend on the owner set here.
  */
 function guard(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
@@ -749,7 +750,10 @@ function deleteGuard(e) {
  * ATOMICITY. PocketBase runs hooks on a pool of runtimes, so two requests can
  * race. Every read-modify-write runs inside `runInTransaction`, which
  * PocketBase serialises on its single write connection: of two simultaneous
- * claims, the second reads the first one's result and gets the 409.
+ * claims, the second reads the first one's result and gets the 409. A raw
+ * write through `$app.db()` goes to that same connection (PocketBase 0.28+),
+ * so inside a transaction every write goes through the transaction's own
+ * `tx.db()`: one through `$app.db()` would wait on the transaction forever.
  */
 
 const TOKEN_FILE = ".agent-token";

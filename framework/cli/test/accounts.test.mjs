@@ -17,6 +17,7 @@ import { createA2App, createA2AppServer, MemoryBinding } from "@a2app/adapter-co
 
 const here = dirname(fileURLToPath(import.meta.url));
 const AGENT_APP = resolve(here, "..", "dist", "agent-app.js");
+const A2APP = resolve(here, "..", "dist", "a2app.js");
 
 const failures = [];
 const check = (label, got, want) => {
@@ -38,14 +39,22 @@ function freePort() {
   });
 }
 
-function cli(args, home) {
+function cli(args, home, entry = AGENT_APP) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [AGENT_APP, ...args], { env: { ...process.env, A2APP_HOME: home }, windowsHide: true });
+    const child = spawn(process.execPath, [entry, ...args], { env: { ...process.env, A2APP_HOME: home }, windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.on("close", (code) => done({ code, out: stdout + stderr }));
+    child.on("close", (code) => {
+      let result = null;
+      try {
+        result = JSON.parse(stdout);
+      } catch {
+        /* no JSON result: a failure, or a command that prints none */
+      }
+      done({ code, out: stdout + stderr, result });
+    });
   });
 }
 
@@ -88,14 +97,15 @@ try {
     try {
       const owner = await cli([dir, "owner"], home);
       check("owner prints a link and succeeds", owner.code, 0);
-      ok("…a one-time setup link on the account page", new RegExp(`http://127\\.0\\.0\\.1:${port}/_a2app/account#setup/[A-Za-z0-9_-]{43}`).test(owner.out));
+      ok("…a one-time setup link on the account page", new RegExp(`^http://127\\.0\\.0\\.1:${port}/_a2app/account#setup/[A-Za-z0-9_-]{43}$`).test(owner.result?.url ?? ""));
+      check("…for an owner, in a JSON result", owner.result?.role, "owner");
       const member = await cli([dir, "invite"], home);
-      ok("invite makes a member link by default", member.code === 0 && /new member/.test(member.out));
+      ok("invite makes a member link by default", member.code === 0 && member.result?.role === "member");
       const bad = await cli([dir, "invite", "--role", "admin"], home);
       check("an unknown role is a usage error", bad.code, 2);
 
       // credential mint / list / revoke, for a person who signed up through the link.
-      const code = owner.out.match(/#setup\/([A-Za-z0-9_-]{43})/)[1];
+      const code = new URL(owner.result.url).hash.slice("#setup/".length);
       const signup = await fetch(`http://127.0.0.1:${port}/api/_a2app/invites/${code}`, {
         method: "POST",
         headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
@@ -103,19 +113,38 @@ try {
       });
       const alice = await signup.json();
       const minted = await cli([dir, "credential", "mint", "--for", "Alice@Example.com", "--scopes", "data:notes:read", "--expires", "1d", "--name", "CI"], home);
-      const token = minted.out.split(/\r?\n/).find((l) => /^a2a_[A-Za-z0-9_-]{43}$/.test(l));
-      ok("credential mint prints the token once, on a line of its own", minted.code === 0 && token !== undefined);
+      const token = minted.result?.token;
+      ok("credential mint answers with the token, once", minted.code === 0 && /^a2a_[A-Za-z0-9_-]{43}$/.test(token ?? ""));
       const whoami = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
       check("…a token that acts for the person it was minted for", [whoami.principal, whoami.scopes], [alice.id, ["data:notes:read"]]);
       const listed = await cli([dir, "credential", "list"], home);
-      ok("credential list shows it", listed.code === 0 && /for Alice/.test(listed.out) && /agent "CI"/.test(listed.out));
+      const entry = listed.result?.credentials?.find((c) => c.credentialId === minted.result.credential.credentialId);
+      ok("credential list shows it", listed.code === 0 && entry?.principalName === "Alice" && entry?.agentName === "CI");
       ok("…without the token", !listed.out.includes(token));
-      const id = listed.out.match(/cred_[0-9a-f]{16}/)[0];
-      check("credential revoke succeeds", (await cli([dir, "credential", "revoke", id], home)).code, 0);
+      const id = entry.credentialId;
+      const revoked = await cli([dir, "credential", "revoke", id], home);
+      check("credential revoke succeeds", [revoked.code, revoked.result?.revoked], [0, id]);
       const after = await (await fetch(`http://127.0.0.1:${port}/api/_a2app/whoami`, { headers: { "x-a2app-token": token } })).json();
       check("…and the token is refused from the next request", after.code, "credential_revoked");
       check("a lifetime that is not one is a usage error", (await cli([dir, "credential", "mint", "--expires", "soon"], home)).code, 2);
       check("an unknown person is a usage error", (await cli([dir, "credential", "mint", "--for", "nobody"], home)).code, 2);
+
+      // PowerShell hands an unquoted `a,b` over as the one argument "a b".
+      const spaced = await cli([dir, "credential", "mint", "--scopes", "data:notes:read data:notes:write", "--name", "Spaced"], home);
+      check("scopes separated by a space are two scopes", spaced.result?.credential?.scopes, ["data:notes:read", "data:notes:write"]);
+
+      // A record body written as field=value words, the way agents guess it.
+      const words = await cli([dir, "data", "notes", "create", "title=From words"], home, A2APP);
+      check("data create takes field=value", [words.code, words.result?.title], [0, "From words"]);
+      const stray = await cli([dir, "data", "notes", "create", "loose"], home, A2APP);
+      ok("…and names a word that is not one, with this entity's own field", stray.code === 2 && /--title "…" or title="…"/.test(stray.out));
+
+      // An agent that reached the app by URL and holds no credential for it is
+      // told its own way in, not to read the owner's token file.
+      const remote = `http://127.0.0.1:${port}`;
+      const stranger = await cli([remote, "whoami"], home, A2APP);
+      ok("a remote caller with no credential is pointed at login", stranger.code === 1 && stranger.out.includes(`a2app ${remote} login`));
+      ok("…and never at the app's .agent-token", !stranger.out.includes(".agent-token"));
     } finally {
       server.close();
       rmSync(dir, { recursive: true, force: true });

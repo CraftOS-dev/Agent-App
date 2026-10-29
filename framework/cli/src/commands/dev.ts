@@ -1,6 +1,7 @@
 /**
- * agent-app <dir> dev — boot the DEV SERVER: the candidate code on a hidden
- * port with a fresh database (framework spec 7.2).
+ * agent-app <dir> dev [--install] — boot the DEV SERVER: the candidate code on a
+ * hidden port with a fresh database (framework spec 7.2). `--install` runs the
+ * pipeline's install step first, which a fresh scaffold needs.
  *
  * Nothing is copied. The dev environment is the project's OWN tree booted a
  * second time with redirected inputs — `PORT` (an OS-assigned hidden port),
@@ -43,6 +44,7 @@ import { dataDir, dataFingerprint, lifecycleCommand, lifecycleLock } from "../li
 import { withLock } from "../lib/lock.js";
 import { appPort, freeEphemeralPort, identifyApp, pollHealth } from "../lib/net.js";
 import { killTreeForce, spawnBackgroundShell } from "../lib/proc.js";
+import { hasFlag } from "../lib/args.js";
 import { loadProject } from "../lib/project.js";
 import { runShell } from "../lib/shell.js";
 import { log } from "../lib/log.js";
@@ -56,7 +58,8 @@ function logTail(file: string, lines = 30): string {
   }
 }
 
-export async function run(_args: string[], app: string): Promise<number> {
+export async function run(args: string[], app: string): Promise<number> {
+  const install = hasFlag(args, "install");
   const project = loadProject(app);
   const pipeline = project.manifest.pipeline;
 
@@ -96,6 +99,14 @@ export async function run(_args: string[], app: string): Promise<number> {
           "If a toolkit upgrade is intended, run `agent-app <dir> toolkit-sync`; agent edits belong in app-owned paths.",
       );
       return 1;
+    }
+
+    // A fresh scaffold has no dependencies yet, and nothing of the app's runs
+    // without them. Same step as `serve --install`, after the canon check that
+    // vouches for the pipeline strings.
+    if (install && pipeline.install) {
+      log.step(`install: ${pipeline.install}`);
+      runShell(pipeline.install, project.dir);
     }
 
     // Evict the previous dev instance. "failed" keeps its record so nothing is

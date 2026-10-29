@@ -1,4 +1,62 @@
 /** Tiny flag parser shared by the operate commands. */
+import { UsageError } from "./project.js";
+
+/** The flags a command takes. */
+export interface FlagSpec {
+  /** flags taking one value, given at most once */
+  values?: string[];
+  /** flags taking a value, given any number of times */
+  lists?: string[];
+  /** flags taking no value */
+  booleans?: string[];
+}
+
+export interface ParsedFlags {
+  values: Map<string, string>;
+  lists: Map<string, string[]>;
+  booleans: Set<string>;
+  positionals: string[];
+}
+
+/**
+ * Parse a command's arguments against exactly the flags it takes.
+ *
+ * Strict where {@link flag} is lenient, for commands that change the machine:
+ * an unknown flag, a value flag given twice or without a value, is a usage
+ * error (exit 2) rather than something to ignore — a mistyped `--no-strat` on
+ * an install must not quietly launch the app.
+ */
+export function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
+  const out: ParsedFlags = { values: new Map(), lists: new Map(), booleans: new Set(), positionals: [] };
+  const values = new Set(spec.values ?? []);
+  const lists = new Set(spec.lists ?? []);
+  const booleans = new Set(spec.booleans ?? []);
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]!;
+    if (!token.startsWith("--")) {
+      out.positionals.push(token);
+      continue;
+    }
+    const name = token.slice(2);
+    if (booleans.has(name)) {
+      out.booleans.add(name);
+      continue;
+    }
+    if (!values.has(name) && !lists.has(name)) throw new UsageError(`Unknown option: ${token}`);
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new ValuelessFlagError(`--${name} has no value. Every flag needs one: --${name} "value".`);
+    }
+    i += 1;
+    if (lists.has(name)) {
+      out.lists.set(name, [...(out.lists.get(name) ?? []), value]);
+    } else {
+      if (out.values.has(name)) throw new UsageError(`--${name} is given twice`);
+      out.values.set(name, value);
+    }
+  }
+  return out;
+}
 
 /** Control flags that steer the query/body and are never record fields. */
 export const CONTROL_FLAGS = new Set([
@@ -52,6 +110,16 @@ export function flagAll(args: string[], name: string): string[] {
     out.push(value);
   }
   return out;
+}
+
+/**
+ * The scopes `--scopes` names, or `["*"]` when it names none. Separated by
+ * commas or spaces, and the flag may repeat: PowerShell turns an unquoted `a,b`
+ * into the single argument "a b" before the CLI sees it.
+ */
+export function scopesFlag(args: string[]): string[] {
+  const listed = flagAll(args, "scopes").flatMap((value) => value.split(/[\s,]+/)).filter((s) => s !== "");
+  return listed.length > 0 ? listed : ["*"];
 }
 
 /** Positionals: tokens that are neither a `--flag` nor a flag's value. */

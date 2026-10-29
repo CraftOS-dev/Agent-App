@@ -233,7 +233,8 @@ export interface Task {
   app: string;
   event?: string | null;
   status: TaskStatus;
-  request: { capability: string; payload?: Record<string, unknown> };
+  /** `principal`: who queued the work, whom its run acts as (null: the app itself, run as owner) */
+  request: { capability: string; payload?: Record<string, unknown>; principal?: string | null };
   claim?: { credentialId: string; principal: string; claimedAt: string } | null;
   progress?: { step?: string | null; percent?: number | null };
   result?: Record<string, unknown> | null;

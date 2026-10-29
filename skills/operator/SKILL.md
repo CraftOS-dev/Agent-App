@@ -122,15 +122,20 @@ queue, and whoever claims that task owns it. Two ways to be on the receiving end
 
 A task the bridge hands you comes with its own credential (`A2APP_TOKEN`). It
 acts for whoever asked for the work, holds only what that kind of work needs, and
-stops working once the task is closed, so make the terminal call last.
+stops working once the task is closed, so make the terminal call last. The
+task's `claim` names the bridge's own credential, because the bridge is what
+claimed it; the run itself acts as `request.principal`, and the bridge's log
+says so for every run ("runs as Bob with its own credential …").
 
 Either way the lifecycle is yours once you hold the task:
 
 ```
 a2app <dir> tasks progress <id> --step "reading the board" --percent 40
-a2app <dir> tasks complete <id> --result '{"summary":"3 cards moved"}'
+a2app <dir> tasks complete <id> --summary "3 cards moved"
 a2app <dir> tasks complete <id> --reason could_not_resolve_owner    # on failure
 ```
+
+(`--result '{…}'` takes a whole result object when a summary is not enough.)
 
 **Report progress on anything long.** The app sweeps a claimed task back into
 the queue after ~60s with no update, so another agent can pick up work you

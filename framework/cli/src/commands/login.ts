@@ -1,5 +1,6 @@
 /**
- * a2app <app> login [--scopes a,b] [--expires 30d] [--name <agent>] [--no-browser]
+ * a2app <app> login [--scopes data:<entity>:read,data:<entity>:write,op:<name>]
+ *                   [--expires 30d] [--name <agent>] [--no-browser]
  * a2app <app> login --confirm <code>
  *
  * How an agent gets access to an app (spec/v0_2/auth.md §7): it asks, the
@@ -23,7 +24,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { hostname } from "node:os";
 import { A2AppClient } from "@a2app/sdk";
-import { flag, hasFlag } from "../lib/args.js";
+import { flag, hasFlag, scopesFlag } from "../lib/args.js";
 import { parseDuration } from "../lib/duration.js";
 import { log } from "../lib/log.js";
 import { identifyApp, appPort } from "../lib/net.js";
@@ -199,7 +200,7 @@ export async function run(args: string[], app: string): Promise<number> {
   const confirmation = flag(args, "confirm");
   if (confirmation !== undefined) return confirm(app, confirmation);
 
-  const scopes = (flag(args, "scopes") ?? "*").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const scopes = scopesFlag(args);
   const expiresIn = parseDuration(flag(args, "expires") ?? "30d", "expires");
   const agentName = flag(args, "name") ?? process.env["A2APP_AGENT"] ?? `agent on ${hostname()}`;
   const { client, origin, appId, name } = await loginTarget(app);

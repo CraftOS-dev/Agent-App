@@ -1,6 +1,6 @@
 ---
-description: The front door to the Agent App Framework — build, evolve, operate, import, or verify an Agent App. Routes your request to the right framework skill and the agent-app / a2app CLIs. Use whenever the user wants software built, changed, or operated and you are not sure how to start.
-argument-hint: [what you want, e.g. "build a CRM" | "add a report to my expense app" | "operate atlas-erp"]
+description: The front door to the Agent App Framework — build, evolve, operate, install, import, export, or verify an Agent App. Routes your request to the right framework skill and the agent-app / a2app CLIs. Use whenever the user wants software built, changed, installed, or operated and you are not sure how to start.
+argument-hint: [what you want, e.g. "build a CRM" | "add a report to my expense app" | "operate atlas-erp" | "install the kanban board from the marketplace"]
 ---
 
 You are the entry point to the **Agent App Framework**. An Agent App is a
@@ -26,9 +26,19 @@ guess, and do not start building from general knowledge.
 | Build / make / scaffold a NEW app, tool, CRM, dashboard, internal tool | `creator` |
 | Change / add a feature to / fix / redesign an EXISTING app | `modify` |
 | Run / read data / operate / diagnose a running app (no code change) | `operator` |
-| Install / import / adopt / convert an existing or foreign app | `importer` |
+| Install an app from the marketplace, import one from a zip, folder or git/GitHub URL, adopt or convert an existing or foreign app, or export one to share | `importer` |
 | Independently verify a built app against its requirements | `walk-verify` |
 | Connect to a published app you do not own | `connect` |
+
+## Bringing an app in (install / import / adopt / convert / export)
+
+The **importer** skill owns every way in and out, through the one install
+pipeline the CLI runs (`agent-app catalogue`, `agent-app inspect`,
+`agent-app install`, `agent-app <dir> export`). Never unpack, copy or re-vendor
+an app by hand. A marketplace app is installed by its catalogue id (never a
+guessed one) and owes no walk-verify; anything from a zip, folder or git URL is
+inspected first, shown to the user, and walk-verified by a separate agent after
+it is installed.
 
 ## Finding the app (evolve / operate / verify)
 

@@ -86,10 +86,15 @@ async function handle(msg: JsonRpc): Promise<JsonRpc | null> {
       if (!tool) return fail(id, -32602, `unknown tool: ${name}`);
       const args = (params?.arguments as Record<string, unknown>) ?? {};
       const r = await tool.handler(args);
-      const text = r.stdout.trim() || r.stderr.trim() || `exit ${r.code}`;
-      // A guard rejection (exit 1) is a valid, useful result the model acts on —
-      // only an unreachable/crashed CLI (exit 3 or spawn failure) is an MCP error.
-      return ok(id, { content: [{ type: "text", text }], isError: r.code === 3 || r.code < 0 });
+      // The CLI's own words reach the model either way: its result document, and
+      // when it failed, what it said on stderr (a usage error prints only that).
+      const out = r.stdout.trim();
+      const err = r.stderr.trim();
+      const text = (r.ok ? out || err : [out, err].filter((s) => s !== "").join("\n")) || `exit ${r.code}`;
+      // Any non-zero exit is a failed call (1 rejected, 2 usage, 3 unreachable,
+      // or the CLI could not start): `isError` tells the client so, and the text
+      // still carries what the model needs to act on it.
+      return ok(id, { content: [{ type: "text", text }], isError: r.code !== 0 });
     }
     default:
       return id === undefined || id === null ? null : fail(id, -32601, `method not found: ${method}`);

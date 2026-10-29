@@ -2,8 +2,8 @@
 
 `register(ctx)` wires the framework into Hermes through its own plugin API:
 
-  - the build + operate tools (`agent_app_*`, toolset `agent_app`), each
-    shelling a real `agent-app` or `a2app` verb;
+  - the build, operate and package tools (`agent_app_*`, toolset
+    `agent_app`), each shelling a real `agent-app` or `a2app` verb;
   - the six framework skills, as plugin skills (`agent-app:creator`, ...);
   - a system-prompt section that routes any app request to the owning skill,
     which is how the model finds plugin skills at all (Hermes keeps them out
@@ -55,7 +55,7 @@ _SKILL_ROLES = {
     "creator": "build a NEW app",
     "modify": "change an EXISTING app",
     "operator": "use, read, or run an app (no code changes)",
-    "importer": "adopt existing software",
+    "importer": "install from the marketplace, import a zip/folder/git source, adopt or convert existing software, export to share",
     "walk-verify": "independent verification, never by the builder",
     "connect": "a published app you do not own",
 }
@@ -94,7 +94,7 @@ def guidance(skills: list[tuple[str, object, dict]], namespace: str, skills_home
         "",
         "An Agent App is a self-contained full-stack web app operated through its A2App adapter "
         "(the `a2app` CLI), never by driving its UI. Build and evolve go through the `agent-app` CLI. "
-        "When a message asks to build, change, run, import, verify, or connect to an app (a message "
+        "When a message asks to build, change, run, install, import, verify, or connect to an app (a message "
         f'beginning "{ROUTED_PREFIX}" came from the /agent-app command), load the matching framework '
         "skill with skill_view and follow it end to end:",
     ]

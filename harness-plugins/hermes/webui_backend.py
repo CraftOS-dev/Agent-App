@@ -11,7 +11,9 @@ as the web UI itself.
 
 Every request must carry the token from that file, come from the web UI's own
 origin (or carry no Origin, a local tool), and name a loopback Host (a DNS
-rebinding page names its own). Nothing here starts outside the web UI server:
+rebinding page names its own). A request body is JSON of at most 1 MiB, except
+an upload (`/upload`), which is the zip itself, streamed to the manager as it
+arrives and bounded there. Nothing here starts outside the web UI server:
 Hermes loads the plugin in every process, including the `hermes` turns this
 backend starts, and those inherit the web UI's environment.
 
@@ -40,6 +42,8 @@ EXTENSION_ID = "agent-app"
 API_PREFIX = "/api/plugins/agent-app"
 RUNTIME_FILE = "runtime.json"
 MAX_BODY = 1 << 20
+UPLOAD_PATH = "/upload"
+CHUNK = 1 << 16
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
 # The running backend, kept in sys.modules so a second load of the plugin in
@@ -154,9 +158,21 @@ def _host_name(header: str) -> str:
     return host.rsplit(":", 1)[0]
 
 
+def _chunks(rfile, length: int):
+    """Exactly `length` bytes of a request body, as they arrive."""
+    remaining = length
+    while remaining > 0:
+        chunk = rfile.read(min(CHUNK, remaining))
+        if not chunk:
+            raise ConnectionError("the upload ended before its declared length")
+        remaining -= len(chunk)
+        yield chunk
+
+
 def make_handler(dispatch, token: str, origins: frozenset[str]):
     """A request handler serving `dispatch(method, path, query, body)` under
-    API_PREFIX, behind the token, origin, and Host checks."""
+    API_PREFIX, behind the token, origin, and Host checks. An upload is passed
+    on as `stream=` and `length=` instead of a body."""
     expected = ("Bearer " + token).encode("utf-8")
 
     class Handler(BaseHTTPRequestHandler):
@@ -179,12 +195,15 @@ def make_handler(dispatch, token: str, origins: frozenset[str]):
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
 
-        def _send(self, status: int, payload: dict, origin: str | None = None) -> None:
+        def _send(self, status: int, payload: dict, origin: str | None = None, close: bool = False) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            if close:
+                # A request body left unread must not be taken for the next request.
+                self.send_header("Connection", "close")
             self._cors(origin)
             self.end_headers()
             self.wfile.write(data)
@@ -221,6 +240,19 @@ def make_handler(dispatch, token: str, origins: frozenset[str]):
             if not parts.path.startswith(API_PREFIX + "/"):
                 self._send(404, {"ok": False, "message": "unknown endpoint"}, origin)
                 return
+            route = parts.path[len(API_PREFIX):]
+            if method == "POST" and route == UPLOAD_PATH:
+                try:
+                    length = int(self.headers.get("Content-Length") or "")
+                except ValueError:
+                    length = -1
+                if length < 0:
+                    self._send(411, {"ok": False, "message": "an upload needs its Content-Length"}, origin, close=True)
+                    return
+                status, payload = dispatch(method, route, parts.query, None, stream=_chunks(self.rfile, length), length=length)
+                # A refused upload (too large) was refused before its body was read.
+                self._send(status, payload, origin, close=status == 413)
+                return
             body: Any = None
             if method == "POST":
                 try:
@@ -236,7 +268,7 @@ def make_handler(dispatch, token: str, origins: frozenset[str]):
                 except ValueError:
                     self._send(400, {"ok": False, "message": "the body is not JSON"}, origin)
                     return
-            status, payload = dispatch(method, parts.path[len(API_PREFIX):], parts.query, body)
+            status, payload = dispatch(method, route, parts.query, body)
             self._send(status, payload, origin)
 
     return Handler
@@ -316,7 +348,7 @@ def _start() -> dict | None:
     except ValueError:
         port = 0
     backend = Backend(
-        lambda method, path, query, body: api.dispatch(manager, method, path, query, body),
+        lambda method, path, query, body, **upload: api.dispatch(manager, method, path, query, body, **upload),
         load_token(_data_dir()),
         allowed_origins(),
         port,

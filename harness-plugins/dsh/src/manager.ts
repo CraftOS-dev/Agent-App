@@ -8,6 +8,12 @@
  *   - `/agent-app/api`  is the JSON action API (apps/build/serve/stop/remove/send),
  *     guarded by a per-page token minted into each page load.
  *
+ * Beside the build form, the page has a Marketplace and an Import panel. Their
+ * routes (`/catalogue`, `/inspect`, `/install`, `/upload`) are the shared
+ * engine's `PackageApi` over the same CLI the tools use, and `/import/agent`
+ * hands a source that is not a package to the agent (importer skill) in a new
+ * app's session, the way `/build` starts a build.
+ *
  * Build and chat drive a per-app dsh session: `ctx.agents.create` (or `.resume`
  * for a session that already exists) starts the agent on a chosen session id,
  * `agent.followup` delivers each message, and `session.deriveMessages()` reads
@@ -20,7 +26,17 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { runA2App, buildKickoffPrompt, listKnownApps, FRAMEWORK_BLUEPRINTS, type KnownApp } from "@a2app/integration-starter";
+import {
+  runA2App,
+  buildKickoffPrompt,
+  listKnownApps,
+  FRAMEWORK_BLUEPRINTS,
+  INSTALL_STEPS,
+  PackageApi,
+  type ApiReply,
+  type FormActionResult,
+  type KnownApp,
+} from "@a2app/integration-starter";
 import { appManagerHtml } from "./ui.js";
 
 /** Build/evolve and operate binaries. Override with AGENT_APP_CLI / A2APP_CLI. */
@@ -107,6 +123,7 @@ export function registerManager(ctx: ManagerHost): () => void {
   const tokens = new Map<string, number>();
   const builds = new Map<string, BuildEntry>();
   const handles = new Map<string, DshAgentHandle>();
+  const packages = new PackageApi(FRAMEWORK_CLI);
 
   const mintToken = (): string => {
     const now = Date.now();
@@ -222,20 +239,36 @@ export function registerManager(ctx: ManagerHost): () => void {
     return apps.find((a) => a.path === path) ?? null;
   }
 
-  async function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
-    const name = String(body.name ?? "").trim();
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  /**
+   * Start an agent run that creates a new app under APPS_DIR, in that app's
+   * session: a build from the form, or a source the importer skill converts
+   * or adopts. The run shows as a building tab until its app is up.
+   */
+  async function startAgentRun(name: string, kick: FormActionResult): Promise<{ status: number; out: Record<string, unknown> }> {
+    const label = name.trim();
+    const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     if (!slug) return { status: 400, out: { ok: false, message: "Give the app a name." } };
     const dir = join(APPS_DIR, slug);
-    if (builds.has(dir)) return { status: 400, out: { ok: false, message: `"${name}" is already being built.` } };
+    if (builds.has(dir)) return { status: 400, out: { ok: false, message: `"${label}" is already being built.` } };
     if (existsSync(dir)) return { status: 400, out: { ok: false, message: `An app directory named "${slug}" already exists.` } };
-    const kick = buildKickoffPrompt({ action: "build", name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
     if (kick.kind === "error") return { status: 400, out: { ok: false, message: kick.message } };
     mkdirSync(APPS_DIR, { recursive: true });
     const prompt = `${kick.prompt}\n\nCreate the app at \`${dir}\` — pass that directory to every agent-app command.`;
     await deliver(sessionIdFor(dir), APPS_DIR, prompt);
-    builds.set(dir, { name, dir, ended: false });
+    builds.set(dir, { name: label, dir, ended: false });
     return { status: 200, out: { ok: true, path: dir } };
+  }
+
+  function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
+    const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
+    return startAgentRun(String(body.name ?? ""), kick);
+  }
+
+  /** A source that is not a package, handed to the importer skill: `import` converts it, `adopt` runs it as it is. */
+  function startImport(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
+    const action = body.action === "adopt" ? "adopt" : "import";
+    const kick = buildKickoffPrompt({ action, id: body.id, from: body.from, source: body.source, requirement: body.requirement });
+    return startAgentRun(String(body.name ?? ""), kick);
   }
 
   async function lifecycle(sub: string, path: string): Promise<{ status: number; out: Record<string, unknown> }> {
@@ -283,7 +316,7 @@ export function registerManager(ctx: ManagerHost): () => void {
       const dark = !/[?&]light=1(&|$)/.test(req.url ?? "");
       res.statusCode = 200;
       res.setHeader("content-type", "text/html; charset=utf-8");
-      res.end(appManagerHtml({ apiBase: API_ROUTE, homeBase: PAGE_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS, dark, build: BUILD_STAMP }));
+      res.end(appManagerHtml({ apiBase: API_ROUTE, homeBase: PAGE_ROUTE, token: mintToken(), blueprints: FRAMEWORK_BLUEPRINTS, steps: INSTALL_STEPS, dark, build: BUILD_STAMP }));
     },
   });
 
@@ -302,11 +335,25 @@ export function registerManager(ctx: ManagerHost): () => void {
       const sub = url.pathname.slice(API_ROUTE.length);
       try {
         if (!tokenValid(req.headers["x-a2app-token"])) { send(401, { ok: false, message: "invalid or expired page token — reopen the Agent Apps tab" }); return; }
+        const reply = (r: ApiReply): void => send(r.status, r.body);
         if (method === "GET" && sub === "/apps") { send(200, { ok: true, rows: await rows() }); return; }
+        if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
+        if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
         if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
+        if (sub === "/upload") {
+          // The zip itself, not JSON: streamed to a private file, bounded as it arrives.
+          const declared = Number(req.headers["content-length"]);
+          const r = await packages.upload(req, Number.isFinite(declared) ? declared : undefined);
+          if (r.status === 413) res.setHeader("connection", "close"); // the rest of the body is never read
+          reply(r);
+          return;
+        }
         const body = await readBody(req);
 
         if (sub === "/build") { const r = await startBuild(body); send(r.status, r.out); return; }
+        if (sub === "/inspect") { reply(await packages.inspect(body)); return; }
+        if (sub === "/install") { reply(packages.install(body)); return; }
+        if (sub === "/import/agent") { const r = await startImport(body); send(r.status, r.out); return; }
         if (sub === "/session/send") {
           const path = String(body.path ?? "");
           const text = String(body.text ?? "").trim();

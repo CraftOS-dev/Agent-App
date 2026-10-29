@@ -1,116 +1,166 @@
 ---
 name: importer
 activity: importer
-description: Bring existing apps into the framework — install a marketplace app, import an Agent App export (zip/folder/git), adopt a foreign app to run as-is, or convert a foreign app by rebuilding it. Load for import/install/adopt/convert. Untrusted on origin; re-verified.
+description: Bring an app in, or send one out. Install a marketplace app; install an Agent App package from a zip, a folder or a git repository (inspect first, walk-verify after); convert a CraftBot Living UI app or foreign code by rebuilding it; adopt a foreign app to run as it is behind the sidecar adapter; export an app to share. Load for marketplace / install / import / adopt / convert / export.
 ---
 
 # Importer
 
-Bring existing apps in: **marketplace installs** (pre-built, pre-verified apps),
-**imports** of an Agent App export from a zip / local folder / git URL,
-**adoptions** of a foreign app (it runs UNCHANGED behind an adapter), and
-**conversions** of a foreign app — which are REBUILDS: the original code becomes
-reference material and the behavior is re-implemented on this platform. Be honest
-about that cost before converting: nothing of the original code runs afterward.
+Every way in goes through **one install pipeline**, run by the CLI:
 
-Imported code is **untrusted on origin** and re-verified; it earns no capability
-without the owner's consent.
+`acquire → inspect → sanitize → revendor → customize → place → register → dependencies → gate → serve → open`
+
+It is what makes an app from elsewhere safe to have, so never do its work by
+hand: never unzip a package into place, never copy one's credentials or data,
+never re-vendor someone else's app yourself. What the pipeline guarantees:
+
+- Nothing from the source runs before the dependencies step, and what runs then
+  is the pipeline of a toolkit **installed on this machine**, chosen by the id
+  the package records, never by a path it records.
+- Credentials, data, runtime state, `.git/`, `node_modules/` and build output
+  are dropped; the app gets a fresh identity, port and credential.
+- A step that fails leaves nothing behind. The one exception is the gate: an app
+  that fails it stays installed so it can be fixed, and the result says so.
+
+Every command prints JSON on stdout (diagnostics go to stderr) and exits `0`
+success, `1` rejected, `2` usage, `3` unreachable. Read the JSON; never scrape
+the prose.
 
 ## Which path?
 
-| The user has… | Do this |
+| The person has… | Do this |
 |---|---|
-| An app name / "what's in the marketplace?" | resolve the exact app id (match the user's words; never guess ids), then **install** it |
-| A `.zip`, a project folder path, or a git URL of an Agent App | **import** — one door for all three |
-| A foreign app to keep running as-is | **adopt** — pipeline verbs + operation mapping |
-| A foreign (non-Agent-App) codebase to rebuild | **convert** — a full REBUILD; tell the user first |
+| An app name, or "what's in the marketplace?" | **Marketplace** |
+| A `.zip`, a folder, or a git or GitHub URL | **Inspect it**, then follow what it is: |
+| … and it is an Agent App package (`kind: agent-app`) | **Install it** — untrusted, so walk-verified after |
+| … and it is a CraftBot Living UI app (`kind: living-ui`) | **Convert** |
+| … and it is anything else (`kind: foreign`) | **Adopt** or **Convert** — the person decides |
+| An app of their own to give someone | **Export** |
 
-## Install (marketplace)
+## Marketplace
 
-Resolve the exact app id, download, and check the hash against the marketplace
-plus version/build compatibility. Assign a fresh identity and port; strip any
-shipped credentials. Marketplace apps are pre-built and **pre-verified upstream —
-no walk-verify needed**. An app still in a legacy format is rejected with a clear
-error; tell the user it hasn't been re-published for this version yet, and do not
-improvise a workaround. On a launch error, treat it like any build failure under
-the ownership rules: read ALL errors, fix, `agent-app validate`, relaunch.
+1. **Find the id:** `agent-app catalogue --search "<their words>"`. Install only
+   an id this returns; never guess one. Each entry says whether it runs here:
+   `compatible: true`; `false` with a `reason` (a Living UI app → **Convert**, a
+   toolkit not installed here → say which); `null` when the entry states no
+   requirement. `--source <marketplace>` reads another marketplace
+   (`github:<owner>/<repo>[@<ref>]`, or a local directory).
+2. **Confirm with the person:** which app, its name, and its `customizable`
+   fields (offer each default).
+3. **Install:** `agent-app install <id> [--set KEY=VALUE]… [--name "<name>"]`.
+   The result's `trust` is `catalogued`: the app was verified upstream, so
+   nothing more is owed — **no walk-verify**. Give the person its `url`.
+4. **Consent is still theirs.** If the app declares integrations
+   (`capabilities`) or queues work for agents, ask before granting any. Never
+   start a bridge for it (`agent-app <dir> bridge start`): each task it queues
+   becomes an agent run, a capability a person grants knowingly, for an app
+   they chose.
 
-## Import (an Agent App export: zip / folder / git)
+## A zip, a folder, or a git repository
 
-The source already carries framework files.
+1. **Inspect first:** `agent-app inspect --from <source>`. Nothing is installed
+   and nothing from it runs. `<source>` is:
+   - a zip file (any file is read as a zip);
+   - a folder (copied, never moved: the folder is left as it was);
+   - `github:<owner>/<repo>[@<ref>][/<path>]`, or
+     `https://github.com/<owner>/<repo>[/tree/<ref>/<path>]`;
+   - any other git host: `git+<url>[#<ref>]`.
+2. **Show the person the report, and ask.** Say what it is (`kind`), whether it
+   is `installable` and why not, what **will run on their machine** (`pipeline`:
+   the commands of the toolkit installed here, not the package's), what install
+   **removes** (`strips`), whether its system files match its own record
+   (`integrity`), what it declares (`capabilities`), and every `warnings` entry.
+3. **An installable package:** `agent-app install --from <source> [--name "<name>"]`.
+   Its `trust` is `untrusted`, and its `next` names what is owed: before the app
+   is used for real work, a **separate** agent — never you, the installer — runs
+   the walk-verify skill against it. Until then, report it as installed and
+   unverified.
+   - Not installable because its toolkit is not here: the `reason` names it.
+     `--blueprint <id>` re-vendors it from another toolkit installed here, but
+     that toolkit's system files replace the package's, so only with the
+     person's agreement.
+   - The person wants the app to stay in its folder: `agent-app <dir> import`
+     runs the same pipeline in place (untrusted, the same walk-verify owed). It
+     refuses a folder whose app is serving: `agent-app <dir> stop` first.
+4. **Not a package:** the report's `routes` say what can be done instead —
+   **Convert** (`convert`) or **Adopt** (`adopt`), below.
 
-1. Extract; verify the framework files are present and valid. Register a NEW
-   delivered project (fresh id + port, shipped credentials stripped, kit
-   re-vendored).
-2. `agent-app <dir> toolkit-sync` then `agent-app <dir> adapter-sync` — re-vendor system
-   files and re-deliver the adapter.
-3. `agent-app validate` → launch → **walk-verify**. It is not trusted just for
-   carrying framework files.
+`install` is the same for both kinds of source: a source that turns out not to
+be a package stops at `inspect`, with `{ ok: false, step: "inspect", kind,
+reason, routes }`. Take it to the route; never force it.
 
-## Adopt (a foreign app, runs AS-IS)
+## Convert — a rebuild
 
-The app runs UNCHANGED in its own runtime — **never rebuild it, never edit its
-code** except configuration needed to bind the assigned port. You put an A2App
-adapter (the sidecar / reverse-proxy form) in front of it so agents can drive its
-declared operations; everything else passes through.
+For a CraftBot Living UI app, or foreign code the person wants rebuilt as an
+Agent App. **Tell the person the cost first:** nothing of the original code runs
+afterward; its behaviour is re-implemented.
 
-1. **Inspect** the source at the project path: README, dependency manifests
-   (package.json / pyproject.toml / go.mod / Cargo.toml), how it starts, which
-   port/env it expects, whether it has a build step.
-2. **Write the pipeline verbs** into the framework `manifest.json` (install /
-   build / start / health). Bind `127.0.0.1` on the assigned port. Use the app's
-   OWN runner (its npm script, uvicorn, a static server, a compiled binary). Pick a
-   health strategy the app satisfies (an HTTP path it answers, or process liveness
-   for servers that 404 on `/`).
-3. **Group it into modules, then map its controllable surface** into
-   `operations.json` so agents can DRIVE it over A2App. Each declared operation
-   maps its A2App path onto the app's OWN upstream endpoint (the reverse-proxy
-   adapter forwards it). Probe in order: an OpenAPI/Swagger spec in the repo →
-   route definitions in code → the README.
-   **The grouping is already there — use it.** OpenAPI tags, route path prefixes,
-   and controller files each name an area a person would recognise; make those the
-   modules and declare them in `manifest.json`. Flattening two hundred routes into
-   one module produces a screen no agent can read and a budget the gate will fail.
-   Every operation needs typed `params`: derive them from the OpenAPI parameter
-   schema where one exists, and where none does, read the handler and declare them
-   explicitly — an operation whose arguments you cannot state does not ship.
-   Mark anything that deletes/overwrites `"destructive": true`. If the app has NO server
-   API (a static site or client-side SPA), leave `operations` empty and say so —
-   never invent verbs, never map direct DB writes. A foreign app exposes
-   **operations only, no protocol entities** — its own API passes through.
-4. **Note what the app is** in `AGENT_APP.md`. Do NOT author feature requirements
-   for it: verification covers *the app launches and its main screen renders* —
-   never the foreign app's internal features (you can't fix those and must not try;
-   it ships as-is, quirks included).
-5. `agent-app validate` / launch. Errors come back with the app's own log excerpts; fix
-   the VERBS or the port binding, not the app's features, and retry.
-6. **Verify the operation mappings for real**: invoke every non-destructive mapped
-   operation through the adapter and confirm it works; destructive ones are
-   shape-checked, never fired. A mapping that does not work must not ship — fix it or
-   remove the operation.
-7. walk-verify the launch, then announce. If the app fundamentally cannot run here
-   (needs a database server, private APIs, system deps), STOP and tell the user
-   exactly what is missing — do not fake a start command that serves an error page.
+1. **Get the source tree.** A folder or a git repository as it is; a zip,
+   extracted; a marketplace Living UI app, its `folder` in the marketplace's
+   repository (`source.location` in the inspect report, at the entry's ref).
+2. **Scaffold** a new app on the blueprint that fits what it does:
+   `agent-app <dir> scaffold --blueprint <id>`.
+3. **Keep the original read-only** in `<dir>/reference/source/`: read it, never
+   edit it, never run it.
+4. **Synthesize `reference/requirements.md` from it** — its screens, its data,
+   what each action does — and build it with the **creator** skill: feature by
+   feature under the ownership rule, `agent-app <dir> validate`, launch, and a
+   walk-verify by a separate agent before announcing it.
 
-Changes to a running adopted app apply LIVE (no staging): edit → relaunch.
+## Adopt — run it as it is
 
-## Convert (a foreign app, REBUILT)
+For a foreign app that must keep running unchanged: any HTTP app, in any stack.
+The app runs from `upstream/`, and the sidecar adapter in front of it serves the
+A2App surface and forwards each declared operation to one of its own routes.
 
-Conversion scaffolds a fresh Agent App, ships the original source read-only at
-`reference/source/`, synthesizes `reference/requirements.md` FROM that source, and
-runs the normal creator build. **Tell the user the cost first** — nothing of the
-original code runs afterward. If the source turns out to already be an Agent App,
-use the **import** path instead.
+1. **Scaffold on the sidecar blueprint:** `agent-app <dir> scaffold --blueprint blueprint-sidecar`,
+   then read `<dir>/reference/blueprint.md` — the authoritative, step-by-step
+   adopt guide. What follows is its outline.
+2. **Place the source unchanged in `upstream/`.** Never edit it. If it cannot
+   run here (a database server, private services, system packages), stop and
+   tell the person exactly what is missing.
+3. **Declare how it starts** in `sidecar.json`: an argv (never a shell
+   string), `"port": "auto"` handed over as `{port}`, its environment, and a
+   health path.
+4. **Name the modules** from the grouping the app already has (OpenAPI tags,
+   route prefixes, controllers), and **map its API**: one operation per thing an
+   agent should be able to do, in `operations.json` (what it is: typed params,
+   `destructive`, `readOnly`) and `sidecar.json` (which route it reaches). No
+   server API means no operations: say so; never invent verbs or map database
+   writes.
+5. **Verify the mapping, not the app:** `agent-app <dir> validate`,
+   `agent-app <dir> serve`, then invoke every non-destructive operation for real
+   (`a2app <dir> <module> <operation> --…`); a destructive one is shape-checked
+   (it answers `approval_required`), never fired. A mapping that does not work
+   does not ship.
 
-## Notes
+Tell the person what adoption gives them: it is **operate-only** — agents reach
+the app through the mapped operations (`a2app <dir>`, then a module, then an
+operation), with no entities and no `data` verbs — and **the app's own UI stays
+at its own address**; the sidecar's port serves only the protocol and the
+account page. Changes apply live: edit the declarations, stop, serve.
 
-- Imported/installed projects are ordinary Agent Apps afterward: operate them via
-  the `a2app` CLI (`ops` / `run` / `data`), modify them via the modify skill. Adopted
-  external apps speak the same operations surface through their adapter — the walk
-  reaches them too (`a2app <dir>` then the module), and an operation is invoked at
-  the path it was found under; only the `data` verbs don't apply (external
-  apps expose operations only; the app's own API passes through instead).
-- Never edit system-owned files of an Agent App — the gate hashes them.
-- Re-verification (gate + walk-verify) is mandatory for every path except a
-  marketplace app already verified upstream. An app that cannot be made to run or
-  comply is rejected honestly.
+## Export — to share
+
+`agent-app <dir> export [--out <file.zip>]` writes the app as a package: one
+folder named after the app, without credentials, data, runtime state,
+dependencies or build output, and with `.a2app/toolkit.json` reduced to its id.
+It never replaces an existing file. It prints `{ ok, file, sha256, bytes, files }`:
+give the person the file and its `sha256`. It installs on another machine with
+`agent-app install --from <file.zip>`, where it is untrusted and walk-verified.
+
+## Afterwards
+
+- An installed or imported app is an ordinary Agent App: operate it with the
+  `a2app` CLI (the walk: `a2app <dir>`, then the module, the entity, the
+  operation; records through `a2app <dir> data <entity> …`), and change it with
+  the **modify** skill. An adopted app has operations only.
+- Never edit an app's system-owned files: the gate hashes them.
+- `agent-app <dir> toolkit-sync` re-vendors from the toolkit the app *itself*
+  records, path included, so it is for an app that is already yours, after its
+  toolkit was updated. Never use it to bring in an app you were given: install
+  and import re-vendor from a toolkit installed here, chosen by id.
+- In a harness with the framework plugin, the same commands are the tools
+  `agent_app_catalogue`, `agent_app_inspect`, `agent_app_install` and
+  `agent_app_export`, and a manager tab's Marketplace and Import panels run
+  them for the person; what is owed afterwards is the same.

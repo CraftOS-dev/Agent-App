@@ -301,7 +301,8 @@ rather than by trusting you to remember:
   decides which build is live — belongs to the host.
 - **No import.** Importing is how a codebase becomes *your* Agent App. Connecting
   is how you use *someone else's*. If you want your own copy, ask the owner for
-  the source — that is a separate act, with the owner's consent, and not a side
+  it: they export a package (`agent-app <dir> export`) and you install it with
+  the importer skill — a separate act, with the owner's consent, and not a side
   effect of connecting.
 - **Revocation is theirs.** Losing access mid-task is normal and is not an
   error to route around.

@@ -2,7 +2,7 @@
   "name": "@craftos/agent-app-openclaw",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent App Framework plugin for OpenClaw: agent-app CLI passthrough + Control-UI entry form + the six framework skills, driving the agent-app and a2app CLIs",
+  "description": "Agent App Framework plugin for OpenClaw: agent-app CLI passthrough + an Agent Apps Control-UI tab (build, marketplace, import) + the six framework skills, driving the agent-app and a2app CLIs",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,6 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "node test/manager.test.mjs"
   }
 }

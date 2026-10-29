@@ -8,6 +8,14 @@
  * page polls apps every 4s and the open transcript every 2.5s. DOM is built with
  * createElement/textContent so app-provided strings never reach innerHTML.
  *
+ * The New + tab has three panels: Build (the agent builds a new app), the
+ * Marketplace (search, tag chips, a card per app, install), and Import (a zip,
+ * a folder or a git URL: inspect, then install, or hand a source that is not a
+ * package to the agent to convert or adopt). An install is a job on the
+ * server; the page polls it every second and shows each pipeline step from
+ * `install --events`, then opens the app in its tab. It never gives up on a
+ * running install, so no client timeout is shorter than the CLI's own.
+ *
  * Embedding an app iframe needs a real origin, which OpenClaw grants plugin
  * frames only under `gateway.controlUi.embedSandbox: "trusted"`; the page
  * detects an opaque origin and shows that requirement instead of a broken frame.
@@ -18,6 +26,8 @@ export interface ManagerConfig {
   homeBase: string;
   token: string;
   blueprints: readonly string[];
+  /** The install pipeline's steps, in order: the rows of the progress view. */
+  steps: readonly string[];
   /** Bundle build stamp, shown in the footer to flag a stale installed copy. */
   build: string;
 }
@@ -154,6 +164,69 @@ textarea.input{min-height:120px;resize:vertical}
 .spinner{width:22px;height:22px;border:2px solid var(--border-strong);border-top-color:var(--accent);border-radius:var(--radius-full);animation:spin 0.8s linear infinite;margin:0 auto 14px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .cfgline{font:12px/1.6 var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;color:var(--text);user-select:all}
+
+/* ── New tab: build · marketplace · import ── */
+.center.top{align-items:flex-start}
+.newpane{width:100%;max-width:560px}
+.newpane.wide{max-width:980px}
+.modes{display:inline-flex;gap:2px;padding:3px;margin:0 0 18px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg)}
+.modes button{border:none;background:transparent;color:var(--muted);padding:5px 12px;border-radius:var(--radius-sm);font-size:12px;font-weight:600}
+.modes button:hover{color:var(--text)}
+.modes button.on{background:var(--elevated);color:var(--text-strong);box-shadow:var(--shadow-sm)}
+.pane h1{font-size:22px;font-weight:650;letter-spacing:-0.03em;line-height:1.2;color:var(--accent);margin:0 0 4px}
+.pane .lead{font-size:12px;color:var(--muted);margin:0 0 18px}
+.pane .sub{font-size:13px;color:var(--muted);margin:0 0 4px;line-height:1.5}
+.searchrow{display:flex;gap:10px;margin:0 0 10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
+.chip{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:var(--radius-full);padding:2px 10px;font-size:12px}
+.chip:hover{color:var(--text);border-color:var(--border-strong)}
+.chip.on{border-color:var(--accent);color:var(--accent);background:var(--accent-subtle)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.app{display:flex;flex-direction:column;border:1px solid var(--border);background:var(--elevated);border-radius:var(--radius-lg);overflow:hidden}
+.app .thumb{aspect-ratio:16/9;background:var(--bg-hover);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:28px;font-weight:650}
+.app .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.app .body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:6px;flex:1}
+.app h3{margin:0;font-size:14px;font-weight:600;color:var(--text-strong);display:flex;align-items:baseline;gap:8px}
+.app .ver{font:11px var(--mono);color:var(--muted);font-weight:400}
+.app .desc{margin:0;font-size:12.5px;line-height:1.5}
+.app .actions{margin-top:auto;padding-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+.tags{display:flex;flex-wrap:wrap;gap:4px}
+.tag{font-size:11px;color:var(--muted);background:var(--bg-hover);border-radius:var(--radius-sm);padding:1px 6px}
+.compat{font-size:12px;color:var(--muted)}
+.compat.yes{color:var(--ok)}
+.compat.no{color:var(--warn)}
+.fields{border-top:1px solid var(--border);margin-top:4px}
+.fields label{margin:8px 0 4px;font-size:12px}
+.btn.small{padding:5px 10px;font-size:12px}
+.note{font-size:12px;color:var(--muted);margin:8px 0 0;line-height:1.5}
+.empty{color:var(--muted);font-size:13px;padding:24px 0;text-align:center}
+.errbox{display:flex;flex-direction:column;align-items:flex-start;gap:10px;margin:12px 0}
+.code{font:12px/1.6 var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;margin:0;white-space:pre-wrap;word-break:break-word;width:100%;max-height:260px;overflow:auto}
+.errbox .code{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 35%,var(--border))}
+.report{margin-top:18px;border:1px solid var(--border);background:var(--elevated);border-radius:var(--radius-lg);padding:18px}
+.report h2{margin:10px 0 4px;font-size:15px;font-weight:600;color:var(--text-strong)}
+.report .sub{font-size:13px;color:var(--muted);margin:0}
+.badges{display:flex;gap:6px;flex-wrap:wrap}
+.badge{font-size:11px;font-weight:600;border-radius:var(--radius-full);padding:2px 9px;border:1px solid var(--border);color:var(--text)}
+.badge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.badge.no{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px;margin:14px 0 0}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;word-break:break-word}
+.section{margin:16px 0 0}
+.section h3{margin:0 0 6px;font-size:12px;font-weight:600;color:var(--text-strong)}
+.section ul{margin:0;padding-left:18px;font-size:12.5px;line-height:1.6}
+.section ul.warn li{color:var(--warn)}
+.route{border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;margin:8px 0 0;font-size:13px;line-height:1.5}
+.steps{list-style:none;margin:16px 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.steps li{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.steps .ic{width:16px;flex:none;text-align:center}
+.steps .nm{min-width:96px;font-weight:550;flex:none}
+.steps .dt{color:var(--muted);font-size:12px;word-break:break-word}
+.steps li.pending,.steps li.skipped{color:var(--muted)}
+.steps li.start .ic{color:var(--warn);animation:pulse 1.4s ease-in-out infinite}
+.steps li.done .ic{color:var(--ok)}
+.steps li.failed .ic,.steps li.failed .dt{color:var(--danger)}
 </style></head><body>
 <header class="tabbar" id="tabbar"></header>
 <main>
@@ -174,12 +247,24 @@ textarea.input{min-height:120px;resize:vertical}
 "use strict";
 const CFG = JSON.parse(document.getElementById("cfg").textContent);
 const OPAQUE = self.origin === "null";
-const S = { rows: [], active: null, side: false, log: [], sending: false, busy: new Set(), confirmDelete: null };
+const S = {
+  rows: [], active: null, side: false, log: [], sending: false, busy: new Set(), confirmDelete: null,
+  // The New + tab: which panel, the marketplace, the import, and an install in progress.
+  newMode: "build",
+  market: { q: "", tag: null, tags: [], data: null, error: null, loading: false, seq: 0, open: null },
+  imp: { kind: "zip", from: "", file: null, origin: null, label: "", uploaded: false, report: null, error: null, busy: false },
+  job: null,
+};
 
 function api(path, body) {
   const opts = { method: body ? "POST" : "GET", headers: { "x-a2app-token": CFG.token } };
   if (body) { opts.headers["content-type"] = "application/json"; opts.body = JSON.stringify(body); }
   return fetch(CFG.apiBase + path, opts).then((r) => r.json());
+}
+/** Send a zip as it is (no JSON, no encoding); the server keeps it for --from. */
+function upload(file) {
+  const opts = { method: "POST", headers: { "x-a2app-token": CFG.token, "content-type": "application/zip" }, body: file };
+  return fetch(CFG.apiBase + "/upload", opts).then((r) => r.json());
 }
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -282,16 +367,18 @@ function renderView() {
     framesBox.appendChild(f);
   }
   panel.hidden = !!showFrame;
+  const isNew = S.active === "new" || !r;
   const key = showFrame
     ? "frame:" + r.path
-    : S.active === "new" || !r
-      ? "new"
+    : isNew
+      ? "new:" + S.newMode + (S.job ? ":job" : "")
       : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side].join("|");
   if (key === viewKey) return;
   viewKey = key;
   if (showFrame) return;
   panel.replaceChildren();
-  if (S.active === "new" || !r) { panel.appendChild(buildForm()); return; }
+  panel.classList.toggle("top", isNew);
+  if (isNew) { panel.appendChild(newPanel()); return; }
   panel.appendChild(appPanel(r));
 }
 function appPanel(r) {
@@ -340,7 +427,7 @@ function appPanel(r) {
 /* ── New-app form ──────────────────────────────────────── */
 function buildForm() {
   const f = el("div", "form");
-  f.appendChild(el("h1", null, "Agent Apps"));
+  f.appendChild(el("h1", null, "Build an app"));
   f.appendChild(el("p", "lead", "Describe the app; the agent builds, verifies, and serves it here."));
   f.appendChild(el("label", null, "App name"));
   const name = el("input", "input"); name.id = "f-name"; name.placeholder = "Acme CRM"; name.autocomplete = "off";
@@ -378,6 +465,461 @@ async function submitBuild(btn) {
   S.active = out.path;
   await refresh();
   toggleSide(true);
+}
+
+/* ── New tab: build · marketplace · import ─────────────── */
+const MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"]];
+const KINDS = { "agent-app": "Agent App package", "living-ui": "CraftBot Living UI app", foreign: "Not an Agent App" };
+const ROUTES = {
+  convert: "Convert: the agent rebuilds it as a new Agent App, with the original source kept read-only in reference/source/. Nothing of the original code runs afterward.",
+  adopt: "Adopt: the app runs unchanged behind the framework\\u2019s sidecar adapter. Agents operate it through the operations the agent maps; its own UI stays at its own address.",
+};
+const STEP_ICONS = { pending: "\\u25CB", start: "\\u25CF", done: "\\u2713", skipped: "\\u2013", failed: "\\u2717" };
+
+function newPanel() {
+  const wide = S.job || S.newMode !== "build";
+  const wrap = el("div", "newpane" + (wide ? " wide" : ""));
+  if (S.job) { wrap.appendChild(jobView()); return wrap; }
+  const modes = el("div", "modes");
+  for (const [mode, label] of MODES) {
+    const b = el("button", S.newMode === mode ? "on" : "", label);
+    b.onclick = () => { S.newMode = mode; render(); };
+    modes.appendChild(b);
+  }
+  wrap.appendChild(modes);
+  wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : buildForm());
+  return wrap;
+}
+function errorBox(message, retry) {
+  const box = el("div", "errbox");
+  box.appendChild(el("pre", "code", message));
+  if (retry) { const b = el("button", "btn small", "Retry"); b.onclick = retry; box.appendChild(b); }
+  return box;
+}
+function section(parent, title, body) {
+  const s = el("div", "section");
+  s.appendChild(el("h3", null, title));
+  s.appendChild(body);
+  parent.appendChild(s);
+}
+function list(items, cls) {
+  const ul = el("ul", cls);
+  for (const item of items) ul.appendChild(el("li", null, item));
+  return ul;
+}
+
+/* Marketplace: the catalogue (searched by the CLI), filtered by tag, one card per app. */
+let marketEls = null;
+const tagsOf = (apps) => [...new Set(apps.flatMap((a) => (Array.isArray(a.tags) ? a.tags : [])))].sort();
+function marketView() {
+  const v = el("div", "pane");
+  v.appendChild(el("h1", null, "Marketplace"));
+  v.appendChild(el("p", "lead", "Apps ready to install. A marketplace app is catalogued: once it runs there is nothing more to verify."));
+  const row = el("div", "searchrow");
+  const q = el("input", "input");
+  q.type = "search"; q.placeholder = "Search apps"; q.value = S.market.q; q.autocomplete = "off";
+  let timer = 0;
+  q.oninput = () => { clearTimeout(timer); timer = setTimeout(() => loadCatalogue(q.value.trim()), 300); };
+  row.appendChild(q);
+  v.appendChild(row);
+  marketEls = { chips: el("div", "chips"), status: el("div"), grid: el("div", "grid") };
+  v.append(marketEls.chips, marketEls.status, marketEls.grid);
+  if (S.market.data === null && !S.market.loading && S.market.error === null) loadCatalogue(S.market.q);
+  else renderMarket();
+  return v;
+}
+function loadCatalogue(q) {
+  const m = S.market;
+  const seq = ++m.seq;
+  m.q = q; m.loading = true; m.error = null;
+  renderMarket();
+  const done = (out) => {
+    if (seq !== m.seq) return; // a newer search answered meanwhile
+    m.loading = false;
+    if (out.ok) {
+      m.data = out;
+      if (q === "") m.tags = tagsOf(out.apps);
+    } else {
+      m.data = null;
+      m.error = out.message || "The marketplace did not answer.";
+    }
+    renderMarket();
+  };
+  return api("/catalogue?search=" + encodeURIComponent(q)).then(done, (e) => done({ ok: false, message: String((e && e.message) || e) }));
+}
+function renderMarket() {
+  if (!marketEls) return;
+  const m = S.market;
+  const { chips, status, grid } = marketEls;
+  chips.replaceChildren();
+  for (const t of m.tags.length ? m.tags : m.data ? tagsOf(m.data.apps) : []) {
+    const c = el("button", "chip" + (m.tag === t ? " on" : ""), t);
+    c.onclick = () => { m.tag = m.tag === t ? null : t; renderMarket(); };
+    chips.appendChild(c);
+  }
+  status.replaceChildren();
+  grid.replaceChildren();
+  if (m.error) { status.appendChild(errorBox(m.error, () => loadCatalogue(m.q))); return; }
+  if (!m.data) { status.appendChild(el("div", "empty", "Reading the marketplace\\u2026")); return; }
+  const src = m.data.source || {};
+  const from = "From " + (src.repository || src.location || "the marketplace") + (src.fallbackFrom ? " (" + src.fallbackFrom.location + " is unavailable)" : "");
+  status.appendChild(el("p", "note", m.loading ? "Searching\\u2026" : from));
+  const apps = m.data.apps.filter((a) => !m.tag || (Array.isArray(a.tags) && a.tags.includes(m.tag)));
+  if (!apps.length) { grid.appendChild(el("div", "empty", m.q || m.tag ? "No app matches." : "The marketplace lists no apps.")); return; }
+  for (const a of apps) grid.appendChild(appCard(a, src.location));
+}
+function thumb(a) {
+  const t = el("div", "thumb");
+  const initial = () => t.replaceChildren(document.createTextNode((a.name || a.id || "?").slice(0, 1).toUpperCase()));
+  // A local marketplace's preview is a file: URL, which a page cannot load.
+  if (typeof a.preview === "string" && /^https?:/i.test(a.preview)) {
+    const img = document.createElement("img");
+    img.alt = ""; img.loading = "lazy"; img.onerror = initial; img.src = a.preview;
+    t.appendChild(img);
+  } else initial();
+  return t;
+}
+function appCard(a, source) {
+  const card = el("div", "app");
+  card.appendChild(thumb(a));
+  const body = el("div", "body");
+  const h = el("h3", null, a.name || a.id);
+  if (a.version) h.appendChild(el("span", "ver", "v" + a.version));
+  body.appendChild(h);
+  if (Array.isArray(a.tags) && a.tags.length) {
+    const tags = el("div", "tags");
+    for (const t of a.tags) tags.appendChild(el("span", "tag", t));
+    body.appendChild(tags);
+  }
+  if (a.description) body.appendChild(el("p", "desc", a.description));
+  body.appendChild(a.compatible === true ? el("div", "compat yes", "\\u2713 Runs here")
+    : a.compatible === false ? el("div", "compat no", "Not installable here: " + (a.reason || "no reason given"))
+      : el("div", "compat", "Its requirements are not listed"));
+  const fields = Array.isArray(a.customizable) ? a.customizable : [];
+  const label = a.name || a.id;
+  const actions = el("div", "actions");
+  if (a.compatible === false) {
+    const b = el("button", "btn small", "What can be done?");
+    b.onclick = () => inspectSource({ id: a.id, source }, label);
+    actions.appendChild(b);
+  } else if (S.market.open === a.id) {
+    const form = el("div", "fields");
+    const inputs = {};
+    for (const f of fields) {
+      form.appendChild(el("label", null, f.label || f.key));
+      const i = el("input", "input");
+      i.value = f.default || ""; i.placeholder = f.placeholder || ""; i.autocomplete = "off";
+      inputs[f.key] = i;
+      form.appendChild(i);
+    }
+    body.appendChild(form);
+    const go = el("button", "btn primary small", "Install");
+    go.onclick = () => {
+      const set = {};
+      for (const key in inputs) set[key] = inputs[key].value;
+      startInstall({ id: a.id, source, set }, label);
+    };
+    const cancel = el("button", "btn small", "Cancel");
+    cancel.onclick = () => { S.market.open = null; renderMarket(); };
+    actions.append(go, cancel);
+  } else {
+    const b = el("button", "btn primary small", "Install");
+    b.onclick = () => {
+      if (fields.length) { S.market.open = a.id; renderMarket(); }
+      else startInstall({ id: a.id, source }, label);
+    };
+    actions.appendChild(b);
+  }
+  body.appendChild(actions);
+  card.appendChild(body);
+  return card;
+}
+
+/* Import: a zip, a folder or a git URL; inspect first, then install or hand it to the agent. */
+let importEls = null;
+const SOURCES = [
+  ["zip", "Zip file", ""],
+  ["folder", "Folder", "A folder on the machine running OpenClaw, e.g. /home/me/apps/board"],
+  ["git", "Git or GitHub", "https://github.com/owner/repo, github:owner/repo@main/path, or git+https://host/repo.git#ref"],
+];
+function importView() {
+  const v = el("div", "pane");
+  v.appendChild(el("h1", null, "Import"));
+  v.appendChild(el("p", "lead", "Bring in an app from a zip, a folder or a git repository. Inspect it first: nothing from it runs until you install it."));
+  const kinds = el("div", "modes");
+  const input = el("div");
+  const go = el("button", "btn primary", "Inspect");
+  const drawInput = () => {
+    kinds.replaceChildren();
+    for (const [kind, label] of SOURCES) {
+      const b = el("button", S.imp.kind === kind ? "on" : "", label);
+      b.onclick = () => { S.imp.kind = kind; drawInput(); };
+      kinds.appendChild(b);
+    }
+    input.replaceChildren();
+    if (S.imp.kind === "zip") {
+      const f = el("input", "input");
+      f.type = "file"; f.accept = ".zip,application/zip";
+      f.onchange = () => { S.imp.file = f.files && f.files[0] ? f.files[0] : null; };
+      input.appendChild(f);
+      if (S.imp.file) input.appendChild(el("p", "note", "Chosen: " + S.imp.file.name));
+    } else {
+      const t = el("input", "input");
+      const spec = SOURCES.find((s) => s[0] === S.imp.kind);
+      t.placeholder = spec[2]; t.value = S.imp.from; t.autocomplete = "off";
+      t.oninput = () => { S.imp.from = t.value; };
+      t.onkeydown = (e) => { if (e.key === "Enter") go.click(); };
+      input.appendChild(t);
+    }
+  };
+  go.onclick = () => {
+    S.imp.error = null;
+    if (S.imp.kind === "zip") {
+      if (!S.imp.file) { S.imp.error = "Choose a .zip file."; renderReport(); return; }
+      inspectZip(S.imp.file);
+    } else {
+      const from = S.imp.from.trim();
+      if (!from) { S.imp.error = S.imp.kind === "git" ? "Give a git or GitHub URL." : "Give a folder path."; renderReport(); return; }
+      runInspect({ from }, from);
+    }
+  };
+  drawInput();
+  const row = el("div", "row");
+  row.style.marginTop = "12px";
+  row.appendChild(go);
+  importEls = { go, report: el("div") };
+  v.append(kinds, input, row, importEls.report);
+  renderReport();
+  return v;
+}
+function runInspect(origin, label, uploaded) {
+  const m = S.imp;
+  m.busy = true; m.error = null; m.report = null; m.origin = origin; m.label = label; m.uploaded = !!uploaded;
+  renderReport();
+  return api("/inspect", origin).then((out) => {
+    if (m.origin !== origin) return;
+    m.busy = false;
+    if (out.ok) m.report = out.report;
+    else m.error = out.message || "The source could not be inspected.";
+    renderReport();
+  }, (e) => { m.busy = false; m.error = String((e && e.message) || e); renderReport(); });
+}
+function inspectZip(file) {
+  S.imp.busy = true; S.imp.report = null; S.imp.error = null;
+  renderReport();
+  return upload(file).then((out) => {
+    if (!out.ok) throw new Error(out.message || "The upload was refused.");
+    return runInspect({ from: out.file }, file.name, true);
+  }).catch((e) => { S.imp.busy = false; S.imp.error = String((e && e.message) || e); renderReport(); });
+}
+/** From a marketplace card: show what an app is, and what can be done with it, in the Import panel. */
+function inspectSource(origin, label) {
+  S.newMode = "import";
+  render();
+  runInspect(origin, label);
+}
+function renderReport() {
+  if (!importEls) return;
+  const m = S.imp;
+  const box = importEls.report;
+  importEls.go.disabled = m.busy;
+  box.replaceChildren();
+  if (m.busy) { box.appendChild(el("div", "empty", "Inspecting\\u2026 it is staged and read; nothing from it runs.")); return; }
+  if (m.error) { box.appendChild(errorBox(m.error)); return; }
+  const r = m.report;
+  if (!r) return;
+  const card = el("div", "report");
+  const badges = el("div", "badges");
+  badges.appendChild(el("span", "badge", KINDS[r.kind] || r.kind));
+  badges.appendChild(el("span", "badge " + (r.installable ? "ok" : "no"), r.installable ? "Installable" : "Not installable"));
+  card.appendChild(badges);
+  const name = (r.app && r.app.name) || (r.source && r.source.name) || "";
+  card.appendChild(el("h2", null, name || m.label));
+  if (!r.installable && r.reason) card.appendChild(el("p", "sub", r.reason));
+  const kv = el("dl", "kv");
+  const row = (k, v) => { if (v) { kv.appendChild(el("dt", null, k)); kv.appendChild(el("dd", null, v)); } };
+  const src = r.source || {};
+  // An upload's location is the manager's private copy: name the file that was chosen.
+  row("Source", m.uploaded ? m.label + " (uploaded)"
+    : (src.catalogueId ? "marketplace app " + src.catalogueId + " in " : "") + (src.location || m.label) + (src.ref ? " @ " + src.ref : ""));
+  row("Commit", src.commit);
+  row("SHA-256", src.sha256);
+  if (r.app) { row("Sign-in", r.app.authMode); row("Modules", (r.app.modules || []).join(", ")); }
+  if (r.toolkit) {
+    const av = r.toolkit.adapterVersion || {};
+    row("Toolkit", (r.toolkit.id || "none named") + (r.toolkit.installed ? " (installed here)" : " (not installed here)") +
+      (av.package && av.current && av.package !== av.current ? "; adapter " + av.package + " \\u2192 " + av.current : ""));
+  }
+  if (r.integrity && r.kind === "agent-app") {
+    row("System files", r.integrity.canon === "drifted" ? "changed: " + (r.integrity.changed || []).join(", ") + " (install replaces them)"
+      : r.integrity.canon === "intact" ? "as its own record says" : "no record (install makes one)");
+  }
+  card.appendChild(kv);
+  if (r.pipeline) {
+    const lines = Object.keys(r.pipeline).map((k) => k + ": " + (typeof r.pipeline[k] === "string" ? r.pipeline[k] : JSON.stringify(r.pipeline[k])));
+    section(card, "What it will run (from the toolkit installed here, not from the package)", el("pre", "code", lines.join("\\n")));
+  }
+  if (r.capabilities && Object.keys(r.capabilities).length) section(card, "What it declares", el("pre", "code", JSON.stringify(r.capabilities, null, 2)));
+  if (r.strips && r.strips.length) section(card, "What install removes", list(r.strips));
+  if (r.placeholders && r.placeholders.length) section(card, "Placeholders filled at install", list(r.placeholders));
+  if (r.warnings && r.warnings.length) section(card, "Warnings", list(r.warnings, "warn"));
+  if (r.installable) card.appendChild(installForm(m.origin, name || m.label));
+  else if (r.routes && r.routes.length) card.appendChild(handoff(m.origin, r.routes, name));
+  box.appendChild(card);
+}
+function installForm(origin, name) {
+  const v = el("div", "section");
+  v.appendChild(el("label", null, "Name"));
+  const n = el("input", "input");
+  n.value = name; n.autocomplete = "off";
+  v.appendChild(n);
+  const go = el("button", "btn primary", "Install");
+  go.style.marginTop = "12px";
+  go.onclick = () => startInstall(Object.assign({}, origin, n.value.trim() ? { name: n.value.trim() } : {}), n.value.trim() || name);
+  v.appendChild(go);
+  v.appendChild(el("p", "note", origin.id
+    ? "A marketplace app: once it runs there is nothing more to verify."
+    : "Not from the marketplace: once it runs, have a separate agent walk-verify it before it is used for real work."));
+  return v;
+}
+/** A source that is not a package: say what can be done, and start the agent on it in a new app's session. */
+function handoff(origin, routes, name) {
+  const v = el("div", "section");
+  v.appendChild(el("h3", null, "What can be done instead"));
+  for (const route of routes) v.appendChild(el("div", "route", ROUTES[route] || route));
+  v.appendChild(el("label", null, "Name for the new app"));
+  const n = el("input", "input");
+  n.value = name || ""; n.autocomplete = "off";
+  v.appendChild(n);
+  const row = el("div", "row");
+  row.style.marginTop = "12px";
+  const err = el("div", "err");
+  routes.forEach((route, i) => {
+    const b = el("button", "btn" + (i === 0 ? " primary" : ""), route === "adopt" ? "Adopt it with the agent" : "Convert it with the agent");
+    b.onclick = () => {
+      err.textContent = "";
+      const appName = n.value.trim();
+      if (!appName) { err.textContent = "Give the new app a name."; return; }
+      b.disabled = true;
+      api("/import/agent", Object.assign({ action: route === "adopt" ? "adopt" : "import", name: appName }, origin)).then(async (out) => {
+        b.disabled = false;
+        if (!out.ok) { err.textContent = out.message; return; }
+        S.job = null;
+        S.active = out.path;
+        await refresh();
+        toggleSide(true);
+      }, (e) => { b.disabled = false; err.textContent = String((e && e.message) || e); });
+    };
+    row.appendChild(b);
+  });
+  v.append(row, err);
+  v.appendChild(el("p", "note", "The agent works in the new app\\u2019s session, in the side panel, and settles the details with you there through the importer skill."));
+  return v;
+}
+
+/* An install: a job on the server, polled until it ends, then the app opens in its tab. */
+let jobEls = null;
+let jobTimer = 0;
+function startInstall(request, label) {
+  S.market.open = null;
+  S.job = { label, request, data: null, error: null };
+  render();
+  const job = S.job;
+  return api("/install", request).then((out) => {
+    if (S.job !== job) return;
+    if (out.ok) job.data = out.job;
+    else job.error = out.message || "The install did not start.";
+    renderJob();
+    pollJob();
+  }, (e) => { if (S.job === job) { job.error = String((e && e.message) || e); renderJob(); } });
+}
+function pollJob() {
+  clearTimeout(jobTimer);
+  const job = S.job;
+  if (!job || !job.data || job.data.done) return;
+  jobTimer = setTimeout(() => {
+    api("/install?job=" + encodeURIComponent(job.data.id)).then((out) => {
+      if (S.job !== job) return;
+      if (!out.ok) { job.error = out.message || "The install is no longer known here."; renderJob(); return; }
+      job.data = out.job;
+      renderJob();
+      if (job.data.done) finished(job);
+      else pollJob();
+    }, () => { if (S.job === job) pollJob(); }); // a dropped poll is retried; the install goes on regardless
+  }, 1000);
+}
+function finished(job) {
+  const r = job.data.result;
+  if (!job.data.ok || !r || S.active !== "new") return;
+  // Installed and serving: show it in its own tab.
+  refresh().then(() => {
+    if (S.job !== job || S.active !== "new") return;
+    S.job = null;
+    S.active = r.dir;
+    render();
+  });
+}
+function jobView() {
+  const v = el("div", "pane");
+  jobEls = { box: v };
+  renderJob();
+  return v;
+}
+function renderJob() {
+  if (!jobEls || !S.job) return;
+  const job = S.job;
+  const d = job.data;
+  const r = d && d.result;
+  const box = jobEls.box;
+  box.replaceChildren();
+  const ended = !!(d && d.done) || !!job.error;
+  const installed = !!(r && r.dir);
+  box.appendChild(el("h1", null, !ended ? "Installing \\u201C" + job.label + "\\u201D"
+    : d && d.ok ? "Installed \\u201C" + job.label + "\\u201D"
+      : installed ? "\\u201C" + job.label + "\\u201D needs fixing" : "The install of \\u201C" + job.label + "\\u201D stopped"));
+  const steps = new Map(((d && d.steps) || []).map((s) => [s.step, s]));
+  const ol = el("ol", "steps");
+  for (const name of CFG.steps) {
+    const s = steps.get(name);
+    const state = s ? s.status : "pending";
+    const li = el("li", state);
+    li.appendChild(el("span", "ic", STEP_ICONS[state] || ""));
+    li.appendChild(el("span", "nm", name));
+    const detail = s ? s.error || s.reason || "" : "";
+    if (detail) li.appendChild(el("span", "dt", detail));
+    ol.appendChild(li);
+  }
+  box.appendChild(ol);
+  if (!ended) {
+    box.appendChild(el("p", "note", "A download and the app\\u2019s dependencies can take several minutes. This page follows the install until it ends; leaving it does not stop it."));
+    return;
+  }
+  const row = el("div", "row");
+  const back = el("button", "btn", "Back");
+  back.onclick = () => { S.job = null; render(); };
+  const open = el("button", "btn primary", "Open it");
+  open.onclick = () => { S.job = null; S.active = r.dir; render(); };
+  if (d && d.ok) {
+    box.appendChild(el("p", "sub", r.url ? "It is serving at " + r.url + "." : "It is installed."));
+    if (r.next && r.next.length) section(box, "Still to do", list(r.next));
+    row.append(open, back);
+  } else if (installed) {
+    box.appendChild(el("p", "sub", "It is installed but does not pass its gate, so it stays registered to be fixed."));
+    const failures = (r.gate && r.gate.failures) || [];
+    if (failures.length) section(box, "What the gate found", list(failures.map((f) => (f.step ? f.step + ": " : "") + (f.message || ""))));
+    row.append(open, back);
+  } else {
+    box.appendChild(errorBox(job.error || (d && d.error) || "The install failed."));
+    if (r && r.routes && r.routes.length) {
+      const origin = {};
+      for (const k of ["id", "from", "source"]) if (job.request[k]) origin[k] = job.request[k];
+      box.appendChild(handoff(origin, r.routes, job.request.name || ""));
+    }
+    const retry = el("button", "btn primary", "Retry");
+    retry.onclick = () => startInstall(job.request, job.label);
+    row.append(retry, back);
+  }
+  box.appendChild(row);
 }
 
 /* ── Session sidebar ───────────────────────────────────── */

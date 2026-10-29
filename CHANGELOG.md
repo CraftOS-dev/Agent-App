@@ -40,7 +40,7 @@ never do more than that person can. The normative text is
   (32 checks): black-box suites a running starter must pass. Every starter
   passes the multi-user suite. The starter suite is passed by react-node, go-react,
   python-fastapi, rust-react and rails-vue. pocketbase-react, which serves records
-  through PocketBase itself, passes 19 of the 32.
+  through PocketBase itself, passes 20 of the 32.
 - **The native adapters match the reference** (go-react, python-fastapi,
   rust-react, rails-vue):
   - operation arguments are guarded;
@@ -52,6 +52,26 @@ never do more than that person can. The normative text is
     a restart;
   - every app has viewers, `dataVersion`, `targetParam` and describe budgets,
     and a Host check on every path.
+- **Installing apps** ([spec/v0_2/packaging.md](spec/v0_2/packaging.md)). Every
+  source goes through one pipeline, so every harness gets the same result: the
+  app is acquired into staging, inspected, sanitized, re-vendored from a local
+  toolkit, placed, registered, gated and served.
+  - `agent-app catalogue`: browse a marketplace (default
+    `CraftOS-dev/agent-app-collection`, falling back to
+    `living-ui-marketplace`).
+  - `agent-app install <id>`: install a marketplace app, delivered as CraftBot
+    delivers it. No walk-verify is owed.
+  - `agent-app install --from <zip|folder|github:…|git+…>`: install from any
+    other source. These are untrusted, so a walk-verify is owed.
+  - `agent-app inspect`: what a source is and what installing it would run.
+  - `agent-app <dir> export`: package an app.
+  - `agent-app <dir> import`: the same pipeline, in place.
+- **Adopting a foreign app as-is**: `blueprint-sidecar` runs any HTTP app
+  unchanged behind the sidecar adapter (`@a2app/reverse-proxy`, now runnable as
+  `a2app-sidecar`), with the full 0.2 auth in front of it.
+- **pocketbase-react runs PocketBase 0.39.7.** `pipeline.install` fetches the
+  pinned release itself and verifies it against checksums embedded in the
+  launcher.
 - A local app is now addressed the same way as a remote one: `A2APP_TOKEN`, then
   the stored credential for the live app, then the app's own `.agent-token`.
 
@@ -76,6 +96,14 @@ for, and nothing else is sent.
   `credential.token` in the body posted to an inbound or gateway route.
 
 ### Fixed
+
+- **`agent-app <dir> import` trusted the folder it imported.** It kept the
+  shipped data (accounts, sessions, credential hashes) and took system code from
+  a toolkit the folder named. It also left partial files behind on failure. It
+  now runs the install pipeline in place. Note that it now removes `.git/` and
+  needs a toolkit installed on this machine.
+- The CLI's describe cache is kept per credential, under a hash of it, so a walk
+  never shows one agent another's reach.
 
 - **A task's credential could come back to life.** Task ids came from a
   counter that restarted at boot while credentials persisted, so after a restart
@@ -104,6 +132,10 @@ of their own:
   `subtle = "2"` and `base64 = "0.22"`.
 - **go-react**: `ENTITIES` in `schema.go` can now be an ordered list (`[]M` with
   `"name"`), which `describe` follows. A map still compiles, listed by name.
+- **pocketbase-react**: run `agent-app <dir> toolkit-sync`. The next install
+  fetches PocketBase 0.39.7, and data created on 0.26 opens unchanged. An app's
+  create rule must not depend on the owner field, because PocketBase 0.27+
+  checks rules before the guard fills it.
 - **pocketbase-react, multi-user only**: copy
   `pb/pb_migrations/1759622300_a2app_accounts.js` from the toolkit, and give
   each collection rules on `@request.auth.id` (see the starter's `tasks`

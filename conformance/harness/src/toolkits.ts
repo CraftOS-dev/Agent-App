@@ -47,13 +47,13 @@ const TOOLKITS: ToolkitSpec[] = [
     noBuild: true,
     incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
   },
-  // Ships the adapter hooks, the starter migration and a React View, but
-  // `install` prints "download the pocketbase binary" rather than fetching it,
-  // so a fresh scaffold has no runtime until someone does.
+  // Runtime, model and View are complete — `install` fetches the pinned
+  // PocketBase itself — but it ships the requirements template unfilled, the
+  // same stance as python-fastapi.
   {
     id: "blueprint-pocketbase-react",
     noBuild: true,
-    incompleteBecause: "ships adapter hooks, a starter migration and a React View; the PocketBase binary is added by hand",
+    incompleteBecause: "ships the requirements template unfilled; the spec is the author's to write",
   },
   // The native-port blueprints (Go, Rust, Ruby): runtime, model and View are
   // complete, but each ships the requirements template unfilled — the spec is

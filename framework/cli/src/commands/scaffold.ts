@@ -156,7 +156,7 @@ export async function run(args: string[], app: string): Promise<number> {
     // author has touched it. A no-op when the blueprint ships without a source
     // tree beside it, which is the published-CLI case.
     for (const dep of linkLocalPackages(dir, tk.source)) {
-      log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
+      log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (the source in the toolkit's repo)`);
     }
 
     // Strip any credential that slipped in from a template, then mint a fresh one.

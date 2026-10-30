@@ -392,7 +392,7 @@ async function register(
   ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
   writeHarnessGuides(dir, identity.name);
   for (const dep of linkLocalPackages(dir, tk.source, { relink: true })) {
-    log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (not published; resolved from the toolkit's repo)`);
+    log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (the source in the toolkit's repo)`);
   }
   writeSystemHashes(dir, tk.manifest.systemPaths);
   return { id: identity.id, port };

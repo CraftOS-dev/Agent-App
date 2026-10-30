@@ -1,12 +1,13 @@
 /**
- * Linking a scaffolded app to unpublished packages that live in the toolkit's
- * own repository.
+ * Linking a scaffolded app to the packages that live in the toolkit's own
+ * repository.
  *
  * A blueprint template declares its adapter as an ordinary registry dependency
- * (`"@a2app/adapter-core": "^0.2.0"`). That is the right thing to ship once the
- * package is published — but while it is not, every app scaffolded outside the
- * repo's own workspace fails `npm install` with a 404, and therefore fails the
- * build gate on step one, before its author has written a line.
+ * (`"@a2app/adapter-core": "^0.2.0"`), which is what a published CLI installs.
+ * Scaffolded from a source checkout, though, the app must run the source beside
+ * it: a change to the adapter is what is being tested, and the registry's copy
+ * is the last release (or, for a package not yet published, a 404 that fails the
+ * build gate on step one).
  *
  * So at scaffold time each dependency is checked against the packages that
  * actually exist in the toolkit's repository. A match is rewritten to a `file:`

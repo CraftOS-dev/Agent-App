@@ -265,8 +265,7 @@ runners: {
     if (current && !["completed", "failed", "canceled"].includes(current.status)) {
       return { ok: true, task: task.id, queued: current.id, alreadyQueued: true }; // one open run per record
     }
-    const payload = previous ? { task: task.id, previous } : { task: task.id };
-    const { taskId } = a2app.trigger("task.needs_triage", payload, "triage");
+    const { taskId } = a2app.trigger("task.needs_triage", { task: task.id }, "triage");
     task.set("agentTask", taskId);
     a2app.app.save(task);
     return { ok: true, task: task.id, queued: taskId };
@@ -292,10 +291,11 @@ something — nothing is queued and no agent is ever handed it.
   credential holds no more; a capability left out gets `*`, still within that
   person's reach. Work queued outside an operation (below) has no caller and
   runs as the owner.
-- **The same occurrence is one task.** Type + capability + payload + who asked
-  is the dedup key, even after the task has finished, so asking again with the
-  same payload hands back the old task. Put the previous task id in the payload
-  (as above) to ask again for real.
+- **The same request joins its open task.** Type + capability + payload + who
+  asked is the dedup key, and firing it again hands back its task while that
+  task is `submitted`, `working` or `input-required`. Asking again needs
+  nothing special: once the task is completed, failed or canceled, the same
+  trigger queues a new one.
 - **One open run per record.** Check the record's last task with `a2app.task`
   and hand it back while it is unfinished (as above). Otherwise a double click,
   a retry, or the agent itself asking from inside its run queues a second run
@@ -318,8 +318,9 @@ an agent reading the record, can follow the work with
 `GET /api/_a2app/tasks/{id}` until it is done: `submitted`, `working` (with the
 agent's `progress.step`), then `completed` (`result.summary`) or `failed`
 (`reason`). The View needs no credential for this read: on a single-user app it
-is trusted, and on a multi-user app the person's session makes it. A 404 means
-the task is gone.
+is trusted, and on a multi-user app the person's session makes it — a person
+reaches the tasks they asked for, and an owner every task. A 404 means the task
+is gone (or was never theirs), so drop the indicator. Don't retry it.
 
 **Declare that field read-only.** An agent that saves a record it read a
 minute earlier would otherwise write back the old task id. PocketBase has no

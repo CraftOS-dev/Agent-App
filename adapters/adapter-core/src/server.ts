@@ -1193,24 +1193,45 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
   async function handleTasks(req: A2AppRequest, rest: string[]): Promise<A2AppReply> {
     const limited = rateGate(req, "data");
     if (limited) return limited;
-    const authz = authorize(req, { scope: null, isWrite: req.method !== "GET" });
-    if ("reply" in authz) return authz.reply;
-    const ctx = authz.ctx;
+    const caller = resolve(req, { isWrite: req.method !== "GET" });
+    if ("reply" in caller) return caller.reply;
+    const ctx = caller.ctx;
+
+    /**
+     * A task holds who asked and what was asked and answered, so it is reached
+     * like a record (spec auth §6.3): an owner reaches every task, a task
+     * credential its own, anyone else the tasks they queued.
+     */
+    const reaches = (t: StoredTask): boolean => {
+      if (caller.grant?.task) return caller.grant.task === t.id;
+      return ctx.role === "owner" || t.request.principal === ctx.principal;
+    };
+    /** Progress and completion come from whoever runs the task. */
+    const runs = (t: StoredTask): boolean =>
+      ctx.role === "owner" ||
+      caller.grant?.task === t.id ||
+      (t.claim !== null && t.claim.credentialId === ctx.credentialId && t.claim.principal === ctx.principal);
+    const notHeld = (id: string): A2AppReply => {
+      writeAudit(ctx, `task:${rest[1] ?? "read"}`, id, "rejected", ERROR_CODES.TASK_NOT_HELD);
+      return err(403, ERROR_CODES.TASK_NOT_HELD, `Task ${id} is held by another credential; only the run that holds it reports on it.`);
+    };
 
     store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES);
 
     // GET /api/_a2app/tasks?status=submitted
     if (rest.length === 0 && req.method === "GET") {
       const status = req.query.status;
-      const tasks = store.listTasks(status).map(taskWire);
+      const tasks = store.listTasks(status).filter(reaches).map(taskWire);
       return ok({ a2app: true, tasks, pollAfterMs: 2000 });
     }
     const taskId = rest[0];
     if (!taskId) return err(400, "usage", "Task id required.");
     const action = rest[1];
 
+    // A task out of reach answers as one that does not exist: its existence is
+    // itself something the caller may not learn.
     const task = store.getTask(taskId);
-    if (!task) return err(404, ERROR_CODES.TASK_NOT_FOUND, `No task "${taskId}".`);
+    if (!task || !reaches(task)) return err(404, ERROR_CODES.TASK_NOT_FOUND, `No task "${taskId}".`);
 
     // GET /api/_a2app/tasks/{id}
     if (action === undefined && req.method === "GET") return ok(taskWire(task));
@@ -1248,6 +1269,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         if (task.status !== "working" && task.status !== "input-required") {
           return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} is ${task.status}.`);
         }
+        if (!runs(task)) return notHeld(taskId);
         if (typeof body.step === "string") task.progress.step = body.step;
         if (typeof body.percent === "number") task.progress.percent = body.percent;
         if (body.ask !== undefined) {
@@ -1270,6 +1292,7 @@ export function createA2App(binding: Binding, config: A2AppConfig): A2App {
         if (task.status !== "working" && task.status !== "input-required") {
           return err(409, ERROR_CODES.TASK_NOT_CLAIMABLE, `Task ${taskId} is ${task.status}, not in progress.`);
         }
+        if (!runs(task)) return notHeld(taskId);
         const status = body.status;
         if (status === "completed") {
           task.status = "completed";

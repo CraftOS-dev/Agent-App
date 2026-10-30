@@ -10,7 +10,8 @@
  * delegated credentials held to their scopes, device sign-in approved by the
  * View and confirmed by the agent, whose records), operations and approval,
  * idempotency, the task queue (claim contention, progress, completion, who
- * asked, the task's own credential), one open run per record, a runner that
+ * asked, the task's own credential and the one task it reaches, asking again
+ * once a task is done), one open run per record, a runner that
  * throws, writes paused while operations.js cannot load, a restart, and a
  * rotated .agent-token.
  * The multi-user side is conformance/multi-user/run.mjs.
@@ -307,6 +308,14 @@ try {
     const taskAgent = { "X-A2App-Token": taskCred.json?.token };
     check("…which reads the records", (await http("GET", records, { headers: taskAgent })).status, 200);
     check("…and holds only what its capability declares", (await http("POST", `${base}/api/ops/complete-task`, { headers: taskAgent, json: { task: welcome.id } })).json?.code, "insufficient_scope");
+    // Every caller of a single-user app is the owner and reaches every task; a
+    // task credential reaches its own task only (spec/v0_2/auth.md §6.3).
+    const other = (await tasks()).find((t) => t.request?.payload?.task === second.id)?.id;
+    ok("another task is queued (by the idempotency check)", typeof other === "string" && other !== queued);
+    check("…which the task's credential cannot read", (await http("GET", `${base}/api/_a2app/tasks/${other}`, { headers: taskAgent })).json?.code, "task_not_found");
+    check("…nor claim", (await http("POST", `${base}/api/_a2app/tasks/${other}/claim`, { headers: taskAgent, json: {} })).json?.code, "task_not_found");
+    check("…nor list", (await http("GET", `${base}/api/_a2app/tasks`, { headers: taskAgent })).json?.tasks?.map((t) => t.id), [queued]);
+    check("…while it reads its own", (await http("GET", `${base}/api/_a2app/tasks/${queued}`, { headers: taskAgent })).json?.id, queued);
 
     const events = await http("GET", `${base}/api/_a2app/events`);
     ok("the trigger is in the event log", events.json?.events?.some((ev) => ev.type === "task.needs_triage" && ev.payload?.task === welcome.id));
@@ -322,7 +331,7 @@ try {
     const fresh = await http("POST", `${base}/api/ops/request-triage`, { headers: agent, json: { task: welcome.id } });
     ok("once it is done, asking again queues a new run", fresh.json?.result?.queued && fresh.json.result.queued !== queued);
     const successor = (await tasks()).find((t) => t.id === fresh.json?.result?.queued);
-    check("…naming the previous one", successor?.request?.payload?.previous, queued);
+    check("…for the same request, waiting to be taken", [successor?.request?.payload, successor?.status], [{ task: welcome.id }, "submitted"]);
   }
 
   console.log("app code that cannot load");

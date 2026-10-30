@@ -77,6 +77,8 @@ pub const ERR_INVALID_EVENT: &str = "invalid_event";
 pub const ERR_TASK_NOT_FOUND: &str = "task_not_found";
 pub const ERR_TASK_NOT_CLAIMABLE: &str = "task_not_claimable";
 pub const ERR_TASK_CANCELED: &str = "task_canceled";
+// Progress or completion on a task whose claim another credential holds (auth §6.3).
+pub const ERR_TASK_NOT_HELD: &str = "task_not_held";
 pub const ERR_AGENT_TOKEN_REQUIRED: &str = "agent_token_required";
 pub const ERR_RATE_LIMITED: &str = "rate_limited";
 // The record is still referenced, and a `ref` pointing at it says `restrict`.
@@ -111,6 +113,8 @@ pub const TASK_MAX_DELIVERIES: u64 = 5;
 /// A task in one of these states is over: its credential is dead, and none is
 /// issued for it.
 const TERMINAL_TASK: [&str; 3] = ["completed", "failed", "canceled"];
+/// A task that has not reached a terminal state: the one a repeated request joins.
+const OPEN_TASK: [&str; 3] = ["submitted", "working", "input-required"];
 
 /// Adapter state that outlives a request, with adapter-core's bounds: an
 /// idempotency key holds for at least a day, an approval key for ten minutes,
@@ -2238,7 +2242,7 @@ impl Store {
 
     /// Queue a task. `principal` is who asked for the work (spec/v0_2 auth.md
     /// §6.1), null for work the app queues on its own. An occurrence already
-    /// queued (`dedup_key`) returns its task, whatever its status.
+    /// queued (`dedup_key`) returns its task while that task is open.
     fn enqueue_task(
         &mut self,
         event_id: &str,
@@ -2247,8 +2251,12 @@ impl Store {
         principal: Option<&str>,
         dedup_key: Option<&str>,
     ) -> Value {
+        // The same request firing twice while its task is open is one task.
+        // Once that task is completed, failed or canceled, asking again is a
+        // new request: returning the finished task would leave the person no
+        // way to ask again.
         let queued = dedup_key.and_then(|k| self.row("dedup", k)).and_then(|d| self.get_task(get_str(&d, "task")));
-        if let Some(existing) = queued {
+        if let Some(existing) = queued.filter(|t| OPEN_TASK.contains(&get_str(t, "status"))) {
             return existing;
         }
         // Random, never a counter: a task credential names its task, and
@@ -4780,16 +4788,38 @@ impl Adapter {
         if let Some(limited) = self.rate_gate(headers, "data") {
             return limited;
         }
-        let ctx = match self.authorize(headers, None, method != "GET") {
-            Ok(ctx) => ctx,
+        let caller = match self.resolve(headers, method != "GET") {
+            Ok(caller) => caller,
             Err(reply) => return reply,
+        };
+        let ctx = caller.ctx;
+        let is_owner = get_str(&ctx, "role") == "owner";
+        // The one task a task credential is for, if it is one.
+        let own_task = caller.grant.as_ref().and_then(|g| get(g, "task").as_str()).map(str::to_string);
+
+        // A task holds who asked and what was asked and answered, so it is
+        // reached like a record (spec auth §6.3): an owner reaches every task,
+        // a task credential its own, anyone else the tasks they queued.
+        let reaches = |t: &Value| match &own_task {
+            Some(id) => get_str(t, "id") == id,
+            None => is_owner || get(get(t, "request"), "principal") == get(&ctx, "principal"),
+        };
+        // Progress and completion come from whoever runs the task.
+        let runs = |t: &Value| {
+            let claim = get(t, "claim");
+            is_owner
+                || own_task.as_deref() == Some(get_str(t, "id"))
+                || (!claim.is_null()
+                    && get(claim, "credentialId") == get(&ctx, "credentialId")
+                    && get(claim, "principal") == get(&ctx, "principal"))
         };
 
         self.store.sweep();
 
         if rest.is_empty() && method == "GET" {
             let status = query.get("status").map(String::as_str).filter(|s| !s.is_empty());
-            let tasks: Vec<Value> = self.store.list_tasks(status).iter().map(Self::task_wire).collect();
+            let tasks: Vec<Value> =
+                self.store.list_tasks(status).iter().filter(|t| reaches(t)).map(Self::task_wire).collect();
             return (200, json!({ "a2app": true, "tasks": tasks, "pollAfterMs": 2000 }));
         }
         let task_id = match rest.first() {
@@ -4797,7 +4827,9 @@ impl Adapter {
             _ => return Self::err(400, "usage", "Task id required."),
         };
         let action = rest.get(1).map(String::as_str);
-        let Some(mut task) = self.store.get_task(&task_id) else {
+        // A task out of reach answers as one that does not exist: its existence
+        // is itself something the caller may not learn.
+        let Some(mut task) = self.store.get_task(&task_id).filter(|t| reaches(t)) else {
             return Self::err(404, ERR_TASK_NOT_FOUND, &format!("No task \"{task_id}\"."));
         };
         if action.is_none() && method == "GET" {
@@ -4849,6 +4881,9 @@ impl Adapter {
                 if !in_progress {
                     return Self::err(409, ERR_TASK_NOT_CLAIMABLE, &format!("Task {task_id} is {status}."));
                 }
+                if !runs(&task) {
+                    return self.task_not_held(&ctx, "progress", &task_id);
+                }
                 if let Some(step) = body.get("step").filter(|s| s.is_string()) {
                     task["progress"]["step"] = step.clone();
                 }
@@ -4882,6 +4917,9 @@ impl Adapter {
                         &format!("Task {task_id} is {status}, not in progress."),
                     );
                 }
+                if !runs(&task) {
+                    return self.task_not_held(&ctx, "complete", &task_id);
+                }
                 match body.get("status").and_then(Value::as_str) {
                     Some("completed") => {
                         task["status"] = json!("completed");
@@ -4913,6 +4951,16 @@ impl Adapter {
             Some("credential") => self.issue_task_credential(headers, &ctx, &task, body),
             other => Self::err(404, "usage", &format!("Unknown task action \"{}\".", other.unwrap_or("undefined"))),
         }
+    }
+
+    /// Progress or completion from a caller that reaches the task but does not
+    /// run it (spec auth §6.3): refused, and audited like the other task
+    /// refusals.
+    fn task_not_held(&mut self, ctx: &Value, action: &str, task_id: &str) -> Reply {
+        self.audit(Some(ctx), &format!("task:{action}"), Some(task_id), false, Some(ERR_TASK_NOT_HELD));
+        let message =
+            format!("Task {task_id} is held by another credential; only the run that holds it reports on it.");
+        Self::err(403, ERR_TASK_NOT_HELD, &message)
     }
 
     fn task_wire(t: &Value) -> Value {
@@ -6310,8 +6358,8 @@ pub fn selftest() -> i32 {
 
     // 13. The ceiling, ownership and refusals, end to end through `dispatch` on
     //     a multi-user adapter: a credential never does more than its person
-    //     may do now, a member sees only its own records, and an unusable
-    //     credential says why.
+    //     may do now, a member sees only its own records and the tasks it
+    //     asked for, and an unusable credential says why.
     fn members_read_write(p: &Value) -> Vec<String> {
         if p["role"] == "owner" {
             vec!["*".to_string()]
@@ -6458,6 +6506,82 @@ pub fn selftest() -> i32 {
                 "an unknown token is refused as such",
                 &code_of(&ask(&mut app, "GET", "/api/_a2app/whoami", Some("a2a_unknown"), None)),
                 &json!("credential_invalid"),
+            );
+            // Who reaches a task (spec §6.3): an owner every task, a task
+            // credential its own, anyone else the tasks they asked for.
+            let leo = json!({ "id": "usr_leo", "name": "Leo", "login": "leo", "role": "member", "active": true,
+                              "createdAt": now_iso(), "passwordHash": "" });
+            app.store.put_row("users", "usr_leo", &leo);
+            let (leos_own, _) = app.mint_credential("usr_leo", Some("leo"), vec!["*".into()], 3600, None);
+            let queue_for = |app: &mut Adapter, n: i64, principal: &str| {
+                let fired = app.store.trigger_as("work.asked", &json!({ "n": n }), Some("work"), Some(principal));
+                fired.map_or(String::new(), |f| get_str(&f, "taskId").to_string())
+            };
+            let (mias, leos) = (queue_for(&mut app, 1, "usr_mia"), queue_for(&mut app, 1, "usr_leo"));
+            let listed = |app: &mut Adapter, token: &str| -> Vec<String> {
+                let tasks = ask(app, "GET", "/api/_a2app/tasks", Some(token), None)["tasks"].clone();
+                tasks.as_array().map(|a| a.iter().map(|t| get_str(t, "id").to_string()).collect()).unwrap_or_default()
+            };
+            let (by_owner, by_member) = (listed(&mut app, "admin-token"), listed(&mut app, &wide));
+            check(
+                &mut failures,
+                "an owner lists every task, a member only the tasks they asked for",
+                &json!([by_owner.contains(&mias) && by_owner.contains(&leos), by_member]),
+                &json!([true, [&mias]]),
+            );
+            let task_path = |id: &str, action: &str| format!("/api/_a2app/tasks/{id}{action}");
+            check(
+                &mut failures,
+                "…another's task is not found, to read, claim or cancel",
+                &json!([
+                    code_of(&ask(&mut app, "GET", &task_path(&leos, ""), Some(&wide), None)),
+                    code_of(&ask(&mut app, "POST", &task_path(&leos, "/claim"), Some(&wide), None)),
+                    code_of(&ask(&mut app, "POST", &task_path(&leos, "/cancel"), Some(&wide), None)),
+                ]),
+                &json!(["task_not_found", "task_not_found", "task_not_found"]),
+            );
+            ask(&mut app, "POST", &task_path(&leos, "/claim"), Some("admin-token"), None);
+            let run = ask(&mut app, "POST", &task_path(&leos, "/credential"), Some("admin-token"), None);
+            let run = get_str(&run, "token").to_string();
+            check(
+                &mut failures,
+                "a task credential reaches its own task and no other",
+                &json!([
+                    ask(&mut app, "GET", &task_path(&leos, ""), Some(&run), None)["_status"],
+                    code_of(&ask(&mut app, "GET", &task_path(&mias, ""), Some(&run), None)),
+                    listed(&mut app, &run),
+                ]),
+                &json!([200, "task_not_found", [&leos]]),
+            );
+            let (step, done) = (json!({ "step": "reading" }), json!({ "status": "completed", "result": {} }));
+            let complete_leos = task_path(&leos, "/complete");
+            check(
+                &mut failures,
+                "the person who asked cannot report on a run they do not hold, audited, but can cancel it",
+                &json!([
+                    code_of(&ask(&mut app, "POST", &complete_leos, Some(&leos_own), Some(done.clone()))),
+                    app.store.audit_tail(1).first().map(|e| json!([e["target"], e["outcome"], e["code"]])),
+                    ask(&mut app, "POST", &task_path(&leos, "/cancel"), Some(&leos_own), None)["_status"],
+                ]),
+                &json!(["task_not_held", ["task:complete", "rejected", "task_not_held"], 200]),
+            );
+            check(
+                &mut failures,
+                "a member who claims their own task holds it, and reports on it",
+                &json!([
+                    ask(&mut app, "POST", &task_path(&mias, "/claim"), Some(&wide), None)["_status"],
+                    ask(&mut app, "POST", &task_path(&mias, "/progress"), Some(&wide), Some(step))["_status"],
+                    ask(&mut app, "POST", &task_path(&mias, "/complete"), Some(&wide), Some(done))["_status"],
+                ]),
+                &json!([200, 200, 200]),
+            );
+            let open = queue_for(&mut app, 2, "usr_mia");
+            let (joined, again) = (queue_for(&mut app, 2, "usr_mia"), queue_for(&mut app, 1, "usr_mia"));
+            check(
+                &mut failures,
+                "the same request joins its open task; once it is finished, it queues a new one",
+                &json!([joined == open, again != mias, app.store.get_task(&again).map(|t| t["status"].clone())]),
+                &json!([true, true, "submitted"]),
             );
             let revoke = format!("/api/_a2app/credentials/{}", get_str(&narrow_grant, "credentialId"));
             check(
@@ -7113,10 +7237,11 @@ pub fn selftest() -> i32 {
     println!(
         "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, \
          host and network policy, secrets, passwords, user codes, cookies, sign-in limits, grant requests, \
-         the ceiling, record ownership, credential refusals, ownedBy and capability declarations, \
-         the runner's caller, JavaScript numbers, the reference's guard vectors, fingerprint, approval keys \
-         and blocked reasons, device sign-in confirmation and loopback, operation guard, typed errors, \
-         runner panics, idempotency, dataVersion, rate-limit audit, viewers, restart persistence, the event ring)"
+         the ceiling, record ownership, credential refusals, who reaches a task, asking again, \
+         ownedBy and capability declarations, the runner's caller, JavaScript numbers, the reference's guard \
+         vectors, fingerprint, approval keys and blocked reasons, device sign-in confirmation and loopback, \
+         operation guard, typed errors, runner panics, idempotency, dataVersion, rate-limit audit, viewers, \
+         restart persistence, the event ring)"
     );
     0
 }

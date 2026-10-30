@@ -1115,12 +1115,20 @@ function resolve(e, isWrite, env) {
  * be handed back as a value.)
  */
 function authorize(e, opts) {
-  const hostRefusal = refuseHost(e);
-  if (hostRefusal) return deny(e, hostRefusal);
-  const caller = resolve(e, opts.isWrite, accessEnv());
-  if (caller.refusal) return deny(e, caller.refusal);
+  const caller = callerOf(e, opts.isWrite);
+  if (caller === null) return null;
   if (opts.scope && caller.held !== "anonymous" && caller.held.indexOf(opts.scope) === -1) return deny(e, insufficientScope(opts.scope));
   return caller.ctx;
+}
+
+/** Host, then the caller: what `resolve` found (`{ ctx, held, grant, account }`),
+ *  or null once the refusal has been written. The task routes read the grant
+ *  as well as the context, since a task credential reaches only its own task. */
+function callerOf(e, isWrite) {
+  const hostRefusal = refuseHost(e);
+  if (hostRefusal) return deny(e, hostRefusal);
+  const caller = resolve(e, isWrite, accessEnv());
+  return caller.refusal ? deny(e, caller.refusal) : caller;
 }
 
 /**
@@ -1496,13 +1504,13 @@ function sweep(app) {
 
 /**
  * Emit a declared event and, when `capability` is given, queue a task for an
- * agent. The same occurrence (type, capability, payload, who asked) dedupes to
- * one task, even after it finished — a re-ask names the previous task in its
- * payload. `principal` is who asked (spec/v0_2/auth.md §6.1): the caller of the
- * operation that fires it, null for work the app queues on its own; the agent
- * that takes the task acts as them. `app` is the app (or the transaction) to
- * write through; `env` is what `triggerEnv()` read, so a runner that fires many
- * times reads it once.
+ * agent. The same occurrence (type, capability, payload, who asked) joins its
+ * task while that task is open; once it is completed, failed or canceled, it
+ * queues a new one. `principal` is who asked (spec/v0_2/auth.md §6.1): the
+ * caller of the operation that fires it, null for work the app queues on its
+ * own; the agent that takes the task acts as them. `app` is the app (or the
+ * transaction) to write through; `env` is what `triggerEnv()` read, so a runner
+ * that fires many times reads it once.
  */
 function triggerWith(app, env, type, payload, capability, principal) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
@@ -1527,10 +1535,15 @@ function triggerWith(app, env, type, payload, capability, principal) {
   let taskId = null;
   if (typeof capability === "string" && capability !== "") {
     const dedup = "sha256:" + $security.sha256(rules.occurrenceText(type, capability, plain, principal));
-    const existing = rows(db, "SELECT id FROM _a2app_tasks WHERE dedup = {:dedup}", { dedup: dedup }, { id: "" });
-    if (existing.length) {
+    const existing = rows(db, "SELECT id, status FROM _a2app_tasks WHERE dedup = {:dedup}", { dedup: dedup }, { id: "", status: "" });
+    if (existing.length && rules.OPEN_TASK.indexOf(existing[0].status) !== -1) {
       taskId = existing[0].id;
     } else {
+      // A finished task gives its key up to the new one: the key is unique,
+      // and it is the open task a repeated request joins.
+      if (existing.length) {
+        db.newQuery("UPDATE _a2app_tasks SET dedup = NULL WHERE id = {:id}").bind({ id: existing[0].id }).execute();
+      }
       const task = rules.newTask({
         id: "tsk_" + $security.randomStringWithAlphabet(16, hex),
         app: appId, event: event.id, capability: capability, payload: plain, principal: principal, dedupKey: dedup, now: now,
@@ -1725,48 +1738,63 @@ function operationError(status, code, message, extra) {
 
 /* ----------------------------------------------------------------- tasks */
 
+/*
+ * A task holds who asked and what was asked and answered, so it is reached like
+ * a record (spec/v0_2/auth.md §6.3): an owner reaches every task, a task
+ * credential its own, anyone else the tasks they queued (`rules.reachesTask`).
+ * A task out of reach is left out of the list and answers as one that does not
+ * exist: its existence is itself something the caller may not learn.
+ */
+
+function taskNotFound(e, id) {
+  return fail(e, 404, "task_not_found", `No task "${id}".`);
+}
+
 /** GET /api/_a2app/tasks[?status=] */
 function listTasks(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  if (authorize(e, { scope: null, isWrite: false }) === null) return;
+  const caller = callerOf(e, false);
+  if (caller === null) return;
   sweep($app);
   const status = queryParam(e, "status");
   const found = status
     ? rows($app.db(), "SELECT body FROM _a2app_tasks WHERE status = {:status} ORDER BY seq", { status: status }, { body: "" })
     : rows($app.db(), "SELECT body FROM _a2app_tasks ORDER BY seq", {}, { body: "" });
   const tasks = [];
-  for (let i = 0; i < found.length; i++) tasks.push(rules.taskWire(JSON.parse(found[i].body)));
+  for (let i = 0; i < found.length; i++) {
+    const task = JSON.parse(found[i].body);
+    if (rules.reachesTask(task, caller.ctx, caller.grant)) tasks.push(rules.taskWire(task));
+  }
   return e.json(200, { a2app: true, tasks: tasks, pollAfterMs: rules.QUEUE.POLL_AFTER_MS });
 }
 
 /** GET /api/_a2app/tasks/{id} */
 function getTask(e, id) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  if (authorize(e, { scope: null, isWrite: false }) === null) return;
+  const caller = callerOf(e, false);
+  if (caller === null) return;
   sweep($app);
   const task = loadTask($app.db(), id);
-  if (!task) return fail(e, 404, "task_not_found", `No task "${id}".`);
+  if (!task || !rules.reachesTask(task, caller.ctx, caller.grant)) return taskNotFound(e, id);
   return e.json(200, rules.taskWire(task));
 }
 
 /** POST /api/_a2app/tasks/{id}/{claim|progress|complete|cancel|credential} */
 function taskAction(e, id, action) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
-  const ctx = authorize(e, { scope: null, isWrite: true });
-  if (ctx === null) return;
+  const caller = callerOf(e, true);
+  if (caller === null) return;
   sweep($app);
   const body = bodyOf(e);
-  if (action === "credential") return taskCredential(e, id, body);
+  if (action === "credential") return taskCredential(e, id, body, caller);
   let outcome = null;
   $app.runInTransaction((tx) => {
     const task = loadTask(tx.db(), id);
-    if (!task) {
-      outcome = { error: { status: 404, code: "task_not_found", message: `No task "${id}".`, extra: {} } };
-      return;
-    }
-    outcome = rules.applyTaskAction(task, action, body, ctx, new Date().toISOString());
+    if (!task || !rules.reachesTask(task, caller.ctx, caller.grant)) return;
+    outcome = rules.applyTaskAction(task, action, body, caller.ctx, new Date().toISOString(), caller.grant);
     if (outcome.task) saveTask(tx.db(), outcome.task);
   });
+  if (outcome === null) return taskNotFound(e, id);
   if (outcome.error) return fail(e, outcome.error.status, outcome.error.code, outcome.error.message, outcome.error.extra);
   return e.json(200, rules.taskWire(outcome.task));
 }
@@ -1778,10 +1806,10 @@ function taskAction(e, id, action) {
  * (`capabilities` in operations.js, else `*`) and always limited by what that
  * person may do; an hour at most, and dead once the task ends.
  */
-function taskCredential(e, id, body) {
+function taskCredential(e, id, body, caller) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
   const task = loadTask($app.db(), id);
-  if (!task) return fail(e, 404, "task_not_found", `No task "${id}".`);
+  if (!task || !rules.reachesTask(task, caller.ctx, caller.grant)) return taskNotFound(e, id);
   const manager = managerOf(e, true);
   if (manager === null) return;
   if (manager.role !== "owner") return fail(e, 403, "not_a_manager", "Only an owner issues a task's credential.");

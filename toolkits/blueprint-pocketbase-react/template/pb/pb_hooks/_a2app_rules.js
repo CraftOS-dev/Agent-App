@@ -413,6 +413,12 @@ var QUEUE = {
 
 var TERMINAL = ["completed", "failed", "canceled"];
 
+/** A task that has not reached a terminal state: the one a repeated request
+ *  joins (spec/v0_2/auth.md §6.1). Once the task is completed, failed or
+ *  canceled, the same request queues a new one — handing back the finished
+ *  task would leave the person no way to ask again. */
+var OPEN_TASK = ["submitted", "working", "input-required"];
+
 /** `input.principal` is who queued the task (spec/v0_2/auth.md §6.1): the
  *  caller of the operation that fired it, or null for work the app queued on
  *  its own, which runs as the owner. */
@@ -466,11 +472,31 @@ function refusal(status, code, message, extra) {
 }
 
 /**
- * One lifecycle step: `claim`, `progress`, `complete` or `cancel`, by `ctx`
- * ({credentialId, agentName, principal}) at `now`. Returns `{task}` (a new
- * object; the input is not touched) or `{error: {status, code, message}}`.
+ * Who reaches a task (spec/v0_2/auth.md §6.3). A task holds who asked for it
+ * and what was asked and answered, so it is reached like a record: an owner
+ * reaches every task, a task credential its own, anyone else the tasks they
+ * queued. `ctx` is the caller ({credentialId, principal, role}); `grant` the
+ * credential it presented, or null.
  */
-function applyTaskAction(task, action, body, ctx, now) {
+function reachesTask(task, ctx, grant) {
+  if (grant && grant.task) return grant.task === task.id;
+  return ctx.role === "owner" || task.request.principal === ctx.principal;
+}
+
+/** Progress and completion come from whoever runs the task: an owner, the
+ *  task's own credential, or the credential that holds its claim. */
+function runsTask(task, ctx, grant) {
+  if (ctx.role === "owner" || (grant && grant.task === task.id)) return true;
+  return !!task.claim && task.claim.credentialId === ctx.credentialId && task.claim.principal === ctx.principal;
+}
+
+/**
+ * One lifecycle step: `claim`, `progress`, `complete` or `cancel`, by `ctx`
+ * ({credentialId, agentName, principal, role}, presenting `grant` or null) at
+ * `now`, on a task the caller reaches. Returns `{task}` (a new object; the
+ * input is not touched) or `{error: {status, code, message}}`.
+ */
+function applyTaskAction(task, action, body, ctx, now, grant) {
   body = body || {};
   var t = JSON.parse(JSON.stringify(task));
   var id = t.id;
@@ -496,6 +522,7 @@ function applyTaskAction(task, action, body, ctx, now) {
       if (t.status !== "working" && t.status !== "input-required") {
         return refusal(409, "task_not_claimable", "Task " + id + " is " + t.status + ".");
       }
+      if (!runsTask(t, ctx, grant)) return notHeld(id);
       if (!t.progress) t.progress = { step: null, percent: 0 };
       if (typeof body.step === "string") t.progress.step = body.step;
       if (typeof body.percent === "number") t.progress.percent = body.percent;
@@ -516,6 +543,7 @@ function applyTaskAction(task, action, body, ctx, now) {
       if (t.status !== "working" && t.status !== "input-required") {
         return refusal(409, "task_not_claimable", "Task " + id + " is " + t.status + ", not in progress.");
       }
+      if (!runsTask(t, ctx, grant)) return notHeld(id);
       if (body.status === "completed") {
         t.status = "completed";
         t.result = body.result && typeof body.result === "object" ? body.result : {};
@@ -541,6 +569,11 @@ function applyTaskAction(task, action, body, ctx, now) {
   }
   t.updatedAt = now;
   return { task: t };
+}
+
+/** Progress or completion from a caller that reaches the task but does not run it. */
+function notHeld(id) {
+  return refusal(403, "task_not_held", "Task " + id + " is held by another credential; only the run that holds it reports on it.");
 }
 
 /**
@@ -910,7 +943,7 @@ function ownedByProblems(entities, ownedBy) {
   return problems;
 }
 
-module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, newTask: newTask, taskWire: taskWire, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, parseLoopbackPort: parseLoopbackPort, loopbackRedirect: loopbackRedirect, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
+module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, OPEN_TASK: OPEN_TASK, newTask: newTask, taskWire: taskWire, reachesTask: reachesTask, runsTask: runsTask, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, parseLoopbackPort: parseLoopbackPort, loopbackRedirect: loopbackRedirect, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
 
 /* -------- gate self-test: `node _a2app_rules.js --selftest` -------- */
 if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--selftest") !== -1) {
@@ -1076,6 +1109,38 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
   }
   if (occurrenceText("e", "c", { task: "t1" }, "usr_a") === occurrenceText("e", "c", { task: "t1" }, "usr_b")) failures.push("the same request from two people must be two tasks");
   if (occurrenceText("e", "c", { task: "t1" }, null) !== occurrenceText("e", "c", { task: "t1" })) failures.push("app-queued work keys as before 0.2");
+  if (OPEN_TASK.join() !== "submitted,working,input-required" || OPEN_TASK.some(function (s) { return TERMINAL.indexOf(s) !== -1; })) {
+    failures.push("a repeated request joins only an open task");
+  }
+
+  // Who reaches a task (spec/v0_2/auth.md §6.3): an owner every task, a task
+  // credential its own, anyone else the tasks they asked for; and only whoever
+  // runs it reports on it.
+  var owner = { credentialId: "session", principal: "usr_alice", role: "owner" };
+  var bob = { credentialId: "session", principal: "usr_bob", role: "member" };
+  var carol = { credentialId: "session", principal: "usr_carol", role: "member" };
+  var bridge = { credentialId: "cred_local", agentName: "local", principal: "owner", role: "owner" };
+  var bobs = newTask({ id: "tsk_b", app: "app", capability: "triage", payload: { task: "t2" }, principal: "usr_bob", now: now });
+  var carols = newTask({ id: "tsk_c", app: "app", capability: "triage", payload: { task: "t3" }, principal: "usr_carol", now: now });
+  var carolsRun = { credentialId: "cred_run", agentName: "bridge", principal: "usr_carol", role: "member" };
+  var runGrant = { credentialId: "cred_run", task: "tsk_c" };
+  if (!reachesTask(bobs, owner, null) || !reachesTask(carols, owner, null) || !reachesTask(t0, owner, null)) failures.push("an owner reaches every task");
+  if (!reachesTask(bobs, bob, null) || reachesTask(carols, bob, null) || reachesTask(t0, bob, null)) failures.push("a member reaches only the tasks they asked for");
+  if (!reachesTask(carols, carolsRun, runGrant) || reachesTask(bobs, carolsRun, runGrant)) failures.push("a task credential reaches its own task and no other");
+  if (reachesTask(bobs, Object.assign({}, carolsRun, { principal: "owner", role: "owner" }), runGrant)) failures.push("a task credential acting for an owner still reaches only its task");
+  var carolsClaimed = applyTaskAction(carols, "claim", {}, bridge, now, null).task;
+  var reported = applyTaskAction(carolsClaimed, "complete", { status: "completed", result: {} }, carol, now, null);
+  if (!reported.error || reported.error.status !== 403 || reported.error.code !== "task_not_held") failures.push("the person who asked cannot report on a run they do not hold");
+  if ((applyTaskAction(carolsClaimed, "progress", { step: "x" }, carol, now, null).error || {}).code !== "task_not_held") failures.push("…nor its progress");
+  if (!applyTaskAction(carolsClaimed, "cancel", {}, carol, now, null).task) failures.push("…but can cancel it");
+  if (!applyTaskAction(carolsClaimed, "complete", { status: "completed", result: {} }, carolsRun, now, runGrant).task) failures.push("the task's own credential reports on it");
+  var carolsCanceled = applyTaskAction(carolsClaimed, "cancel", {}, bridge, now, null).task;
+  if ((applyTaskAction(carolsCanceled, "complete", { status: "completed" }, carol, now, null).error || {}).code !== "task_canceled") failures.push("a canceled task says so before who holds it");
+  var bobsClaimed = applyTaskAction(bobs, "claim", {}, bob, now, null).task;
+  if (!applyTaskAction(bobsClaimed, "complete", { status: "completed", result: {} }, bob, now, null).task) failures.push("a member who claims their own task reports on it");
+  if ((applyTaskAction(bobsClaimed, "complete", { status: "completed" }, Object.assign({}, bob, { credentialId: "cred_bobs_agent" }), now, null).error || {}).code !== "task_not_held") {
+    failures.push("another credential of the same person does not hold the claim");
+  }
 
   // Secrets: 43 base64url characters, exactly the encodings of 32 bytes.
   var crypto = require("crypto");
@@ -1202,6 +1267,6 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
   }
 
   if (failures.length) console.log("a2app_rules selftest FAILED:\n  - " + failures.join("\n  - "));
-  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep, task principal, secrets, user codes, cookies, scopes and the ceiling, credentials, accounts, sign-in limits, device polling, device confirmation and loopback, capabilities, ownership)");
+  else console.log("a2app_rules selftest: all rules pass (guard, predicates, fingerprint, referential deletes, operation args, read-only fields, canonical keys, task lifecycle, sweep, task principal, task reach, secrets, user codes, cookies, scopes and the ceiling, credentials, accounts, sign-in limits, device polling, device confirmation and loopback, capabilities, ownership)");
   process.exit(failures.length ? 1 : 0);
 }

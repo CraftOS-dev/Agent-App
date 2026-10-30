@@ -93,6 +93,9 @@ const (
 	codeInvalidFilter      = "invalid_filter"
 	// The record is still referenced, and a `ref` pointing at it says `restrict`.
 	codeRecordReferenced = "record_referenced"
+	// Progress or completion on a task whose claim another credential holds
+	// (spec/v0_2/auth.md §6.3).
+	codeTaskNotHeld = "task_not_held"
 )
 
 // What a `ref` does when nothing says otherwise: refuse the delete. Silently
@@ -2527,9 +2530,12 @@ func writeTask(q queryer, t Task) {
 	putJSON(q, "INSERT INTO tasks (id, data) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET data = excluded.data", t, t.ID)
 }
 
-// enqueueTask queues one task, unless dedupKey already made one: then that
-// task is the answer, whatever its status. `principal` is who asked for the
-// work (spec/v0_2/auth.md §6.1); "" for work the app queues on its own.
+// enqueueTask queues one task, unless dedupKey already made one that is still
+// open: then that task is the answer. Once it is completed, failed or
+// canceled, asking again is a new request, and the key moves to the new task —
+// handing back the finished one would leave the person no way to ask again.
+// `principal` is who asked for the work (spec/v0_2/auth.md §6.1); "" for work
+// the app queues on its own.
 func (s *Store) enqueueTask(event, capability string, payload M, principal, dedupKey string) Task {
 	var task Task
 	s.transaction(func(tx *sql.Tx) {
@@ -2537,7 +2543,7 @@ func (s *Store) enqueueTask(event, capability string, payload M, principal, dedu
 			var existing string
 			err := tx.QueryRow("SELECT task_id FROM dedup WHERE key = ?", dedupKey).Scan(&existing)
 			if err == nil {
-				if t := readTask(tx, existing); t != nil {
+				if t := readTask(tx, existing); t != nil && !terminalTask[t.Status] {
 					task = *t
 					return
 				}
@@ -5065,18 +5071,37 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 	if status, limited := a.rateGate(headers, "data"); limited != nil {
 		return status, limited
 	}
-	ctx, status, refusal := a.authorize(headers, "", method != "GET")
+	c, status, refusal := a.resolve(headers, method != "GET")
 	if refusal != nil {
 		return status, refusal
 	}
+	ctx := c.ctx
 	actor := actorOf(ctx)
+	isOwner := getStr(ctx, "role") == "owner"
+
+	// A task holds who asked and what was asked and answered, so it is reached
+	// like a record (spec/v0_2/auth.md §6.3): an owner reaches every task, a
+	// task credential its own, anyone else the tasks they queued.
+	reaches := func(t Task) bool {
+		if c.grant != nil && c.grant.Task != "" {
+			return c.grant.Task == t.ID
+		}
+		return isOwner || (t.Request.Principal != nil && *t.Request.Principal == getStr(ctx, "principal"))
+	}
+	// Progress and completion come from whoever runs the task.
+	runs := func(t Task) bool {
+		return isOwner || (c.grant != nil && c.grant.Task == t.ID) ||
+			(t.Claim != nil && t.Claim.CredentialID == getStr(ctx, "credentialId") && t.Claim.Principal == getStr(ctx, "principal"))
+	}
 
 	a.store.sweep(taskTimeout, taskMaxDeliveries)
 
 	if len(rest) == 0 && method == "GET" {
 		tasks := []M{}
 		for _, t := range a.store.listTasks(query["status"]) {
-			tasks = append(tasks, taskWire(t))
+			if reaches(t) {
+				tasks = append(tasks, taskWire(t))
+			}
 		}
 		return 200, M{"a2app": true, "tasks": tasks, "pollAfterMs": 2000}
 	}
@@ -5092,9 +5117,17 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 	if hasAction {
 		action = rest[1]
 	}
+	// A task out of reach answers as one that does not exist: its existence is
+	// itself something the caller may not learn.
 	task := a.store.getTask(taskID)
-	if task == nil {
+	if task == nil || !reaches(*task) {
 		return errEnv(404, codeTaskNotFound, `No task "`+taskID+`".`, nil)
+	}
+	// A report on a task the caller reaches but does not run, refused and
+	// audited like the other task refusals.
+	notHeld := func() (int, M) {
+		a.writeAudit(actor, "task:"+action, taskID, "rejected", codeTaskNotHeld)
+		return errEnv(403, codeTaskNotHeld, "Task "+taskID+" is held by another credential; only the run that holds it reports on it.", nil)
 	}
 	if !hasAction && method == "GET" {
 		return 200, taskWire(*task)
@@ -5131,6 +5164,9 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		if task.Status != "working" && task.Status != "input-required" {
 			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+task.Status+".", nil)
 		}
+		if !runs(*task) {
+			return notHeld()
+		}
 		if step, ok := body["step"].(string); ok {
 			task.Progress.Step = &step
 		}
@@ -5158,6 +5194,9 @@ func (a *Adapter) handleTasks(method string, headers map[string]string, rest []s
 		// must not close work someone else may now be doing.
 		if task.Status != "working" && task.Status != "input-required" {
 			return errEnv(409, codeTaskNotClaimable, "Task "+taskID+" is "+task.Status+", not in progress.", nil)
+		}
+		if !runs(*task) {
+			return notHeld()
 		}
 		code := ""
 		switch body["status"] {
@@ -6593,6 +6632,58 @@ func selftest() int {
 		check("…and is dead once the task is over", codeOf(call(authApp, "GET", "/api/_a2app/whoami", as(taskToken), nil)), "credential_revoked")
 		check("…and none is issued for a finished task",
 			codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+taskID+"/credential", as("admin-token"), nil)), codeTaskNotClaimable)
+
+		// Who reaches a task (spec §6.3): an owner every task, a task credential
+		// its own, anyone else the tasks they asked for.
+		carol := Account{ID: "usr_carol", Name: "Carol", Login: "carol", Role: "member", Active: true, CreatedAt: nowISO()}
+		authApp.store.putAuthRow(tableUsers, carol.ID, carol)
+		authApp.store.putAuthRow(tableSessions, hashSecret("carol-session"), sessionRow{
+			Principal: carol.ID, CreatedAt: nowISO(), ExpiresAt: isoOf(time.Now().Add(time.Hour)),
+		})
+		carolSession := map[string]string{"cookie": "a2app_session_selftest=carol-session", "origin": "http://127.0.0.1:9931"}
+		queue := func(headers map[string]string, note string) string {
+			_, ran := call(authApp, "POST", "/api/ops/review-note", headers, M{"note": note})
+			fired, _ := ran["result"].(M)
+			return toStr(fired["taskId"])
+		}
+		bobs := queue(session, getStr(created, "id"))
+		check("once a task is finished, the same request queues a new one", bobs != "" && bobs != taskID, true)
+		carols := queue(carolSession, "c")
+		check("…while one still open is joined", queue(carolSession, "c"), carols)
+		listed := func(headers map[string]string) map[string]bool {
+			_, reply := call(authApp, "GET", "/api/_a2app/tasks", headers, nil)
+			ids := map[string]bool{}
+			for _, t := range toMList(reply["tasks"]) {
+				ids[getStr(t, "id")] = true
+			}
+			return ids
+		}
+		appTaskID := toStr(appFired["taskId"])
+		byOwner, byBob := listed(as(aliceToken)), listed(session)
+		check("an owner lists every task", []bool{byOwner[bobs], byOwner[carols], byOwner[appTaskID]}, []bool{true, true, true})
+		check("a member lists only the tasks they asked for", []bool{byBob[bobs], byBob[carols], byBob[appTaskID]}, []bool{true, false, false})
+		check("…another's answers as one that does not exist, to read, cancel or claim",
+			[]any{codeOf(call(authApp, "GET", "/api/_a2app/tasks/"+carols, session, nil)),
+				codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/cancel", session, nil)),
+				codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/claim", session, nil))},
+			[]any{codeTaskNotFound, codeTaskNotFound, codeTaskNotFound})
+		check("…while their own is theirs to read", statusOf(call(authApp, "GET", "/api/_a2app/tasks/"+bobs, session, nil)), 200)
+		check("the bridge claims Carol's task", statusOf(call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/claim", as("admin-token"), nil)), 200)
+		_, carolsCred := call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/credential", as("admin-token"), nil)
+		carolsRun := as(getStr(carolsCred, "token"))
+		check("a task credential reaches its own task", statusOf(call(authApp, "GET", "/api/_a2app/tasks/"+carols, carolsRun, nil)), 200)
+		check("…and no other", codeOf(call(authApp, "GET", "/api/_a2app/tasks/"+bobs, carolsRun, nil)), codeTaskNotFound)
+		check("…nor lists any other", listed(carolsRun), map[string]bool{carols: true})
+		check("the person who asked cannot report on a run they do not hold",
+			codeOf(call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/complete", carolSession, M{"status": "completed", "result": M{}})), codeTaskNotHeld)
+		refusal := authApp.store.auditTail(1)[0]
+		check("…which is audited", []any{refusal.Target, refusal.Outcome, refusal.Code}, []any{"task:complete", "rejected", codeTaskNotHeld})
+		check("…but can cancel it", statusOf(call(authApp, "POST", "/api/_a2app/tasks/"+carols+"/cancel", carolSession, nil)), 200)
+		check("a member who claims their own task holds it, and reports on it",
+			[]any{statusOf(call(authApp, "POST", "/api/_a2app/tasks/"+bobs+"/claim", session, nil)),
+				statusOf(call(authApp, "POST", "/api/_a2app/tasks/"+bobs+"/progress", session, M{"step": "reading"})),
+				statusOf(call(authApp, "POST", "/api/_a2app/tasks/"+bobs+"/complete", session, M{"status": "completed", "result": M{}}))},
+			[]any{200, 200, 200})
 
 		// Device sign-in (spec §7): approving hands over nothing by itself.
 		start := func(body M) M {

@@ -220,6 +220,38 @@ check("…and closes the task", (await call("POST", `/api/_a2app/tasks/${queued}
 check("then its credential is dead", code(await call("GET", "/api/_a2app/whoami", { as: taskToken })), "credential_revoked");
 check("…and none is issued for the finished task", code(await call("POST", `/api/_a2app/tasks/${queued}/credential`, { as: admin })), "task_not_claimable");
 
+/* ----------------------------------------------- who reaches a task (§6.3) */
+
+// A task holds who asked and what was asked and answered: an owner reaches
+// every task, a task credential its own, anyone else the tasks they asked for.
+const queue = async (who, rec) => {
+  const r = await call("POST", `/api/ops/${op}`, { as: who.session, body: { task: rec.json?.id } });
+  return r.json?.queued ?? r.json?.result?.queued;
+};
+const alices = await queue(alice, aliceRec);
+const bobs = await queue(bob, bobRec);
+ok("two people queue work", typeof alices === "string" && typeof bobs === "string" && alices !== bobs);
+ok("once a task is finished, the same request queues a new one", bobs !== queued);
+const taskIds = async (who) => ((await call("GET", "/api/_a2app/tasks?status=submitted", { as: who })).json?.tasks ?? []).map((t) => t.id);
+const byOwner = await taskIds(alice.session);
+ok("an owner lists everyone's tasks", byOwner.includes(alices) && byOwner.includes(bobs));
+const byMember = await taskIds(bob.session);
+ok("a member lists only the tasks they asked for", byMember.includes(bobs) && !byMember.includes(alices));
+check("…another's task answers as one that does not exist", code(await call("GET", `/api/_a2app/tasks/${alices}`, { as: bob.session })), "task_not_found");
+check("…and cannot be canceled by them", code(await call("POST", `/api/_a2app/tasks/${alices}/cancel`, { as: bob.session })), "task_not_found");
+check("…nor claimed", code(await call("POST", `/api/_a2app/tasks/${alices}/claim`, { as: bob.session })), "task_not_found");
+check("an owner reads anyone's", (await call("GET", `/api/_a2app/tasks/${bobs}`, { as: alice.session })).status, 200);
+await call("POST", `/api/_a2app/tasks/${bobs}/claim`, { as: admin });
+const bobsRun = (await call("POST", `/api/_a2app/tasks/${bobs}/credential`, { as: admin })).json?.token;
+check("a task credential reaches no other task", code(await call("GET", `/api/_a2app/tasks/${alices}`, { as: bobsRun })), "task_not_found");
+check(
+  "the person who asked cannot report on a run they do not hold",
+  code(await call("POST", `/api/_a2app/tasks/${bobs}/complete`, { as: bob.session, body: { status: "completed", result: {} } })),
+  "task_not_held",
+);
+check("…but can cancel it", (await call("POST", `/api/_a2app/tasks/${bobs}/cancel`, { as: bob.session })).status, 200);
+await call("POST", `/api/_a2app/tasks/${alices}/cancel`, { as: admin });
+
 /* -------------------------------------------------------------- report */
 
 if (failures.length > 0) {

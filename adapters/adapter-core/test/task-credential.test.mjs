@@ -95,6 +95,38 @@ check("then its credential is refused", (await call("GET", "/api/_a2app/whoami",
 check("…and none is issued for a finished task", (await call("POST", `/api/_a2app/tasks/${asked.taskId}/credential`, as(ADMIN))).json.code, "task_not_claimable");
 ok("…nor is it listed any more", !(await call("GET", "/api/_a2app/credentials", as(ADMIN))).json.credentials.some((c) => c.credentialId === cred.credentialId));
 
+/* --------------------------------------------- who reaches a task (§6.3) */
+
+// A task holds who asked and what was asked and answered, so it is reached like
+// a record: an owner every task, a task credential its own, anyone else theirs.
+const carol = await account("Carol", "member");
+const bobs = app.trigger({ type: "note.ask", payload: { note: "b" }, capability: "summarize", principal: bob.id });
+const carols = app.trigger({ type: "note.ask", payload: { note: "c" }, capability: "summarize", principal: carol.id });
+const listed = async (headers) => (await call("GET", "/api/_a2app/tasks", headers)).json.tasks.map((t) => t.id);
+
+const byAlice = await listed(alice.session);
+const byBob = await listed(bob.session);
+ok("an owner lists every task", [bobs.taskId, carols.taskId, own.taskId].every((id) => byAlice.includes(id)));
+check("a member lists only the tasks they asked for", byBob.filter((id) => [bobs.taskId, carols.taskId, own.taskId].includes(id)), [bobs.taskId]);
+check("…another's answers as one that does not exist", (await call("GET", `/api/_a2app/tasks/${carols.taskId}`, bob.session)).json.code, "task_not_found");
+check("…and cannot cancel it", (await call("POST", `/api/_a2app/tasks/${carols.taskId}/cancel`, bob.session)).json.code, "task_not_found");
+check("…nor claim it", (await call("POST", `/api/_a2app/tasks/${carols.taskId}/claim`, bob.session)).json.code, "task_not_found");
+check("…while their own task is theirs to read", (await call("GET", `/api/_a2app/tasks/${bobs.taskId}`, bob.session)).status, 200);
+
+check("the bridge claims Carol's task", (await call("POST", `/api/_a2app/tasks/${carols.taskId}/claim`, as(ADMIN))).status, 200);
+const run = (await call("POST", `/api/_a2app/tasks/${carols.taskId}/credential`, as(ADMIN))).json.token;
+check("a task credential reaches its own task", (await call("GET", `/api/_a2app/tasks/${carols.taskId}`, as(run))).status, 200);
+check("…and no other", (await call("GET", `/api/_a2app/tasks/${bobs.taskId}`, as(run))).json.code, "task_not_found");
+check("…nor lists any other", await listed(as(run)), [carols.taskId]);
+check("the person who asked cannot report on a run they do not hold", (await call("POST", `/api/_a2app/tasks/${carols.taskId}/complete`, carol.session, { status: "completed", result: {} })).json.code, "task_not_held");
+check("…but can cancel it", (await call("POST", `/api/_a2app/tasks/${carols.taskId}/cancel`, carol.session)).status, 200);
+
+check("a member who claims their own task holds it", (await call("POST", `/api/_a2app/tasks/${bobs.taskId}/claim`, bob.session)).status, 200);
+check("…and reports on it", (await call("POST", `/api/_a2app/tasks/${bobs.taskId}/complete`, bob.session, { status: "completed", result: { summary: "done" } })).status, 200);
+const again = app.trigger({ type: "note.ask", payload: { note: "b" }, capability: "summarize", principal: bob.id });
+ok("once a task is finished, the same request queues a new one", again.taskId !== bobs.taskId);
+check("…which waits to be taken", (await call("GET", `/api/_a2app/tasks/${again.taskId}`, bob.session)).json.status, "submitted");
+
 const later = app.trigger({ type: "note.ask", payload: { note: "n2" }, capability: "summarize", principal: bob.id });
 await call("PATCH", `/api/_a2app/users/${bob.id}`, as(ADMIN), { active: false });
 check("no credential for a task whose person is no longer active", (await call("POST", `/api/_a2app/tasks/${later.taskId}/credential`, as(ADMIN))).json.code, "principal_inactive");

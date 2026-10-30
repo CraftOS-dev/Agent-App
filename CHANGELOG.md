@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Any signed-in person reached every task.** The task API checked only that
+  the caller was signed in, so a member listed everyone's tasks — the payload,
+  and the result an agent wrote for someone else — and could claim, report on
+  or cancel them. A task is now reached like a record (spec/v0_2/auth.md §6.3):
+  an owner reaches every task, a task credential its own, anyone else the tasks
+  they asked for. Anything else answers `404 task_not_found`, and progress or
+  completion from a caller that does not hold the claim answers
+  `403 task_not_held`. In every adapter.
+- **A finished request could never be asked again.** A repeated request joined
+  the earlier task even after it was completed, failed or canceled, so asking
+  again handed back the finished task. It now joins only an open task (§6.1).
+
+### Upgrading an existing app
+
+`agent-app <dir> adapter-sync` (run at every launch) brings the fixed adapter;
+pocketbase-react apps take it with `agent-app <dir> toolkit-sync`. A View that
+follows a task with the person's own session keeps working, since a person
+reaches the tasks they asked for.
+
 ## 0.2.0 — protocol 0.2
 
 `agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and

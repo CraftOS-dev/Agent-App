@@ -106,6 +106,8 @@ On `authMode: none` the field is set to `owner` and nothing is filtered. Operati
 
 A trigger fired by an operation records the operation's principal as `task.request.principal`. Work the app queues on its own records `null`, and runs as `owner`.
 
+The same request — event type, capability, payload and principal — fired again while its task is `submitted`, `working` or `input-required` returns that task. Once the task is `completed`, `failed` or `canceled`, the same request queues a new one.
+
 ### 6.2 Task credentials
 
 `POST /api/_a2app/tasks/{id}/credential {agentName?}` (owner manager; the bridge uses the admin credential) issues a credential with:
@@ -116,6 +118,19 @@ A trigger fired by an operation records the operation's principal as `task.reque
 - **`expiresAt`:** at most 1 hour.
 
 The credential is refused `credential_revoked` once the task is `completed`, `failed` or `canceled`, and none is issued for such a task (`409 task_not_claimable`) or for a principal no longer active (`401 principal_inactive`). The bridge runs every harness with such a credential, never with the admin credential: as `A2APP_TOKEN` for a process it starts, and as `credential.token` in the body it posts to an HTTP route.
+
+### 6.3 Who reaches a task
+
+A task holds who asked for it and, in its payload and result, what was asked and answered, so it is reached like a record (§5). On `authMode: none` every caller is `owner`.
+
+| Caller | Reaches | On a task it reaches |
+|---|---|---|
+| an `owner`: the admin credential (the bridge), an owner's session or credential | every task | reads, claims, reports progress, completes, cancels |
+| a task credential (§6.2) | its own task | the same |
+| anyone else | the tasks whose `request.principal` is theirs | reads, claims and cancels; reports progress and completes only while its own credential holds the claim |
+
+- A task out of reach is left out of `GET /api/_a2app/tasks` and answers `404 task_not_found` everywhere else, as a task that does not exist does.
+- Progress or completion on a task the caller reaches but whose claim another credential holds answers `403 task_not_held`.
 
 ## 7. Device-code sign-in (RFC 8628 shape)
 
@@ -169,6 +184,7 @@ A poll on an approved request is answered at once, whatever the interval. The is
 | `DELETE /api/_a2app/credentials/{id}` | manager, or that credential | `{ revoked }` |
 | `POST /api/_a2app/auth/device` · `GET/POST /api/_a2app/auth/device/{userCode}` · `POST /api/_a2app/auth/token` | §7 | §7 |
 | `POST /api/_a2app/tasks/{id}/credential` | owner manager | `issued-credential` |
+| `GET /api/_a2app/tasks` · `GET /api/_a2app/tasks/{id}` · `POST …/{id}/claim · progress · complete · cancel` | §6.3 | the tasks in the caller's reach · `404 task_not_found` · `403 task_not_held` |
 
 The session, invite and user routes exist only on `multi-user` apps; elsewhere they answer `404 not_multi_user`.
 
@@ -237,3 +253,4 @@ The session, invite and user routes exist only on `multi-user` apps; elsewhere t
 | `login_taken` | 409 |
 | `last_owner` | 409 |
 | `not_a_manager` | 403 |
+| `task_not_held` | 403 |

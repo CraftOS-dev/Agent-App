@@ -118,6 +118,8 @@ export const ERROR_CODES = {
   TASK_NOT_FOUND: "task_not_found",
   TASK_NOT_CLAIMABLE: "task_not_claimable",
   TASK_CANCELED: "task_canceled",
+  /** Progress or completion on a task whose claim another credential holds (auth §6.3). */
+  TASK_NOT_HELD: "task_not_held",
   AGENT_TOKEN_REQUIRED: "agent_token_required",
   RATE_LIMITED: "rate_limited",
   /** The record is still referenced, and a `ref` pointing at it says `restrict`. */

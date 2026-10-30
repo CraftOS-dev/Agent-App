@@ -260,7 +260,10 @@ queued and no agent is handed it. An undeclared type is an `Err`. The starter's
 - **Declare the type in `events()` first.** A type that is not declared is
   refused at the moment of firing — inside the operation, in front of a user.
 - **Firing the same occurrence twice makes one task.** The same type,
-  capability and payload return the task already queued rather than a second.
+  capability and payload, asked by the same person, return the task already
+  queued rather than a second — while that task is open. Once it is completed,
+  failed or canceled, firing it again queues a new one, so asking again needs
+  nothing special.
 - **Send ids, not prose or copies.** The agent re-reads the record itself, so a
   copy is stale by the time it is read, and prose in a payload is an instruction
   the app does not get to give: on the agent's side it is fenced and labelled as
@@ -286,10 +289,11 @@ or a harness polling `a2app <dir> tasks next --wait`.
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
 only while it is unfinished. The View needs no credential for this read: on a
 single-user app it is trusted, and on a multi-user app the person's session
-makes it. A 404 means the task has been pruned, so drop the indicator. Don't
-retry it. Render queued → working (`progress.step`) → done or failed
-(`reason`, plus a way to ask again). The creator skill lists the states. A
-button that goes quiet after it queues work looks broken.
+makes it — a person reaches the tasks they asked for, and an owner every task.
+A 404 means the task has been pruned (or was never theirs), so drop the
+indicator. Don't retry it. Render queued → working (`progress.step`) → done or
+failed (`reason`, plus a way to ask again). The creator skill lists the states.
+A button that goes quiet after it queues work looks broken.
 
 ## Accounts and whose records (`authMode: multi-user`)
 

@@ -64,6 +64,8 @@ ERROR_CODES = {
     "TASK_NOT_FOUND": "task_not_found",
     "TASK_NOT_CLAIMABLE": "task_not_claimable",
     "TASK_CANCELED": "task_canceled",
+    # Progress or completion on a task whose claim another credential holds (auth §6.3).
+    "TASK_NOT_HELD": "task_not_held",
     "AGENT_TOKEN_REQUIRED": "agent_token_required",
     "RATE_LIMITED": "rate_limited",
     # The record is still referenced, and a `ref` pointing at it says `restrict`.
@@ -97,6 +99,8 @@ TASK_TIMEOUT_MS = 60_000
 # fails with `redelivery_exhausted` instead of cycling forever.
 TASK_MAX_DELIVERIES = 5
 TERMINAL_TASK = {"completed", "failed", "canceled"}
+# A task that has not reached a terminal state: the one a repeated request joins.
+OPEN_TASK = {"submitted", "working", "input-required"}
 
 # The adapter's own state is bounded and expires like adapter-core's store: an
 # idempotency key is honoured for at least 24 hours, an approval key for 10
@@ -1468,10 +1472,14 @@ class Store:
         self, event_id: Optional[str], capability: str, payload: dict, dedup_key: Optional[str] = None,
         principal: Optional[str] = None,
     ) -> dict:
+        # The same request firing twice while its task is open is one task. Once
+        # that task is completed, failed or canceled, asking again is a new
+        # request: returning the finished task would leave the person no way to
+        # ask again. The dedup entry then points at the new task.
         if dedup_key:
             existing_id = self._dedup_get(dedup_key)
             existing = None if existing_id is None else self.get_task(existing_id)
-            if existing is not None:
+            if existing is not None and existing["status"] in OPEN_TASK:
                 return existing
         now = _iso(self.now_ms())
         task = {
@@ -3220,26 +3228,51 @@ class Adapter:
         limited = self._rate_gate(headers, "data")
         if limited:
             return limited
-        ctx, reply = self._authorize(headers, None, method != "GET")
-        if reply:
-            return reply
+        caller = self._resolve(headers, method != "GET")
+        if "reply" in caller:
+            return caller["reply"]
+        ctx, grant = caller["ctx"], caller["grant"]
+        run_of = grant["task"] if grant is not None else None
+
+        def reaches(t: dict) -> bool:
+            """A task holds who asked and what was asked and answered, so it is
+            reached like a record (spec auth §6.3): an owner reaches every task,
+            a task credential its own, anyone else the tasks they queued."""
+            if run_of:
+                return run_of == t["id"]
+            return ctx["role"] == "owner" or t["request"].get("principal") == ctx["principal"]
+
+        def runs(t: dict) -> bool:
+            """Progress and completion come from whoever runs the task."""
+            claim = t["claim"]
+            return (
+                ctx["role"] == "owner" or run_of == t["id"]
+                or (claim is not None and claim["credentialId"] == ctx["credentialId"] and claim["principal"] == ctx["principal"])
+            )
 
         self.store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES)
 
         if not rest and method == "GET":
-            return 200, {"a2app": True, "tasks": [self._task_wire(t) for t in self.store.list_tasks(query.get("status"))], "pollAfterMs": 2000}
+            tasks = [self._task_wire(t) for t in self.store.list_tasks(query.get("status")) if reaches(t)]
+            return 200, {"a2app": True, "tasks": tasks, "pollAfterMs": 2000}
         task_id = rest[0] if rest else None
         if not task_id:
             return self._err(400, "usage", "Task id required.")
         action = rest[1] if len(rest) > 1 else None
+        # A task out of reach answers as one that does not exist: its existence
+        # is itself something the caller may not learn.
         task = self.store.get_task(task_id)
-        if not task:
+        if not task or not reaches(task):
             return self._err(404, ERROR_CODES["TASK_NOT_FOUND"], f'No task "{task_id}".')
         if action is None and method == "GET":
             return 200, self._task_wire(task)
         if method != "POST":
             return self._err(405, "usage", f"{method} not allowed here.")
         body = object_view(body)
+
+        def not_held():
+            self._audit(ctx, f"task:{action}", task_id, "rejected", ERROR_CODES["TASK_NOT_HELD"])
+            return self._err(403, ERROR_CODES["TASK_NOT_HELD"], f"Task {task_id} is held by another credential; only the run that holds it reports on it.")
 
         if action == "claim":
             if task["status"] != "submitted":
@@ -3266,6 +3299,8 @@ class Adapter:
                 return self._err(409, ERROR_CODES["TASK_CANCELED"], f"Task {task_id} was canceled.")
             if task["status"] not in ("working", "input-required"):
                 return self._err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], f'Task {task_id} is {task["status"]}.')
+            if not runs(task):
+                return not_held()
             if isinstance(body.get("step"), str):
                 task["progress"]["step"] = body["step"]
             if _is_number(body.get("percent")):
@@ -3286,6 +3321,8 @@ class Adapter:
             # abandoned it must not close work someone else may now be doing.
             if task["status"] not in ("working", "input-required"):
                 return self._err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], f'Task {task_id} is {task["status"]}, not in progress.')
+            if not runs(task):
+                return not_held()
             status = body.get("status")
             if status == "completed":
                 task["status"] = "completed"
@@ -4078,6 +4115,9 @@ def _selftest() -> int:
         q.dispatch("GET", f"/api/_a2app/tasks/{tid}", agent, None)
     swept = q_store.tasks[tid]
     check("redelivery is bounded", (swept["status"], swept["reason"]), ("failed", "redelivery_exhausted"))
+    asked_again = q_store.trigger("task.needs_triage", {"task": "t1"}, "triage")["taskId"]
+    check("once its task is finished, the same occurrence queues a new one", asked_again != tid, True)
+    check("…which the next repeat joins", q_store.trigger("task.needs_triage", {"task": "t1"}, "triage")["taskId"], asked_again)
 
     # Host and network policy: the app answers only to loopback and its own
     # origins (the public URL among them), and refuses to listen where the
@@ -4296,6 +4336,46 @@ def _selftest() -> int:
     check("…dead once its task ends", call("GET", "/api/_a2app/whoami", task_cred[1]["token"])[1]["code"], "credential_revoked")
     check("…and none is issued for a finished task", call("POST", f"/api/_a2app/tasks/{queued}/credential", admin)[1]["code"], "task_not_claimable")
 
+    # Who reaches a task (spec auth §6.3): an owner every task, a task
+    # credential its own, anyone else the tasks they asked for.
+    bob_in = call("POST", "/api/_a2app/session", body={"login": "bob", "password": "correct horse battery staple"}, origin=origin)
+    bob = {"cookie": bob_in[2]["set-cookie"].split(";")[0], "origin": origin}
+    bobs = mu.trigger("note.triage", {"note": "b"}, "triage", principal="usr_bob")["taskId"]
+    alices_task = mu.trigger("note.triage", {"note": "a"}, "triage", principal="usr_alice")["taskId"]
+
+    def listed(who) -> list:
+        return [t["id"] for t in call("GET", "/api/_a2app/tasks", who)[1]["tasks"]]
+
+    check("an owner lists every task", listed(alice), [queued, bobs, alices_task])
+    check("a member lists only the tasks they asked for", listed(bob), [queued, bobs])
+    check("…another's answers as one that does not exist", call("GET", f"/api/_a2app/tasks/{alices_task}", bob)[1]["code"], "task_not_found")
+    check(
+        "…and can be neither claimed nor canceled by them",
+        [call("POST", f"/api/_a2app/tasks/{alices_task}/{action}", bob, {})[1]["code"] for action in ("claim", "cancel")],
+        ["task_not_found", "task_not_found"],
+    )
+    check("an owner reads anyone's", call("GET", f"/api/_a2app/tasks/{bobs}", alice)[0], 200)
+    call("POST", f"/api/_a2app/tasks/{bobs}/claim", admin, {})
+    run = call("POST", f"/api/_a2app/tasks/{bobs}/credential", admin)[1]["token"]
+    check(
+        "a task credential reaches its own task and no other",
+        [call("GET", f"/api/_a2app/tasks/{bobs}", run)[0], call("GET", f"/api/_a2app/tasks/{alices_task}", run)[1]["code"], listed(run)],
+        [200, "task_not_found", [bobs]],
+    )
+    check(
+        "the person who asked cannot report on a run they do not hold",
+        call("POST", f"/api/_a2app/tasks/{bobs}/complete", bob, {"status": "completed", "result": {}})[1]["code"], "task_not_held",
+    )
+    check("…which is audited", [mu_store.audit_tail(1)[0].get(k) for k in ("target", "outcome", "code")], ["task:complete", "rejected", "task_not_held"])
+    check("…but can cancel it", call("POST", f"/api/_a2app/tasks/{bobs}/cancel", bob, {})[0], 200)
+    again = mu.trigger("note.triage", {"note": "b"}, "triage", principal="usr_bob")["taskId"]
+    check("once a task is finished, the same request queues a new one", again != bobs, True)
+    check(
+        "a member who claims their own task holds it, and reports on it",
+        [call("POST", f"/api/_a2app/tasks/{again}/claim", bob, {})[0], call("POST", f"/api/_a2app/tasks/{again}/complete", bob, {"status": "completed"})[0]],
+        [200, 200],
+    )
+
     def refused(**kwargs) -> Optional[str]:
         try:
             Adapter(app_id="x", app_name=None, operations=[], store=Store(), token="t", modules=[{"name": "core"}], **kwargs)
@@ -4459,6 +4539,15 @@ def _selftest() -> int:
         finally:
             EVENT_RETENTION = kept_retention
         check("the event log is a ring that keeps counting", [e["seq"] for e in ring], [5, 6, 7])
+        finished = after.get_task(fired["taskId"])
+        finished["status"] = "canceled"
+        after.save_task(finished)
+        renewed = after.trigger("task.needs_triage", {"task": "t1"}, "triage", principal="usr_x")["taskId"]
+        check(
+            "once it is finished, the same occurrence queues a new task, which the next repeat joins",
+            [renewed != fired["taskId"], after.trigger("task.needs_triage", {"task": "t1"}, "triage", principal="usr_x")["taskId"]],
+            [True, renewed],
+        )
         after.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

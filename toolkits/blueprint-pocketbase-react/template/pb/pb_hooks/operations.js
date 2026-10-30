@@ -137,10 +137,8 @@ module.exports = {
     // asking again hands back that task instead of queuing a second run — a
     // double click, a retry, or the agent itself asking from inside the run
     // (#24) all land on the work already in progress. Once it has finished, or
-    // is gone, a new ask is a new run.
-    //
-    // Identical triggers dedupe to ONE task, even after it has finished, so the
-    // payload names the previous task to make the new ask a new occurrence.
+    // is gone, a new ask is a new run: the same trigger joins its task only
+    // while that task is open.
     //
     // The task id goes on the record (`agentTask`), so whoever looks at the
     // record — the View, or an agent — can follow the work with
@@ -153,9 +151,7 @@ module.exports = {
       if (current && FINISHED.indexOf(current.status) === -1) {
         return { ok: true, task: task.id, queued: current.id, alreadyQueued: true };
       }
-      const payload = { task: task.id };
-      if (previous) payload.previous = previous;
-      const fired = a2app.trigger("task.needs_triage", payload, "triage");
+      const fired = a2app.trigger("task.needs_triage", { task: task.id }, "triage");
       task.set("agentTask", fired.taskId);
       a2app.app.save(task);
       return { ok: true, task: task.id, queued: fired.taskId };

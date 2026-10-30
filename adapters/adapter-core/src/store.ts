@@ -128,6 +128,8 @@ const APPROVAL_TTL_MS = 10 * 60 * 1000; // keys expire
  *  without limit (an event log is otherwise append-forever). Both are rings:
  *  oldest rows fall off the back. `seq` stays monotonic so event cursors keep
  *  working across a prune. */
+/** A task that has not reached a terminal state: the one a repeated request joins. */
+const OPEN_TASK: ReadonlySet<string> = new Set(["submitted", "working", "input-required"]);
 const EVENT_RETENTION = 5000;
 const AUDIT_RETENTION = 5000;
 
@@ -324,11 +326,14 @@ export class InMemoryStateStore implements StateStore {
     principal?: string | null;
     dedupKey?: string | null;
   }): StoredTask {
+    // The same request firing twice while its task is open is one task. Once
+    // that task is completed, failed or canceled, asking again is a new request:
+    // returning the finished task would leave the person no way to ask again.
     if (input.dedupKey) {
       const existing = this.dedup.get(input.dedupKey);
       if (existing) {
         const t = this.tasks.get(existing);
-        if (t) return t;
+        if (t && OPEN_TASK.has(t.status)) return t;
       }
     }
     const nowIso = new Date(this.clock()).toISOString();

@@ -290,10 +290,15 @@ or a harness polling `a2app <dir> tasks next --wait`.
 and follow it from the UI with a same-origin `GET /api/_a2app/tasks/{id}`, polled
 only while it is unfinished. The View needs no credential for this read: on a
 single-user app it is trusted, and on a multi-user app the person's session
-makes it. A 404 means the task has been pruned, so drop the indicator. Don't
-retry it. Render queued → working (`progress.step`) → done or failed (`reason`,
-plus a way to ask again). The creator skill lists the states. A button that goes
-quiet after it queues work looks broken.
+makes it — a person reaches the tasks they asked for, and an owner every task.
+A 404 means the task has been pruned (or was never theirs), so drop the
+indicator. Don't retry it. Render queued → working (`progress.step`) → done or
+failed (`reason`, plus a way to ask again). The creator skill lists the states.
+A button that goes quiet after it queues work looks broken.
+
+Asking again needs nothing special: the same request joins its task only while
+that task is open, so once it is completed, failed or canceled, calling
+`store.trigger` with the same arguments queues a new one.
 
 ## Accounts and whose records (`authMode: multi-user`)
 

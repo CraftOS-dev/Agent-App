@@ -273,8 +273,13 @@ const t = await api(`/api/_a2app/tasks/${encodeURIComponent(record.agentTask)}`)
 ```
 
 The View needs no credential for this read: on a single-user app it is
-trusted, and on a multi-user app the person's session makes it. A 404 means the
-task has been pruned, so drop the indicator. Don't retry it.
+trusted, and on a multi-user app the person's session makes it — a person
+reaches the tasks they asked for, and an owner every task. A 404 means the task
+has been pruned (or was never theirs), so drop the indicator. Don't retry it.
+
+Asking again needs nothing special: the same request joins its task only while
+that task is open, so once it is completed, failed or canceled, firing the same
+trigger queues a new one.
 
 ## Accounts and whose records (`authMode: multi-user`)
 

@@ -465,6 +465,9 @@ module A2appAdapter
     "TASK_NOT_FOUND" => "task_not_found",
     "TASK_NOT_CLAIMABLE" => "task_not_claimable",
     "TASK_CANCELED" => "task_canceled",
+    # Progress or completion on a task whose claim another credential holds
+    # (spec/v0_2/auth.md §6.3).
+    "TASK_NOT_HELD" => "task_not_held",
     "AGENT_TOKEN_REQUIRED" => "agent_token_required",
     "RATE_LIMITED" => "rate_limited",
     # The record is still referenced, and a `ref` pointing at it says `restrict`.
@@ -1038,6 +1041,9 @@ module A2appAdapter
     # cursor stays good.
     EVENT_RETENTION = 5000
     AUDIT_RETENTION = 5000
+    # A task that has not reached a terminal state: the one a repeated request
+    # joins.
+    OPEN_TASK = %w[submitted working input-required].freeze
 
     attr_reader :seed
     attr_accessor :wants_seed
@@ -1275,11 +1281,13 @@ module A2appAdapter
     end
 
     # Queue a task, or return the one this occurrence (`dedup_key`) already
-    # queued, whatever its state.
+    # queued while that task is open (spec/v0_2/auth.md §6.1). Once it is
+    # completed, failed or canceled, asking again is a new request: returning
+    # the finished task would leave the person no way to ask again.
     def enqueue_task(event_id, capability, payload, dedup_key = nil, principal: nil)
       @lock.synchronize do
         existing = dedup_key && @tasks[@dedup[dedup_key]]
-        next copy(existing) if existing
+        next copy(existing) if existing && OPEN_TASK.include?(existing["status"])
         task = copy(new_task(event_id, capability, payload, dedup_key, principal))
         @tasks[task["id"]] = task
         @dedup[dedup_key] = task["id"] if dedup_key
@@ -1344,7 +1352,8 @@ module A2appAdapter
       task_id = nil
       if capability && capability != ""
         # Dedup is keyed on the OCCURRENCE, not on the event record: the same
-        # trigger firing twice must make one task. The event id is fresh per
+        # trigger firing twice while its task is open must make one task
+        # (enqueue_task says what "open" is). The event id is fresh per
         # emit, so keying on it would deduplicate nothing. The occurrence is
         # what the app asked for (type, capability, payload), canonicalized
         # (RFC 8785) so key order cannot tell two identical triggers apart.
@@ -1609,10 +1618,13 @@ module A2appAdapter
     # tasks -----------------------------------------------------------------
     def enqueue_task(event_id, capability, payload, dedup_key = nil, principal: nil)
       @lock.synchronize do
-        existing = dedup_key && @db.get_first_row(
+        row = dedup_key && @db.get_first_row(
           "SELECT tasks.data FROM dedup JOIN tasks ON tasks.id = dedup.task_id WHERE dedup.key = ?", [dedup_key]
         )
-        next JSON.parse(existing[0]) if existing
+        existing = row && JSON.parse(row[0])
+        # Joins the earlier task only while it is open; a finished one is
+        # asked again as a new task, and the occurrence now names that one.
+        next existing if existing && OPEN_TASK.include?(existing["status"])
         task = copy(new_task(event_id, capability, payload, dedup_key, principal))
         @db.transaction do
           @db.execute("INSERT INTO tasks (id, data) VALUES (?, ?)", [task["id"], Js.dump(task)])
@@ -3309,25 +3321,47 @@ module A2appAdapter
     def handle_tasks(method, headers, rest, raw_body, query)
       limited = rate_gate(headers, "data")
       return limited if limited
-      ctx, reply = authorize(headers, nil, method != "GET")
+      caller, reply = resolve(headers, method != "GET")
       return reply if reply
-      @task_lock.synchronize { task_request(method, headers, rest, object_view(raw_body), query, ctx) }
+      @task_lock.synchronize { task_request(method, headers, rest, object_view(raw_body), query, caller) }
     end
 
-    # One tasks request, its caller already authorized.
-    def task_request(method, headers, rest, body, query, ctx)
+    # A task holds who asked and what was asked and answered, so it is
+    # reached like a record (spec/v0_2/auth.md §6.3): an owner reaches every
+    # task, a task credential its own, anyone else the tasks they queued.
+    def reaches_task?(caller, task)
+      bound = caller.grant && caller.grant["task"]
+      return bound == task["id"] if bound
+      caller.ctx["role"] == "owner" || task["request"]["principal"] == caller.ctx["principal"]
+    end
+
+    # Progress and completion come from whoever runs the task: an owner, the
+    # task's own credential, or the credential that holds its claim.
+    def runs_task?(caller, task)
+      ctx = caller.ctx
+      claim = task["claim"]
+      ctx["role"] == "owner" || (!caller.grant.nil? && caller.grant["task"] == task["id"]) ||
+        (!claim.nil? && claim["credentialId"] == ctx["credentialId"] && claim["principal"] == ctx["principal"])
+    end
+
+    # One tasks request, its caller already resolved.
+    def task_request(method, headers, rest, body, query, caller)
+      ctx = caller.ctx
       @store.sweep(TASK_TIMEOUT_MS, TASK_MAX_DELIVERIES)
 
       if rest.empty? && method == "GET"
-        return [200, { "a2app" => true,
-                       "tasks" => @store.list_tasks(query["status"]).map { |t| self.class.task_wire(t) },
-                       "pollAfterMs" => 2000 }]
+        tasks = @store.list_tasks(query["status"]).select { |t| reaches_task?(caller, t) }
+        return [200, { "a2app" => true, "tasks" => tasks.map { |t| self.class.task_wire(t) }, "pollAfterMs" => 2000 }]
       end
       task_id = rest[0]
       return err(400, "usage", "Task id required.") if task_id.nil? || task_id.empty?
       action = rest[1]
+      # A task out of reach answers as one that does not exist: its existence
+      # is itself something the caller may not learn.
       task = @store.get_task(task_id)
-      return err(404, ERROR_CODES["TASK_NOT_FOUND"], "No task \"#{task_id}\".") unless task
+      unless task && reaches_task?(caller, task)
+        return err(404, ERROR_CODES["TASK_NOT_FOUND"], "No task \"#{task_id}\".")
+      end
       return [200, self.class.task_wire(task)] if action.nil? && method == "GET"
       return err(405, "usage", "#{method} not allowed here.") if method != "POST"
 
@@ -3358,6 +3392,7 @@ module A2appAdapter
         unless %w[working input-required].include?(task["status"])
           return err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], "Task #{task_id} is #{task["status"]}.")
         end
+        return task_not_held(ctx, action, task_id) unless runs_task?(caller, task)
         task["progress"]["step"] = body["step"] if body["step"].is_a?(String)
         task["progress"]["percent"] = body["percent"] if body["percent"].is_a?(Numeric)
         # `ask` present, even null, is a question for the person.
@@ -3378,6 +3413,7 @@ module A2appAdapter
         unless %w[working input-required].include?(task["status"])
           return err(409, ERROR_CODES["TASK_NOT_CLAIMABLE"], "Task #{task_id} is #{task["status"]}, not in progress.")
         end
+        return task_not_held(ctx, action, task_id) unless runs_task?(caller, task)
         case body["status"]
         when "completed"
           task["status"] = "completed"
@@ -3427,6 +3463,14 @@ module A2appAdapter
       else
         err(404, "usage", "Unknown task action \"#{action}\".")
       end
+    end
+
+    # Progress or completion from someone who reaches the task but does not
+    # run it: refused, and audited like the other task refusals.
+    def task_not_held(ctx, action, task_id)
+      write_audit(ctx, "task:#{action}", task_id, "rejected", ERROR_CODES["TASK_NOT_HELD"])
+      err(403, ERROR_CODES["TASK_NOT_HELD"],
+          "Task #{task_id} is held by another credential; only the run that holds it reports on it.")
     end
 
     # A task as served: who asked, its claim and progress — never its `ask`,
@@ -4333,6 +4377,49 @@ module A2appAdapter
         mstore.trigger("t.x", { "a" => 1 }, "cap", principal: "usr_o")["taskId"],
     ], [true, false])
 
+    # Who reaches a task (spec §6.3): an owner every task, a task credential
+    # its own, anyone else the tasks they asked for; progress and completion
+    # only from the run that holds it. And asking again (§6.1).
+    asks = ->(principal) { mstore.trigger("t.ask", { "n" => 1 }, "cap", principal: principal)["taskId"] }
+    mine = asks.call("usr_m")
+    theirs = asks.call("usr_o")
+    as_member = { "x-a2app-token" => call.call("POST", "/api/_a2app/credentials", admin, { "principal" => "usr_m" })[1]["token"] }
+    listed = ->(headers) { call.call("GET", "/api/_a2app/tasks", headers)[1]["tasks"].map { |t| t["id"] } & [mine, theirs] }
+    code_of = ->(method, path, headers, body = nil) { call.call(method, path, headers, body)[1]["code"] }
+    check.call("an owner lists every task, a member only the ones they asked for",
+               [listed.call(admin), listed.call(as_member)], [[mine, theirs], [mine]])
+    check.call("…another's task answers as one that does not exist, on every route",
+               [code_of.call("GET", "/api/_a2app/tasks/#{theirs}", as_member)] +
+                 %w[claim progress complete cancel credential].map { |action|
+                   code_of.call("POST", "/api/_a2app/tasks/#{theirs}/#{action}", as_member, {})
+                 },
+               ["task_not_found"] * 6)
+    call.call("POST", "/api/_a2app/tasks/#{mine}/claim", admin, {})
+    run = { "x-a2app-token" => call.call("POST", "/api/_a2app/tasks/#{mine}/credential", admin, {})[1]["token"] }
+    check.call("a task credential reaches its own task, and no other",
+               [call.call("GET", "/api/_a2app/tasks/#{mine}", run)[0], listed.call(run),
+                code_of.call("GET", "/api/_a2app/tasks/#{theirs}", run)],
+               [200, [mine], "task_not_found"])
+    check.call("…and reports on it, whoever claimed it",
+               call.call("POST", "/api/_a2app/tasks/#{mine}/progress", run, { "step" => "reading" })[0], 200)
+    check.call("the person who asked cannot report on a run they do not hold",
+               [code_of.call("POST", "/api/_a2app/tasks/#{mine}/progress", as_member, { "step" => "x" }),
+                code_of.call("POST", "/api/_a2app/tasks/#{mine}/complete", as_member, { "status" => "completed" })],
+               %w[task_not_held task_not_held])
+    check.call("…which is audited", mstore.audit_tail(1)[0].values_at("target", "outcome", "code"),
+               ["task:complete", "rejected", "task_not_held"])
+    check.call("…but can cancel it, and a canceled task says so first",
+               [call.call("POST", "/api/_a2app/tasks/#{mine}/cancel", as_member, {})[0],
+                code_of.call("POST", "/api/_a2app/tasks/#{mine}/complete", as_member, { "status" => "completed" })],
+               [200, "task_canceled"])
+    again = asks.call("usr_m")
+    check.call("once a task is finished, the same request queues a new one, which a repeat then joins",
+               [again != mine, asks.call("usr_m") == again], [true, true])
+    call.call("POST", "/api/_a2app/tasks/#{again}/claim", as_member, {})
+    check.call("a member who claims their own task holds it, and reports on it",
+               call.call("POST", "/api/_a2app/tasks/#{again}/complete", as_member,
+                         { "status" => "completed", "result" => {} })[0], 200)
+
     # 9. A single-user app: the View reads as the owner, accounts do not exist,
     #    and the model is refused when ownership or capabilities are miswired.
     single = Adapter.new(app_id: "selftest", app_name: nil, entities: owned_defs, operations: [], store: Store.new,
@@ -4606,6 +4693,11 @@ module A2appAdapter
         check.call("…a saved event cursor reads only what came after",
                    as_admin.call(second, "GET", "/api/_a2app/events?since=#{cursor}")[1]["events"].map { |e| e["payload"] },
                    [{ "n" => 1 }, { "n" => 2 }])
+        as_admin.call(second, "POST", "/api/_a2app/tasks/#{queued}/cancel", {})
+        again = second.trigger("t.x", { "n" => 1 }, "cap", principal: "owner")["taskId"]
+        check.call("…once that task is finished, the same occurrence is a new task, which a repeat then joins",
+                   [again != queued, second.trigger("t.x", { "n" => 1 }, "cap", principal: "owner")["taskId"] == again],
+                   [true, true])
         check.call("…an approval key still runs its call, and an idempotency key still holds",
                    [as_admin.call(second, "POST", "/api/ops/wipe", {}, { "x-a2app-approval" => key })[0],
                     as_admin.call(second, "POST", "/api/collections/tasks/records", { "title" => "kept" }, { "idempotency-key" => "k" })[0]],
@@ -4669,8 +4761,9 @@ module A2appAdapter
       return 1
     end
     puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, " \
-         "host and network policy, auth primitives, the ceiling and refusals, ownership, JavaScript values and " \
-         "RFC 8785, operations and tasks, device confirmation, persistence across a restart, the View)"
+         "host and network policy, auth primitives, the ceiling and refusals, ownership, who reaches a task, " \
+         "JavaScript values and RFC 8785, operations and tasks, device confirmation, persistence across a restart, " \
+         "the View)"
     0
   end
 end

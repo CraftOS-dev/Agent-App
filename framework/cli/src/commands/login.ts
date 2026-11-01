@@ -61,9 +61,12 @@ export async function loginTarget(app: string): Promise<{ client: A2AppClient; o
 /** Where the account page sends the browser back with the confirmation code. */
 const CALLBACK_PATH = "/a2app/callback";
 
+// A window a harness page opened for the approval (Hermes's Connect) closes
+// itself here; a tab the person opened stays, with this line to read.
 const RETURNED_PAGE =
   "<!doctype html><meta charset=utf-8><title>Approved</title>" +
-  "<p style=\"font:16px system-ui;margin:3rem auto;max-width:32rem\">Approved. You can close this tab and return to your agent.</p>";
+  "<p style=\"font:16px system-ui;margin:3rem auto;max-width:32rem\">Approved. You can close this tab and return to your agent.</p>" +
+  "<script>window.close()</script>";
 
 /**
  * The loopback half of RFC 8252: a listener on 127.0.0.1 that the account page

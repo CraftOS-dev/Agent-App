@@ -117,7 +117,10 @@ class Loopback {
   }
 
   close(): void {
+    // A browser holds connections to a port it was sent to (the one it came back
+    // on, one it opened ahead): ended here, or they keep this process alive.
     this.server.close();
+    this.server.closeAllConnections();
   }
 }
 

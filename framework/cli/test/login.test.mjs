@@ -10,7 +10,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { createServer as createNetServer } from "node:net";
+import { createConnection, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,6 +140,7 @@ try {
   // loopback return without opening another window, --events says each step.
   await cli([base, "logout"]);
   const lines = [];
+  let held = null;
   const following = new Promise((done) => {
     const env = { ...process.env, A2APP_HOME: home, AGENT_APP_OPEN_CMD: "" };
     delete env.A2APP_TOKEN;
@@ -155,13 +156,20 @@ try {
         // What the page does on `approve`: the person approves in the window it
         // opened, and that window follows the app's redirect home.
         if (line.event === "approve") {
-          decide(line.userCode, { approve: true }).then((approved) => fetch(approved.redirect));
+          decide(line.userCode, { approve: true }).then((approved) => {
+            // A real browser also holds a connection of its own to the port it is
+            // sent to (one opened ahead, never used): it must not keep the CLI alive.
+            held = createConnection(Number(new URL(approved.redirect).port), "127.0.0.1");
+            return fetch(approved.redirect);
+          });
         }
       }
     });
     child.on("close", (code) => done(code));
   });
-  check("a harness's sign-in finishes once the person approves in its window", await following, 0);
+  const ended = await Promise.race([following, new Promise((r) => setTimeout(() => r("still running"), 10_000))]);
+  held?.destroy();
+  check("a harness's sign-in finishes once the person approves in its window, whatever the browser keeps open", ended, 0);
   const approveLine = lines.find((l) => l.event === "approve");
   ok("…announcing the link to open, and that the CLI waits for the window to come back", approveLine?.url?.includes("/_a2app/account#approve/") && approveLine.waits === true);
   const resultLine = lines.at(-1);

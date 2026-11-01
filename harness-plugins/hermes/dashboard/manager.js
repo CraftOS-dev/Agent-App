@@ -17,13 +17,18 @@
  * transcript every 2.5s, only while the page is visible. DOM is built with
  * createElement/textContent so app-provided strings never reach innerHTML.
  *
- * The New + tab has three panels: Build (the agent builds a new app), the
- * Marketplace (search, tag chips, a card per app, install), and Import (a zip,
+ * The New + tab has four panels: Build (the agent builds a new app), the
+ * Marketplace (search, tag chips, a card per app, install), Import (a zip,
  * a folder or a git URL: inspect, then install, or hand a source that is not a
- * package to the agent to convert or adopt). An install is a job on the
- * server; the page polls it every second and shows each pipeline step from
+ * package to the agent to convert or adopt), and Connect (an app running on
+ * another machine, by its address). An install is a job on the server; the
+ * page polls it every second and shows each pipeline step from
  * `install --events`, then opens the app in its tab. It never gives up on a
  * running install, so no client timeout is shorter than the CLI's own.
+ *
+ * Connect signs Hermes's agent in to the app (`a2app <url> login`): the person
+ * approves in a window this page opens, as themselves, and the app then has a
+ * tab of its own, embedded where the host's frame policy allows it.
  *
  * An app runs on the Hermes machine's loopback interface, so it is embedded
  * only when the page itself is open over http on loopback; anywhere else the
@@ -105,6 +110,8 @@
       market: { q: "", tag: null, tags: [], data: null, error: null, loading: false, seq: 0, open: null },
       imp: { kind: "zip", from: "", file: null, origin: null, label: "", uploaded: false, report: null, error: null, busy: false },
       job: null,
+      // Connect: the address typed, and the sign-in in progress (a job on the server).
+      conn: { url: "", data: null, error: null, popup: null, code: "", confirming: false },
     };
     var timers = [];
     var disposers = [];
@@ -184,18 +191,25 @@
     }
 
     /* ── Tab strip ── */
+    /** An app that can be shown: a local one running here, a connected one answering. */
+    function live(r) { return r.remote ? r.status === "online" : r.status === "running"; }
     function dotClass(r) {
       if (r.building) return "busy";
-      if (r.status === "running") return "ok";
-      if (r.status === "unreachable") return "warn";
+      if (live(r)) return "ok";
+      if (r.status === "unreachable" || r.status === "expired") return "warn";
       return "off";
     }
     function renderTabs() {
       tabbar.replaceChildren();
       S.rows.forEach(function (r) {
-        var t = el("button", "aa-tab" + (r.path === S.active ? " active" : "") + (r.status !== "running" && !r.building ? " offline" : ""));
+        var t = el("button", "aa-tab" + (r.path === S.active ? " active" : "") + (!live(r) && !r.building ? " offline" : "") + (r.remote ? " remote" : ""));
         t.appendChild(el("span", "aa-dot " + dotClass(r)));
         t.appendChild(el("span", "aa-tab-name", r.name));
+        if (r.remote) {
+          // Another machine's app: marked, and its address and who Hermes acts as on hover.
+          t.appendChild(el("span", "aa-tab-where", "↗"));
+          t.title = r.url + (r.principalName ? " — as " + r.principalName : "");
+        }
         var more = el("span", "aa-tab-more", "⋯");
         more.title = "App actions";
         more.setAttribute("role", "button");
@@ -213,6 +227,19 @@
     function openMenu(r, anchor) {
       menu.replaceChildren();
       function item(label, cls, fn) { var b = el("button", cls, label); b.onclick = fn; menu.appendChild(b); }
+      if (r.remote) {
+        // Another machine's app: opened, used and disconnected from here, never launched or deleted.
+        item("Open in browser", "", function () { closeMenu(); window.open(r.url, "_blank", "noopener"); });
+        item(S.side ? "Hide session" : "Show session", "", function () { closeMenu(); toggleSide(); });
+        menu.appendChild(el("hr"));
+        if (S.confirmDelete === r.path) {
+          item("Confirm disconnect — revokes Hermes's access", "danger", function () { closeMenu(); disconnectApp(r); });
+        } else {
+          item("Disconnect…", "danger", function () { S.confirmDelete = r.path; openMenu(r, anchor); });
+        }
+        placeMenu(anchor);
+        return;
+      }
       if (r.status === "running") {
         item("Pause", "", function () { closeMenu(); act(r, "stop"); });
         if (r.url) item("Open in browser", "", function () { closeMenu(); window.open(r.url, "_blank", "noopener"); });
@@ -226,6 +253,9 @@
       } else {
         item("Delete…", "danger", function () { S.confirmDelete = r.path; openMenu(r, anchor); });
       }
+      placeMenu(anchor);
+    }
+    function placeMenu(anchor) {
       var rect = anchor.getBoundingClientRect();
       menu.hidden = false;
       menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
@@ -246,6 +276,15 @@
         return refresh();
       });
     }
+    function disconnectApp(r) {
+      S.acting.add(r.path); render();
+      return api("/app/disconnect", { path: r.path }).then(function (out) {
+        S.acting.delete(r.path);
+        if (!out.ok && out.message) S.notice = { path: r.path, text: out.message };
+        else S.active = null;
+        return refresh();
+      });
+    }
     function removeApp(r) {
       S.acting.add(r.path); render();
       return api("/app/remove", { path: r.path }).then(function (out) {
@@ -263,10 +302,10 @@
     var viewKey = "";
     function renderView() {
       var r = activeRow();
-      var showFrame = !!(r && r.status === "running" && r.url && EMBEDDABLE);
+      var showFrame = !!(r && live(r) && r.url && embeddable(r));
       frames.forEach(function (f, path) {
         var row = S.rows.find(function (x) { return x.path === path; });
-        if (!row || row.status !== "running") { f.remove(); frames.delete(path); }
+        if (!row || !live(row) || !embeddable(row)) { f.remove(); frames.delete(path); }
         else f.style.display = showFrame && path === r.path ? "block" : "none";
       });
       if (showFrame && !frames.has(r.path)) {
@@ -285,7 +324,7 @@
           ? "apierror:" + S.apiError
           : isNew
             ? "new:" + S.newMode + (S.job ? ":job" : "")
-            : ["app", r.path, r.status, r.building, r.buildEnded, S.acting.has(r.path), S.side, notice].join("|");
+            : ["app", r.path, r.status, r.building, r.buildEnded, S.acting.has(r.path), S.side, notice, r.embedHint || ""].join("|");
       if (key === viewKey) return;
       viewKey = key;
       if (showFrame) return;
@@ -294,6 +333,16 @@
       if (S.apiError && !S.rows.length) { panel.appendChild(apiErrorPanel()); return; }
       if (isNew) { panel.appendChild(newPanel()); return; }
       panel.appendChild(appPanel(r, notice));
+    }
+    /**
+     * Whether a row's app can be framed here. A local app listens on this
+     * machine's loopback, so only a page open on loopback can frame it. A
+     * connected app can be framed when the host's frame policy lists it (the
+     * server says, `embeddable`) and an https page is not asked to frame http.
+     */
+    function embeddable(r) {
+      if (!r.remote) return EMBEDDABLE;
+      return !!r.embeddable && !(location.protocol === "https:" && /^http:/.test(r.url));
     }
     // The dashboard shows an enabled plugin's tab at once but mounts its API
     // only at startup, so a fresh enable answers 404 until a restart.
@@ -305,6 +354,7 @@
       return c;
     }
     function appPanel(r, notice) {
+      if (r.remote) return remotePanel(r, notice);
       var c = el("div", "aa-card");
       var acting = S.acting.has(r.path);
       if (r.building) {
@@ -345,6 +395,46 @@
       launch.disabled = acting;
       launch.onclick = function () { S.notice = null; act(r, "serve"); };
       row.appendChild(launch);
+      var sess = el("button", "aa-btn", "Show session");
+      sess.onclick = function () { toggleSide(true); };
+      row.appendChild(sess);
+      c.appendChild(row);
+      return c;
+    }
+
+    /** A connected app that is not framed here: why, and what can be done. */
+    function remotePanel(r, notice) {
+      var c = el("div", "aa-card");
+      var who = r.principalName ? " as " + r.principalName : "";
+      var until = r.expiresAt ? ", until " + new Date(r.expiresAt).toLocaleDateString() : "";
+      if (r.status === "online") {
+        c.appendChild(el("h2", null, r.name));
+        c.appendChild(el("p", "aa-sub", "Connected" + who + until + ". Hermes's agent can use it too: ask in the session panel."));
+        c.appendChild(el("p", "aa-sub", r.embedHint || "This page is served over https and the app over http, so it cannot be shown inside it."));
+      } else if (r.status === "expired") {
+        c.appendChild(el("h2", null, "Hermes's access to " + r.name + " expired"));
+        c.appendChild(el("p", "aa-sub", "Sign in again to keep using it here; you approve it in the app, as before."));
+      } else if (r.status === "unreachable") {
+        c.appendChild(el("h2", null, r.name + " answers as a different app"));
+        c.appendChild(el("p", "aa-sub", "Its address now belongs to something else, so Hermes will not use it. Disconnect it, or ask the app's owner what changed."));
+      } else {
+        c.appendChild(el("h2", null, r.name + " is not answering"));
+        c.appendChild(el("p", "aa-sub", "It runs on another machine and did not answer just now. The connection is kept; it shows here again when the app is back."));
+      }
+      c.appendChild(el("p", "aa-meta", r.url));
+      if (notice) c.appendChild(el("p", "aa-err", notice));
+      var row = el("div", "aa-row");
+      if (r.status === "expired") {
+        var again = el("button", "aa-btn primary", "Reconnect");
+        again.onclick = function () { S.active = "new"; S.newMode = "connect"; S.conn = freshConn(r.url); render(); };
+        row.appendChild(again);
+      } else if (r.status !== "unreachable") {
+        var open = el("a", "aa-btn" + (r.status === "online" ? " primary" : ""), "Open in browser");
+        open.href = r.url;
+        open.target = "_blank";
+        open.rel = "noopener";
+        row.appendChild(open);
+      }
       var sess = el("button", "aa-btn", "Show session");
       sess.onclick = function () { toggleSide(true); };
       row.appendChild(sess);
@@ -408,7 +498,7 @@
     }
 
     /* ── New tab: build · marketplace · import ── */
-    var MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"]];
+    var MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"], ["connect", "Connect"]];
     var KINDS = { "agent-app": "Agent App package", "living-ui": "CraftBot Living UI app", foreign: "Not an Agent App" };
     var ROUTES = {
       convert: "Convert: the agent rebuilds it as a new Agent App, with the original source kept read-only in reference/source/. Nothing of the original code runs afterward.",
@@ -428,7 +518,7 @@
         modes.appendChild(b);
       });
       wrap.appendChild(modes);
-      wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : buildForm());
+      wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : S.newMode === "connect" ? connectView() : buildForm());
       return wrap;
     }
     function errorBox(text, retry) {
@@ -781,6 +871,161 @@
       return v;
     }
 
+    /* Connect: sign Hermes's agent in to an app on another machine, then open it in its tab. */
+    var connEls = null;
+    var connTimer = 0;
+    function freshConn(url) { return { url: url || "", data: null, error: null, popup: null, code: "", confirming: false }; }
+    function connectView() {
+      var v = el("div", "aa-pane");
+      v.appendChild(el("h1", null, "Connect"));
+      v.appendChild(el("p", "aa-lead", "Use an Agent App that runs somewhere else, like your team's CRM, by its address. You sign in to it and approve Hermes; then you and Hermes's agent both use it here, as you."));
+      var input = el("input", "aa-input");
+      input.placeholder = "https://crm.example.com";
+      input.value = S.conn.url;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.oninput = function () { S.conn.url = input.value; };
+      var go = el("button", "aa-btn primary", "Connect");
+      input.onkeydown = function (e) { if (e.key === "Enter") go.click(); };
+      go.onclick = function () { startConnect(); };
+      var row = el("div", "aa-row aa-gap");
+      row.appendChild(go);
+      connEls = { status: el("div"), go: go, input: input };
+      v.append(input, row, connEls.status);
+      renderConnect();
+      return v;
+    }
+    function startConnect() {
+      clearTimeout(connTimer);
+      var url = S.conn.url.trim();
+      S.conn = freshConn(url);
+      if (!url) { S.conn.error = "Type the app's address."; renderConnect(); return; }
+      // Opened now, in the click: a window opened later, when the link is known,
+      // would be a popup the browser blocks. On this machine the approval comes
+      // back to the CLI by itself; elsewhere the person brings a code back.
+      var popup = LOOPBACK_HTTP ? window.open("", "_blank") : null;
+      if (popup) {
+        try {
+          popup.opener = null; // the app's page gets no handle on this one
+          popup.document.title = "Connecting…";
+          popup.document.body.textContent = "Connecting to " + url + "…";
+        } catch (e) { /* a browser that will not let us write to it still navigates it */ }
+      }
+      var conn = S.conn;
+      conn.popup = popup;
+      renderConnect();
+      api("/connect", { url: url, here: LOOPBACK_HTTP }).then(function (out) {
+        if (S.conn !== conn) return;
+        if (!out.ok) { conn.error = out.message || "The sign-in did not start."; closePopup(conn); renderConnect(); return; }
+        conn.data = out.job;
+        renderConnect();
+        pollConnect();
+      });
+    }
+    function closePopup(conn) {
+      if (conn.popup && !conn.popup.closed) { try { conn.popup.close(); } catch (e) { /* already gone */ } }
+      conn.popup = null;
+    }
+    function pollConnect() {
+      clearTimeout(connTimer);
+      var conn = S.conn;
+      if (!conn.data || conn.data.done) return;
+      connTimer = setTimeout(function () {
+        api("/connect?job=" + encodeURIComponent(conn.data.id)).then(function (out) {
+          if (S.conn !== conn) return;
+          if (!out.ok) {
+            if (out.status === 404) { conn.error = out.message; closePopup(conn); renderConnect(); } else pollConnect();
+            return;
+          }
+          var first = !conn.data.approve && out.job.approve;
+          conn.data = out.job;
+          // The link is known: send the window opened in the click to it.
+          if (first && conn.popup && !conn.popup.closed) conn.popup.location.href = out.job.approve.url;
+          renderConnect();
+          if (conn.data.done) connected(conn);
+          else pollConnect();
+        });
+      }, 1000);
+    }
+    function confirmConnect(btn) {
+      var conn = S.conn;
+      var code = conn.code.trim();
+      if (!code) { conn.error = "Paste the confirmation code the approval page showed."; renderConnect(); return; }
+      conn.error = null;
+      conn.confirming = true;
+      btn.disabled = true;
+      api("/connect/confirm", { url: conn.data.origin, code: code }).then(function (out) {
+        if (S.conn !== conn) return;
+        conn.confirming = false;
+        if (!out.ok) { conn.error = out.message; renderConnect(); return; }
+        conn.data = Object.assign({}, conn.data, { pending: false, result: out.result });
+        connected(conn);
+      });
+    }
+    /** Signed in: the app opens in its own tab. A code still to bring back keeps the panel open. */
+    function connected(conn) {
+      if (!conn.data.ok || conn.data.pending) return;
+      closePopup(conn);
+      var origin = conn.data.origin;
+      refresh().then(function () {
+        if (S.conn !== conn) return;
+        S.conn = freshConn("");
+        if (S.active === "new") S.active = origin;
+        render();
+      });
+    }
+    function renderConnect() {
+      if (!connEls) return;
+      var conn = S.conn;
+      var d = conn.data;
+      var box = connEls.status;
+      box.replaceChildren();
+      var running = !!d && !d.done;
+      connEls.go.disabled = running;
+      connEls.go.textContent = running ? "Waiting for approval…" : "Connect";
+      if (conn.error || (d && d.done && !d.ok)) {
+        box.appendChild(errorBox(conn.error || d.error || "The sign-in stopped.", d && d.done && !d.ok ? startConnect : null));
+        return;
+      }
+      if (!d) return;
+      var ask = d.approve;
+      var card = el("div", "aa-section");
+      if (!ask) {
+        card.appendChild(el("p", "aa-note", "Checking " + d.origin + "…"));
+        box.appendChild(card);
+        return;
+      }
+      card.appendChild(el("h3", null, ask.name || d.origin));
+      var link = el("a", "aa-btn small", "Open the approval page");
+      link.href = ask.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      if (ask.waits) {
+        var shown = conn.popup && !conn.popup.closed;
+        card.appendChild(el("p", "aa-sub", (shown ? "In the window that opened, " : "Open the approval page, ") +
+          "sign in to the app as yourself if it asks, check the code is " + ask.userCode + ", and approve. This finishes by itself."));
+        if (!shown) card.appendChild(link);
+      } else {
+        card.appendChild(el("p", "aa-sub", "Open the approval page in a browser where you can sign in to the app, check the code is " +
+          ask.userCode + ", and approve. Then paste the confirmation code it shows here."));
+        card.appendChild(link);
+        if (d.done && d.pending) {
+          var code = el("input", "aa-input aa-gap");
+          code.placeholder = "Confirmation code, like ABCD-EFGH";
+          code.value = conn.code;
+          code.autocomplete = "off";
+          code.oninput = function () { conn.code = code.value; };
+          var finish = el("button", "aa-btn primary aa-gap", conn.confirming ? "Finishing…" : "Finish");
+          finish.disabled = conn.confirming;
+          code.onkeydown = function (e) { if (e.key === "Enter") finish.click(); };
+          finish.onclick = function () { confirmConnect(finish); };
+          card.append(code, finish);
+        }
+      }
+      card.appendChild(el("p", "aa-note", "Approving lets Hermes's agent act as you in this app, within what you can do there. You can revoke it from the app's account page, or Disconnect here."));
+      box.appendChild(card);
+    }
+
     /* An install: a job on the server, polled until it ends, then the app opens in its tab. */
     var jobEls = null;
     var jobTimer = 0;
@@ -1072,6 +1317,7 @@
     function dispose() {
       timers.forEach(clearInterval);
       clearTimeout(jobTimer);
+      clearTimeout(connTimer);
       disposers.forEach(function (d) { d(); });
       root.replaceChildren();
     }

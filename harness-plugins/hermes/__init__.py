@@ -105,7 +105,9 @@ def guidance(skills: list[tuple[str, object, dict]], namespace: str, skills_home
         "",
         "Do not build or operate an app from general knowledge outside these skills. "
         "`agent-app list` locates every known Agent App, and a command accepts a registered app id "
-        "or name wherever it takes a directory. The `agent_app_*` tools wrap the same CLIs.",
+        "or name wherever it takes a directory. It also lists the apps on other machines this agent is "
+        "connected to: address one by its URL (`a2app https://… …`, or the URL as a tool's `dir`), operate it "
+        "through the connect and operator skills, and never modify it. The `agent_app_*` tools wrap the same CLIs.",
     ]
     if skills_home:
         lines.append(

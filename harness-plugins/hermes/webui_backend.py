@@ -26,6 +26,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -97,6 +98,59 @@ def allowed_origins(environ: dict[str, str] | None = None) -> frozenset[str]:
     port = env.get("HERMES_WEBUI_PORT", "").strip() or "8787"
     extra = env.get("AGENT_APP_WEBUI_ORIGINS", "").replace(",", " ").split()
     return frozenset({f"http://{host}:{port}" for host in LOOPBACK_HOSTS} | {o.rstrip("/") for o in extra})
+
+
+# One HERMES_WEBUI_CSP_FRAME_EXTRA entry, as the web UI accepts it: an http(s)
+# origin with an optional `*.` subdomain wildcard and an optional port or `*`.
+_FRAME_SOURCE = re.compile(r"^(https?)://(\*\.)?([A-Za-z0-9._~-]+)(?::(\d{1,5}|\*))?$")
+_DEFAULT_PORT = {"http": 80, "https": 443}
+
+
+def frame_sources(environ: dict[str, str] | None = None) -> list[tuple[str, bool, str, int | None | str]]:
+    """The origins the web UI's page may embed beyond itself, read as the web UI
+    reads them: whitespace-separated, and all or nothing (one invalid entry and
+    it ignores the whole value). Each is (scheme, any-subdomain, host, port),
+    the port None for the scheme's default or "*" for any."""
+    env = os.environ if environ is None else environ
+    out = []
+    for token in env.get("HERMES_WEBUI_CSP_FRAME_EXTRA", "").split():
+        match = _FRAME_SOURCE.fullmatch(token)
+        if match is None:
+            return []
+        scheme, wildcard, host, port = match.groups()
+        if port not in (None, "*") and not 1 <= int(port) <= 65535:
+            return []
+        out.append((scheme, wildcard is not None, host.lower(), port if port in (None, "*") else int(port)))
+    return out
+
+
+def frame_allows(sources: list[tuple[str, bool, str, int | None | str]], origin: str) -> bool:
+    """Whether a frame-src with these sources lets the page embed `origin` (CSP
+    host-source matching: same scheme, the host or a subdomain of a `*.` host,
+    and the port named, the default port when none is, or any for `*`)."""
+    parts = urlsplit(origin)
+    host = (parts.hostname or "").lower()
+    port = parts.port or _DEFAULT_PORT.get(parts.scheme)
+    for scheme, any_subdomain, source_host, source_port in sources:
+        if scheme != parts.scheme:
+            continue
+        if not (host.endswith("." + source_host) if any_subdomain else host == source_host):
+            continue
+        if source_port == "*" or (source_port or _DEFAULT_PORT[scheme]) == port:
+            return True
+    return False
+
+
+def frame_policy(origin: str, environ: dict[str, str] | None = None) -> str | None:
+    """None when the web UI's page may embed `origin`; else what to change so it can."""
+    if frame_allows(frame_sources(environ), origin):
+        return None
+    env = os.environ if environ is None else environ
+    home = env.get("HERMES_HOME", "").strip() or "~/.hermes"
+    return (
+        f"The web UI embeds only the sites listed in HERMES_WEBUI_CSP_FRAME_EXTRA. To use {origin} here, add it to "
+        f"that line in {home}/.env (entries are space-separated), then restart the web UI (./ctl.sh restart)."
+    )
 
 
 def _data_dir() -> Path:
@@ -343,6 +397,8 @@ def _start() -> dict | None:
         return None
     api = _load_plugin_api()
     manager = api.MANAGER
+    # The web UI's page may embed only what its CSP lists; say so per connected app.
+    manager.frame_policy = frame_policy
     try:
         port = int(os.environ.get("AGENT_APP_WEBUI_BACKEND_PORT", "").strip() or 0)
     except ValueError:

@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
@@ -617,8 +619,20 @@ def run_install(request: dict, on_step: Callable[[dict], None]) -> tuple[CliResu
 
     No timeout: the CLI bounds every step itself (a download, the app's own
     dependencies), so the caller never gives up before it does."""
-    binary = framework_bin()
-    argv = [*install_argv(request), "--events"]
+
+    def line(event: dict) -> None:
+        if event["event"] == "step":
+            on_step(event)
+
+    return run_events(framework_bin(), [*install_argv(request), "--events"], parse_install_event, line)
+
+
+def run_events(binary: str, argv: list[str], parse: Callable[[str], dict | None],
+               on_event: Callable[[dict], None]) -> tuple[CliResult, dict | None]:
+    """Run a CLI command that writes JSON lines (`--events`), calling `on_event`
+    with each line `parse` accepts as the CLI writes it. Returns the CLI's result
+    and the `result` line, less its `event` key, or None when there was none
+    (the CLI refused before starting, and says why on stderr)."""
     try:
         cmd = [*command_for(binary), *argv]
     except FileNotFoundError:
@@ -636,17 +650,17 @@ def run_install(request: dict, on_step: Callable[[dict], None]) -> tuple[CliResu
     result = None
     with proc:  # closes both pipes and reaps the process, however this ends
         # stderr is drained alongside, so a chatty step can never fill its pipe and stall the CLI.
-        drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), name="agent-app:install-stderr", daemon=True)
+        drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), name="agent-app:events-stderr", daemon=True)
         drain.start()
         for line in proc.stdout:
             out.append(line)
-            event = parse_install_event(line)
+            event = parse(line)
             if event is None:
                 continue
-            if event["event"] == "step":
-                on_step(event)
-            else:
+            if event["event"] == "result":
                 result = {k: v for k, v in event.items() if k != "event"}
+            else:
+                on_event(event)
         code = proc.wait()
         drain.join()
     return CliResult(code, "".join(out), "".join(err)), result
@@ -664,19 +678,34 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-class InstallJobs:
-    """The installs the manager started. Each runs `install --events` on its
-    own thread; its job is updated from every step line, and kept for
-    `keep_s` after it ends so a page that polls late (or reloads) still sees
-    how it ended. A page polls the job rather than holding a request open, so
-    no client timeout is ever shorter than the CLI's own. The job's fields are
-    the TypeScript engine's `InstallJob`."""
+class _Jobs:
+    """Long CLI runs the manager started, each a job a page polls: kept for
+    `keep_s` after it ends, so a page that polls late (or reloads) still sees how
+    it ended. A page polls the job rather than holding a request open, so no
+    client timeout is ever shorter than the CLI's own."""
 
     def __init__(self, keep_s: float = 3600) -> None:
         self._jobs: dict[str, dict] = {}
         self._ended: dict[str, float] = {}
         self._lock = threading.Lock()
         self._keep = keep_s
+
+    def get(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return copy.deepcopy(job) if job is not None else None
+
+    def _prune(self) -> None:
+        cutoff = time.time() - self._keep
+        for job_id in [j for j, ended in self._ended.items() if ended < cutoff]:
+            self._jobs.pop(job_id, None)
+            self._ended.pop(job_id, None)
+
+
+class InstallJobs(_Jobs):
+    """The installs the manager started. Each runs `install --events` on its
+    own thread; its job is updated from every step line. The job's fields are
+    the TypeScript engine's `InstallJob`."""
 
     def start(self, request: dict, on_end: Callable[[dict], None] | None = None) -> dict:
         job = {
@@ -722,16 +751,114 @@ class InstallJobs:
         threading.Thread(target=work, name=f"agent-app:install:{job['id']}", daemon=True).start()
         return self.get(job["id"])
 
-    def get(self, job_id: str) -> dict | None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            return copy.deepcopy(job) if job is not None else None
 
-    def _prune(self) -> None:
-        cutoff = time.time() - self._keep
-        for job_id in [j for j, ended in self._ended.items() if ended < cutoff]:
-            self._jobs.pop(job_id, None)
-            self._ended.pop(job_id, None)
+# ── Connect: an app on another machine ───────────────────────────────────────
+
+
+_HOSTNAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
+
+
+def app_origin(value: Any) -> str | None:
+    """The origin of an app address a person typed: `https://crm.example.com/x`,
+    or a bare `crm.example.com` (https assumed). None for anything that is not an
+    http(s) address: the CLI would read it as a folder or an app name here."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return None
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username is not None:
+        return None
+    if ":" not in parts.hostname and not _HOSTNAME.fullmatch(parts.hostname):
+        return None  # not a host name: a path or a phrase
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    default = 443 if parts.scheme == "https" else 80
+    return f"{parts.scheme}://{host}" + (f":{port}" if port is not None and port != default else "")
+
+
+def agent_name() -> str:
+    """How the app lists the credential Hermes's agent gets."""
+    return f"Hermes on {socket.gethostname()}"
+
+
+def login_argv(origin: str, browser_here: bool) -> list[str]:
+    """`a2app <origin> login`, followed as JSON lines. With the person's browser
+    on this computer (the page opens the link itself), the code comes back to the
+    CLI's loopback port; otherwise the person gives the code back by hand."""
+    return [origin, "login", "--name", agent_name(), "--events", "--print-only" if browser_here else "--no-browser"]
+
+
+def parse_login_event(line: str) -> dict | None:
+    """One stdout line of `login --events`: `{"event": "approve", "url",
+    "userCode", ...}` or `{"event": "result", "ok", ...}`; None otherwise."""
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("event") == "approve" and isinstance(doc.get("url"), str) and isinstance(doc.get("userCode"), str):
+        return doc
+    if doc.get("event") == "result" and isinstance(doc.get("ok"), bool):
+        return doc
+    return None
+
+
+class ConnectJobs(_Jobs):
+    """Sign-ins the manager started: `a2app <origin> login --events` on its own
+    thread. The job carries the `approve` line (the link the page opens, and the
+    code the person checks) as soon as the CLI writes it, then how it ended:
+    signed in, `pending` the confirmation code (a browser elsewhere), or not."""
+
+    def start(self, origin: str, browser_here: bool) -> dict:
+        job = {
+            "id": secrets.token_hex(8), "origin": origin, "approve": None, "done": False, "ok": False,
+            "pending": False, "result": None, "error": None, "startedAt": _now(), "endedAt": None,
+        }
+        with self._lock:
+            self._prune()
+            self._jobs[job["id"]] = job
+
+        def approve(event: dict) -> None:
+            with self._lock:
+                job["approve"] = {k: v for k, v in event.items() if k != "event"}
+
+        def work() -> None:
+            try:
+                result, doc = run_events(cli_bin(), login_argv(origin, browser_here), parse_login_event, approve)
+            except Exception as exc:  # the page must learn the sign-in ended, whatever ended it
+                result, doc = CliResult(-1, "", str(exc) or exc.__class__.__name__), None
+            ok = result.ok and isinstance(doc, dict) and doc.get("ok") is True
+            with self._lock:
+                job.update({
+                    "result": doc, "ok": ok, "pending": ok and doc.get("pending") is True,
+                    "error": None if ok else failure_of(result, doc), "endedAt": _now(), "done": True,
+                })
+                self._ended[job["id"]] = time.time()
+
+        threading.Thread(target=work, name=f"agent-app:connect:{job['id']}", daemon=True).start()
+        return self.get(job["id"])
+
+
+def confirm_login(origin: str, code: str) -> tuple[CliResult, dict | None]:
+    """Finish a sign-in with the confirmation code the person was shown."""
+    result = run_operate([origin, "login", "--confirm", code, "--events"])
+    events = [e for e in map(parse_login_event, result.stdout.splitlines()) if e is not None and e["event"] == "result"]
+    doc = {k: v for k, v in events[-1].items() if k != "event"} if events else None
+    return result, doc
+
+
+def disconnect(origin: str) -> CliResult:
+    """Revoke Hermes's credential for an app on another machine, and forget it."""
+    return run_operate([origin, "logout"])
 
 
 # ── Uploads ──────────────────────────────────────────────────────────────────
@@ -827,8 +954,38 @@ def parse_known_apps(result: CliResult) -> list[dict]:
     return out
 
 
+_CONNECTED_STATUSES = frozenset({"online", "offline", "unreachable", "expired"})
+
+
+def parse_connected_apps(result: CliResult) -> list[dict]:
+    """The `connected` array of `agent-app list --json`: apps on other machines
+    this one holds a credential for. Tolerant, like parse_known_apps."""
+    doc = result.json
+    rows = doc.get("connected") if isinstance(doc, dict) else None
+    out: list[dict] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or app_origin(row.get("origin")) != row.get("origin"):
+            continue
+        text = lambda key: row[key] if isinstance(row.get(key), str) else None  # noqa: E731
+        out.append({
+            "origin": row["origin"],
+            "appId": text("appId"),
+            "name": text("name") or row["origin"],
+            "principalName": text("principalName") or text("principal"),
+            "expiresAt": text("expiresAt"),
+            "status": row["status"] if row.get("status") in _CONNECTED_STATUSES else "offline",
+        })
+    return out
+
+
 def list_known_apps() -> list[dict]:
     return parse_known_apps(run_framework(["list", "--json"]))
+
+
+def list_apps() -> tuple[list[dict], list[dict]]:
+    """This machine's apps and the connected ones, from one `list --json`."""
+    result = run_framework(["list", "--json"])
+    return parse_known_apps(result), parse_connected_apps(result)
 
 
 def _str(value: Any) -> str:

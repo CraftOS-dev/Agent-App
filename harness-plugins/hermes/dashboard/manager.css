@@ -53,6 +53,7 @@
 .aa-tab.offline .aa-tab-name { opacity: 0.55; }
 .aa-tab.active.offline .aa-tab-name { opacity: 0.75; }
 .aa-tab-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.aa-tab-where { flex: none; font-size: 11px; color: var(--aa-muted); }
 .aa-tab-more { flex: none; display: none; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: var(--aa-radius-sm); color: var(--aa-muted); line-height: 1; font-size: 12px; }
 .aa-tab.active .aa-tab-more { display: inline-flex; }
 .aa-tab-more:hover { background: var(--aa-hover); color: var(--aa-fg); }

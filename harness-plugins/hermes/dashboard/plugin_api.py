@@ -127,7 +127,14 @@ def session_id_for(path: str) -> str:
 
 def session_preamble(name: str, path: str) -> str:
     """Prepended to the first message of an app's session; later messages are
-    the user's text alone."""
+    the user's text alone. A connected app (`path` is its URL) is another
+    machine's: operated, never modified."""
+    if engine.app_origin(path) == path:
+        return (
+            f'You are working with the Agent App "{name}" at {path}, on another machine; this agent is signed in to it '
+            "and acts for the person who approved that. Load the **connect** skill, then the **operator** skill: "
+            f"address it as `a2app {path}`, never drive its UI. It cannot be modified from here."
+        )
     return (
         f'You are working on the Agent App "{name}" at `{path}`. For a code or feature change load '
         "the **modify** skill; for using the app (data, tasks, reports) load the **operator** skill. "
@@ -427,6 +434,11 @@ class Manager:
         # after a build (before its first turn is stored) does not prepend it.
         self.seeded: set[str] = set()
         self.jobs = engine.InstallJobs()
+        self.connects = engine.ConnectJobs()
+        # Whether this page may embed a connected app's origin: None when it may,
+        # else what to change so it can. The dashboard frames anything; the
+        # hermes-webui backend installs its own CSP's answer (webui_backend).
+        self.frame_policy: Callable[[str], str | None] = lambda _origin: None
         self._lock = threading.Lock()
 
     @classmethod
@@ -446,9 +458,11 @@ class Manager:
         }
 
     def rows(self) -> list[dict]:
-        """Registered apps merged with builds not yet in the registry. A build
-        retires once its app is seen running."""
-        apps = engine.list_known_apps()
+        """Registered apps merged with builds not yet in the registry (a build
+        retires once its app is seen running), then the apps on other machines
+        Hermes is connected to. A connected app's `path` is its origin: that is
+        how the CLI addresses it, and what keys its session."""
+        apps, connected = engine.list_apps()
         now = time.time()
         with self._lock:
             for app in apps:
@@ -469,6 +483,13 @@ class Manager:
             out.append({
                 "id": os.path.basename(path), "name": build["name"], "path": path, "url": None,
                 "status": "stopped", "building": not build["ended"], "buildEnded": build["ended"],
+            })
+        for app in connected:
+            hint = self.frame_policy(app["origin"])
+            out.append({
+                "id": app["appId"] or app["origin"], "name": app["name"], "path": app["origin"], "url": app["origin"],
+                "remote": True, "status": app["status"], "principalName": app["principalName"], "expiresAt": app["expiresAt"],
+                "embeddable": hint is None, "embedHint": hint, "building": False, "buildEnded": False,
             })
         return out
 
@@ -585,6 +606,44 @@ class Manager:
             upload.abort()
             raise
         return 200, {"ok": True, "file": upload.finish()}
+
+    def connect(self, body: dict) -> tuple[int, dict]:
+        """Start signing Hermes's agent in to an app on another machine: a job
+        the page polls. `here` says the page runs in a browser on this machine,
+        so the CLI waits for that browser to come back with the code."""
+        origin = engine.app_origin(body.get("url"))
+        if origin is None:
+            return 400, {"ok": False, "message": "Type the app's address, like https://crm.example.com."}
+        return 200, {"ok": True, "job": self.connects.start(origin, body.get("here") is True)}
+
+    def connect_job(self, job_id: str) -> tuple[int, dict]:
+        job = self.connects.get(job_id)
+        if job is None:
+            return 404, {"ok": False, "message": "no such sign-in: it may have ended over an hour ago"}
+        return 200, {"ok": True, "job": job}
+
+    def connect_confirm(self, body: dict) -> tuple[int, dict]:
+        """Finish a sign-in started from a browser on another machine, with the
+        confirmation code the approval page showed the person."""
+        origin = engine.app_origin(body.get("url"))
+        code = str(body.get("code") or "").strip()
+        if origin is None or not code:
+            return 400, {"ok": False, "message": "Give the app's address and the confirmation code the approval page showed."}
+        result, doc = engine.confirm_login(origin, code)
+        if result.ok and isinstance(doc, dict) and doc.get("ok") is True:
+            return 200, {"ok": True, "result": doc}
+        return 400 if result.code in (1, 2) else 500, {"ok": False, "message": engine.failure_of(result, doc)}
+
+    def disconnect(self, origin: str) -> tuple[int, dict]:
+        """Revoke Hermes's credential for a connected app, and forget the app."""
+        if not any(app["origin"] == origin for app in engine.list_apps()[1]):
+            return 404, {"ok": False, "message": "not a connected app"}
+        result = engine.disconnect(origin)
+        sid = session_id_for(origin)
+        self.runner.cancel(sid, wait=2 * CANCEL_GRACE_S)
+        with self._lock:
+            self.seeded.discard(sid)
+        return (200 if result.ok else 500), {"ok": result.ok, "message": "" if result.ok else engine.failure_of(result, None)}
 
     def send(self, body: dict) -> tuple[int, dict]:
         path = str(body.get("path") or "")
@@ -721,9 +780,27 @@ def build_router(manager: Manager) -> APIRouter:
     @r.post("/app/{verb}")
     @_guarded
     def app_action(verb: str, body: dict | None = Body(default=None)) -> Any:
+        path = str((body or {}).get("path") or "")
+        if verb == "disconnect":
+            return _reply(*manager.disconnect(path))
         if verb not in ("serve", "stop", "remove"):
             return _reply(404, {"ok": False, "message": "unknown endpoint"})
-        return _reply(*manager.lifecycle(verb, str((body or {}).get("path") or "")))
+        return _reply(*manager.lifecycle(verb, path))
+
+    @r.post("/connect")
+    @_guarded
+    def connect(body: dict | None = Body(default=None)) -> Any:
+        return _reply(*manager.connect(body or {}))
+
+    @r.get("/connect")
+    @_guarded
+    def connect_job(job: str = "") -> Any:
+        return _reply(*manager.connect_job(job))
+
+    @r.post("/connect/confirm")
+    @_guarded
+    def connect_confirm(body: dict | None = Body(default=None)) -> Any:
+        return _reply(*manager.connect_confirm(body or {}))
 
     @r.get("/catalogue")
     @_guarded
@@ -791,6 +868,12 @@ def dispatch(manager: Manager, method: str, path: str, query: str = "", body: An
             return manager.catalogue((params.get("search") or [""])[0], (params.get("source") or [""])[0])
         if method == "GET" and path == "/install":
             return manager.install_job((params.get("job") or [""])[0])
+        if method == "GET" and path == "/connect":
+            return manager.connect_job((params.get("job") or [""])[0])
+        if method == "POST" and path == "/connect":
+            return manager.connect(body)
+        if method == "POST" and path == "/connect/confirm":
+            return manager.connect_confirm(body)
         if method == "POST" and path == "/upload":
             return manager.upload(stream if stream is not None else (), length)
         if method == "POST" and path == "/inspect":
@@ -805,6 +888,8 @@ def dispatch(manager: Manager, method: str, path: str, query: str = "", body: An
             return manager.send(body)
         if method == "POST" and path.startswith("/app/"):
             verb = path[len("/app/"):]
+            if verb == "disconnect":
+                return manager.disconnect(str(body.get("path") or ""))
             if verb not in ("serve", "stop", "remove"):
                 return 404, {"ok": False, "message": "unknown endpoint"}
             return manager.lifecycle(verb, str(body.get("path") or ""))

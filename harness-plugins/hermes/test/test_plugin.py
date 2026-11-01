@@ -90,6 +90,26 @@ if (BIN === "agent-app" && argv[0] === "catalogue") {
   console.log(JSON.stringify({ ok: true, kind: foreign ? "foreign" : "agent-app", installable: !foreign, routes: foreign ? ["adopt", "convert"] : [], bin: BIN, argv }));
 } else if (BIN === "agent-app" && argv[0] === "install") {
   install();
+} else if (BIN === "a2app" && argv[1] === "login") {
+  // login --events: an approve line, then the result. An address naming
+  // "stranger" is not an Agent App (refused before anything starts, as the real
+  // CLI does); --no-browser leaves the sign-in pending its confirmation code,
+  // which --confirm then checks (GOOD-CODE is the right one).
+  const emit = (line) => { if (argv.includes("--events")) console.log(JSON.stringify(line)); };
+  const app = { origin: argv[0], appId: "crm", name: "Team CRM" };
+  if (argv[0].includes("stranger")) { console.error("✗ " + argv[0] + " is not an Agent App"); process.exit(3); }
+  const confirm = flag("confirm");
+  if (confirm !== undefined) {
+    if (confirm !== "GOOD-CODE") { emit({ event: "result", ok: false, error: "that is not the confirmation code for this sign-in" }); console.error("✗ wrong code"); process.exit(1); }
+    emit({ event: "result", ok: true, ...app, principal: "usr_bob", principalName: "Bob", scopes: ["*"], expiresAt: "2026-12-01T00:00:00.000Z" });
+    process.exit(0);
+  }
+  const waits = !argv.includes("--no-browser");
+  emit({ event: "approve", url: argv[0] + "/_a2app/account#approve/BCDF-GHJK", userCode: "BCDF-GHJK", expiresAt: "2026-11-01T00:10:00.000Z", ...app, waits });
+  if (!waits) { emit({ event: "result", ok: true, pending: true, ...app }); process.exit(0); }
+  emit({ event: "result", ok: true, ...app, principal: "usr_bob", principalName: "Bob", scopes: ["*"], expiresAt: "2026-12-01T00:00:00.000Z" });
+} else if (BIN === "a2app" && argv[1] === "logout") {
+  console.error("✓ logged out of Team CRM");
 } else if (argv.includes("BAD")) {
   console.log(JSON.stringify({ ok: false, error: { code: "invalid_enum", field: "status" } })); console.error("rejected by the guard"); process.exit(1);
 } else {
@@ -235,8 +255,8 @@ class Sandbox:
         })
         os.environ.pop("TERMINAL_CWD", None)
 
-    def set_registry(self, apps: list[dict]) -> None:
-        self.registry.write_text(json.dumps({"ok": True, "apps": apps}), encoding="utf-8")
+    def set_registry(self, apps: list[dict], connected: list[dict] | None = None) -> None:
+        self.registry.write_text(json.dumps({"ok": True, "apps": apps, "connected": connected or []}), encoding="utf-8")
 
     def recorded(self) -> list[dict]:
         if not self.calls.exists():
@@ -413,6 +433,37 @@ class Engine(unittest.TestCase):
         self.assertEqual(e.bin_for(["./app", "login"]), os.environ["A2APP_CLI"], "login is an a2app command")
         self.assertEqual(e.bin_for(["./app", "tasks", "next"]), os.environ["A2APP_CLI"])
         self.assertEqual(e.bin_for(["./app"]), os.environ["A2APP_CLI"])
+
+    def test_an_app_address_is_an_http_origin_or_nothing(self) -> None:
+        e = self.engine
+        self.assertEqual(e.app_origin("crm.example.com"), "https://crm.example.com", "a bare domain is https")
+        self.assertEqual(e.app_origin(" https://CRM.example.com:443/board?x=1 "), "https://crm.example.com")
+        self.assertEqual(e.app_origin("http://127.0.0.1:8090/"), "http://127.0.0.1:8090")
+        for value in ("", "./my-folder", "not an address", "ftp://crm.example.com", "https://bob:pw@crm.example.com", None, 42):
+            self.assertIsNone(e.app_origin(value), value)
+
+    def test_login_events_are_read_line_by_line(self) -> None:
+        e = self.engine
+        self.assertEqual(e.parse_login_event('{"event":"approve","url":"https://x/a","userCode":"BCDF-GHJK","waits":true}')["userCode"], "BCDF-GHJK")
+        self.assertTrue(e.parse_login_event('{"event":"result","ok":false,"error":"no"}'))
+        for line in ("", "ℹ To let this agent…", '{"event":"approve","url":"https://x/a"}', '{"event":"result"}', "[]"):
+            self.assertIsNone(e.parse_login_event(line), line)
+        self.assertEqual(e.login_argv("https://crm.example.com", True)[-2:], ["--events", "--print-only"])
+        self.assertEqual(e.login_argv("https://crm.example.com", False)[-1], "--no-browser")
+        self.assertEqual(e.login_argv("https://crm.example.com", True)[:4], ["https://crm.example.com", "login", "--name", e.agent_name()])
+
+    def test_connected_apps_come_from_the_list(self) -> None:
+        e = self.engine
+        self.box.set_registry([], [
+            {"origin": "https://crm.example.com", "appId": "crm", "name": "Team CRM", "principal": "usr_bob", "principalName": "Bob", "expiresAt": None, "status": "online"},
+            {"origin": "not an origin", "name": "junk", "status": "online"},
+            {"origin": "https://old.example.com", "status": "sleeping"},
+        ])
+        local, connected = e.list_apps()
+        self.assertEqual(local, [])
+        self.assertEqual([c["origin"] for c in connected], ["https://crm.example.com", "https://old.example.com"], "a row that is not an origin is dropped")
+        self.assertEqual((connected[0]["name"], connected[0]["principalName"]), ("Team CRM", "Bob"))
+        self.assertEqual((connected[1]["name"], connected[1]["status"]), ("https://old.example.com", "offline"), "an unknown status reads as offline")
 
     def test_install_events_are_read_line_by_line(self) -> None:
         e = self.engine
@@ -919,6 +970,102 @@ class DashboardApi(unittest.TestCase):
             self.assertEqual(Path(self.api.hermes_argv()[0]).resolve(), launcher.resolve())
 
 
+@unittest.skipIf(NODE is None, "node is required for the fake framework CLIs")
+@unittest.skipUnless(HAVE_FASTAPI, "FastAPI is required for the dashboard API tests")
+class ConnectApi(unittest.TestCase):
+    """The Connect panel's routes, through both hosts' route tables."""
+
+    API = "/api/plugins/agent-app"
+
+    def setUp(self) -> None:
+        self.box = Sandbox()
+        self.api = load_dashboard_api()
+        self.manager = self.api.Manager(self.api.TurnRunner(self.box.dir / "data"), FakeSessions(self.box.dir))
+        app = FastAPI()
+        app.include_router(self.api.build_router(self.manager), prefix=self.API)
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.box.close()
+
+    def wait_job(self, job_id: str) -> dict:
+        deadline = time.time() + 20
+        while True:
+            job = self.client.get(self.API + "/connect", params={"job": job_id}).json()["job"]
+            if job["done"]:
+                return job
+            if time.time() > deadline:
+                self.fail("the sign-in did not end")
+            time.sleep(0.05)
+
+    def logins(self) -> list[list[str]]:
+        return [c["argv"] for c in self.box.recorded() if c["bin"] == "a2app" and c["argv"][1:2] == ["login"]]
+
+    def test_a_browser_here_signs_in_and_the_app_becomes_a_tab(self) -> None:
+        r = self.client.post(self.API + "/connect", json={"url": "crm.example.com", "here": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        job = self.wait_job(r.json()["job"]["id"])
+        self.assertTrue(job["ok"], job)
+        self.assertFalse(job["pending"])
+        self.assertEqual((job["approve"]["userCode"], job["approve"]["waits"]), ("BCDF-GHJK", True), "the page learns the link and the code")
+        self.assertEqual(job["result"]["principalName"], "Bob")
+        self.assertEqual(self.logins()[-1][0], "https://crm.example.com", "a bare domain is signed in to over https")
+        self.assertIn("--print-only", self.logins()[-1], "the page opens the link itself; the CLI waits for the browser to come back")
+
+        self.box.set_registry([], [{"origin": "https://crm.example.com", "appId": "crm", "name": "Team CRM", "principalName": "Bob", "expiresAt": "2026-12-01T00:00:00.000Z", "status": "online"}])
+        rows = self.client.get(self.API + "/apps").json()["rows"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["path"], row["url"], row["remote"], row["status"], row["principalName"]),
+                         ("https://crm.example.com", "https://crm.example.com", True, "online", "Bob"))
+        self.assertEqual((row["embeddable"], row["embedHint"]), (True, None), "the dashboard frames any app")
+
+    def test_a_browser_elsewhere_finishes_with_the_confirmation_code(self) -> None:
+        job = self.wait_job(self.client.post(self.API + "/connect", json={"url": "https://crm.example.com", "here": False}).json()["job"]["id"])
+        self.assertEqual((job["ok"], job["pending"], job["approve"]["waits"]), (True, True, False), "pending the code the person brings back")
+        self.assertIn("--no-browser", self.logins()[-1])
+        wrong = self.client.post(self.API + "/connect/confirm", json={"url": "https://crm.example.com", "code": "BAD-CODE"})
+        self.assertEqual(wrong.status_code, 400)
+        self.assertIn("not the confirmation code", wrong.json()["message"])
+        right = self.client.post(self.API + "/connect/confirm", json={"url": "https://crm.example.com", "code": "GOOD-CODE"})
+        self.assertEqual((right.status_code, right.json()["result"]["principalName"]), (200, "Bob"))
+        self.assertEqual(self.logins()[-1][2:], ["--confirm", "GOOD-CODE", "--events"])
+
+    def test_an_address_that_is_not_one_or_not_an_app_is_refused(self) -> None:
+        r = self.client.post(self.API + "/connect", json={"url": "./my-folder"})
+        self.assertEqual(r.status_code, 400, "never handed to the CLI, which would read it as a folder")
+        self.assertEqual(self.logins(), [])
+        job = self.wait_job(self.client.post(self.API + "/connect", json={"url": "https://stranger.example.com"}).json()["job"]["id"])
+        self.assertFalse(job["ok"])
+        self.assertIn("not an Agent App", job["error"], "the CLI's own reason")
+        self.assertEqual(self.client.get(self.API + "/connect", params={"job": "nope"}).status_code, 404)
+
+    def test_disconnect_logs_out_of_a_connected_app_only(self) -> None:
+        self.assertEqual(self.client.post(self.API + "/app/disconnect", json={"path": "https://crm.example.com"}).status_code, 404, "not connected")
+        self.box.set_registry([], [{"origin": "https://crm.example.com", "name": "Team CRM", "status": "online"}])
+        r = self.client.post(self.API + "/app/disconnect", json={"path": "https://crm.example.com"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn(["https://crm.example.com", "logout"], [c["argv"] for c in self.box.recorded() if c["bin"] == "a2app"])
+
+    def test_the_webui_route_table_serves_the_same_routes(self) -> None:
+        status, out = self.api.dispatch(self.manager, "POST", "/connect", body={"url": "crm.example.com", "here": True})
+        self.assertEqual(status, 200)
+        job_id = out["job"]["id"]
+        deadline = time.time() + 20
+        while not self.api.dispatch(self.manager, "GET", "/connect", query=f"job={job_id}")[1]["job"]["done"]:
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.05)
+        self.assertEqual(self.api.dispatch(self.manager, "POST", "/connect/confirm", body={"url": "crm.example.com"})[0], 400, "a code is needed")
+        self.assertEqual(self.api.dispatch(self.manager, "POST", "/app/disconnect", body={"path": "https://nowhere.example.com"})[0], 404)
+
+    def test_a_connected_apps_session_addresses_it_by_url(self) -> None:
+        text = self.api.session_preamble("Team CRM", "https://crm.example.com")
+        self.assertIn("`a2app https://crm.example.com`", text)
+        self.assertIn("connect", text)
+        self.assertNotIn("modify", text, "another machine's app is never modified from here")
+        self.assertIn("modify", self.api.session_preamble("Board", "/apps/board"))
+
+
 def load_module(name: str, path: Path):
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, path)
@@ -1047,6 +1194,27 @@ class WebuiBackend(unittest.TestCase):
 
 
 @unittest.skipIf(NODE is None, "node is required for the fake framework CLIs")
+class WebuiFramePolicy(unittest.TestCase):
+    """What hermes-webui's page may embed, read from its own CSP knob."""
+
+    def setUp(self) -> None:
+        self.mod = load_module("agent_app_webui_backend_frames", PLUGIN / "webui_backend.py")
+
+    def test_an_origin_is_embeddable_only_when_the_web_ui_lists_it(self) -> None:
+        env = {"HERMES_WEBUI_CSP_FRAME_EXTRA": "http://127.0.0.1:* http://localhost:* https://*.example.com https://crm.acme.io", "HERMES_HOME": "/home/me/.hermes"}
+        for origin, framed in (("http://127.0.0.1:8090", True), ("https://crm.example.com", True), ("https://example.com", False),
+                               ("https://crm.acme.io", True), ("https://crm.acme.io:8443", False), ("http://crm.acme.io", False), ("https://evil.com", False)):
+            self.assertEqual(self.mod.frame_policy(origin, env) is None, framed, origin)
+        hint = self.mod.frame_policy("https://evil.com", env)
+        self.assertIn("HERMES_WEBUI_CSP_FRAME_EXTRA", hint)
+        self.assertIn("/home/me/.hermes/.env", hint)
+
+    def test_one_invalid_entry_and_the_web_ui_ignores_them_all(self) -> None:
+        self.assertEqual(self.mod.frame_sources({"HERMES_WEBUI_CSP_FRAME_EXTRA": "https://ok.example.com https:"}), [])
+        self.assertIsNotNone(self.mod.frame_policy("https://ok.example.com", {"HERMES_WEBUI_CSP_FRAME_EXTRA": "https://ok.example.com https:"}))
+        self.assertIsNotNone(self.mod.frame_policy("https://ok.example.com", {}))
+
+
 class WebuiStart(unittest.TestCase):
     """maybe_start() end to end: the real Manager behind the real backend."""
 

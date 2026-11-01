@@ -10,9 +10,9 @@
  *
  * Pinned: every tool is run by the engine's tool of the same name (so each
  * reaches the binary that owns it, never one guessed from its argv); the
- * manager page carries its panels; and the marketplace and import routes, with
- * a source that is not a package going to the importer skill in a new app's
- * session.
+ * manager page carries its panels; the marketplace and import routes, with a
+ * source that is not a package going to the importer skill in a new app's
+ * session; and Connect (the sign-in, a connected app's row and session).
  */
 import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -131,7 +131,7 @@ try {
   assert.equal(cfg.steps.length, 11);
   const script = /<script>\n([\s\S]*)<\/script><\/body>/.exec(page.text)[1];
   assert.doesNotThrow(() => new Function(script), "the page's script parses");
-  for (const panel of ["Marketplace", "Import", "/catalogue?search=", "/install?job=", "/import/agent", "/upload"]) assert.ok(script.includes(panel), panel);
+  for (const panel of ["Marketplace", "Import", "/catalogue?search=", "/install?job=", "/import/agent", "/upload", "Connect", "/connect?job=", "/connect/confirm", "/app/disconnect"]) assert.ok(script.includes(panel), panel);
   const api = (path, opts = {}) => call(`/agent-app/api${path}`, { token: cfg.token, ...opts });
 
   let r = await api("/catalogue?search=board");
@@ -158,8 +158,34 @@ try {
   assert.ok(followups[0].text.endsWith(`Create the app at \`${r.json.path}\` — pass that directory to every agent-app command.`));
   r = await api("/apps");
   assert.deepEqual(r.json.rows.map((row) => [row.name, row.building]), [["Kanban", true]]);
+
+  /* ── Connect: an app on another machine ── */
+  const CRM = "http://127.0.0.1:8191";
+  assert.equal((await api("/connect", { method: "POST", body: { url: "./my-folder" } })).status, 400, "an address, never a folder");
+  r = await api("/connect", { method: "POST", body: { url: CRM, here: true } });
+  job = r.json.job;
+  while (!job.done) {
+    await new Promise((d) => setTimeout(d, 20));
+    job = (await api(`/connect?job=${job.id}`)).json.job;
+  }
+  assert.deepEqual([job.ok, job.pending, job.embedded], [true, true, true], "the page embeds the approval and hands the code back");
+  r = await api("/connect/confirm", { method: "POST", body: { url: CRM, code: "GOOD-CODE" } });
+  assert.deepEqual([r.status, r.json.result.principalName], [200, "Bob"]);
+  process.env.FAKE_REGISTRY = join(base, "registry.json");
+  writeFileSync(process.env.FAKE_REGISTRY, JSON.stringify({ ok: true, apps: [], connected: [
+    { origin: CRM, appId: "crm", name: "Team CRM", principal: "usr_bob", principalName: "Bob", expiresAt: null, status: "online" },
+  ] }));
+  r = await api("/apps");
+  const remote = r.json.rows.find((row) => row.remote);
+  assert.deepEqual([remote.path, remote.status, remote.embeddable], [CRM, "online", true]);
+  r = await api("/session/send", { method: "POST", body: { path: CRM, name: "Team CRM", text: "How many open deals?" } });
+  assert.equal(r.status, 200, r.text);
+  const crm = followups.at(-1);
+  assert.equal(crm.sessionId, "agent-app:127.0.0.1-8191", "keyed by its host, no colon inside the last part");
+  assert.match(crm.text, /^You are working with the Agent App "Team CRM" at http:\/\/127\.0\.0\.1:8191, on another machine/);
+  assert.equal((await api("/app/disconnect", { method: "POST", body: { path: CRM } })).status, 200);
 } finally {
   rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-console.log("✓ dsh: 19 tools, each run by the engine's own (so by the binary that owns it); the manager's panels and its marketplace, import and agent hand-off routes");
+console.log("✓ dsh: 19 tools, each run by the engine's own (so by the binary that owns it); the manager's panels and its marketplace, import, agent hand-off and connect routes");

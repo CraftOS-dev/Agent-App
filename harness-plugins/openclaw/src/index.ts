@@ -17,6 +17,10 @@
  * engine's `PackageApi` over the same CLI the tools use, and `/import/agent`
  * hands a source that is not a package to the agent (importer skill) in a new
  * app's session, the way `/build` starts a build.
+ *
+ * And a Connect panel, for an app on another machine: the shared engine's
+ * `ConnectApi` (`/connect`, `/connect/confirm`, `/app/disconnect`) signs the
+ * agent in, and the app opens in a tab of its own, on its approval page.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { randomBytes } from "node:crypto";
@@ -29,6 +33,13 @@ import {
   binFor,
   buildKickoffPrompt,
   listKnownApps,
+  listApps,
+  appOrigin,
+  appSessionName,
+  connectAgentName,
+  connectedSessionPreamble,
+  ConnectApi,
+  type RemoteRow,
   registerHarnessProfile,
   FRAMEWORK_BLUEPRINTS,
   INSTALL_STEPS,
@@ -70,7 +81,7 @@ const AGENT_GUIDANCE =
   "knowledge outside these skills. `agent-app list` locates every known Agent App.";
 
 /** Deterministic session key per app, stable for the app's whole life. */
-const sessionKeyFor = (path: string): string => `subagent:agent-app:${basename(path)}`;
+const sessionKeyFor = (path: string): string => `subagent:agent-app:${appSessionName(path)}`;
 
 /** Context prepended to the first message of an app's session; later messages
  *  are the user's text alone. */
@@ -127,6 +138,7 @@ export default definePluginEntry({
     const tokens = new Map<string, number>();
     const builds = new Map<string, BuildEntry>();
     const packages = new PackageApi(FRAMEWORK_CLI);
+    const connect = new ConnectApi(CLI, FRAMEWORK_CLI, { agentName: connectAgentName("OpenClaw") });
 
     // subagent.run needs operator.write, which OpenClaw grants only to calls made
     // outside a request scope (a request client carries no operator scopes). Runs
@@ -237,10 +249,10 @@ export default definePluginEntry({
 
     /** Manager rows: registered apps merged with builds not yet in the registry.
      *  A build entry retires once its app is seen running. */
-    async function rows(): Promise<AppRow[]> {
-      const apps = await listKnownApps(FRAMEWORK_CLI);
+    async function rows(): Promise<Array<AppRow | RemoteRow>> {
+      const { apps, connected } = await listApps(FRAMEWORK_CLI);
       for (const a of apps) if (a.status === "running") builds.delete(a.path);
-      const out: AppRow[] = apps.map((a) => {
+      const out: Array<AppRow | RemoteRow> = apps.map((a) => {
         const b = builds.get(a.path);
         return { ...a, building: b != null && !b.ended, buildEnded: b?.ended === true };
       });
@@ -248,6 +260,8 @@ export default definePluginEntry({
         if (apps.some((a) => a.path === b.dir)) continue;
         out.push({ id: basename(b.dir), name: b.name, path: b.dir, url: null, building: !b.ended, buildEnded: b.ended, status: "stopped" });
       }
+      // Then the apps on other machines this agent is connected to, keyed by origin.
+      out.push(...connect.remoteRows(connected));
       return out;
     }
 
@@ -315,6 +329,11 @@ export default definePluginEntry({
       return { role, text: texts.join(""), tools };
     }
 
+    /** A disconnected app's session starts afresh if it is connected again. */
+    function forgetSession(path: string): void {
+      seeded.delete(sessionKeyFor(path));
+    }
+
     function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
       return new Promise((resolve, reject) => {
         let data = "";
@@ -360,6 +379,7 @@ export default definePluginEntry({
           if (method === "GET" && sub === "/apps") { send(200, { ok: true, rows: await rows() }); return; }
           if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
           if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
+          if (method === "GET" && sub === "/connect") { reply(connect.job(url.searchParams.get("job"))); return; }
 
           if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
           if (sub === "/upload") {
@@ -376,15 +396,27 @@ export default definePluginEntry({
           if (sub === "/inspect") { reply(await packages.inspect(body)); return; }
           if (sub === "/install") { reply(packages.install(body)); return; }
           if (sub === "/import/agent") { const r = await startImport(body); send(r.status, r.out); return; }
+          if (sub === "/connect") { reply(connect.connect(body)); return; }
+          if (sub === "/connect/confirm") { reply(await connect.confirm(body)); return; }
+          if (sub === "/app/disconnect") {
+            const path = String(body.path ?? "");
+            const r = await connect.disconnect(path);
+            if (r.status === 200) forgetSession(path);
+            reply(r);
+            return;
+          }
 
           if (sub === "/session/send") {
             const path = String(body.path ?? "");
             const text = String(body.text ?? "").trim();
             if (!text) { send(400, { ok: false, message: "empty message" }); return; }
             const sessionKey = sessionKeyFor(path);
-            const message = seeded.has(sessionKey) ? text : `${sessionPreamble(String(body.name ?? basename(path)), path)}\n\n${text}`;
+            const name = String(body.name ?? basename(path));
+            // A connected app (its path is its URL) is another machine's: operated, never modified.
+            const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
+            const message = seeded.has(sessionKey) ? text : `${preamble}\n\n${text}`;
             // cwd must exist; before a build's scaffold step the app dir may not.
-            await detached(() => subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${basename(path)}`, cwd: existsSync(path) ? path : APPS_DIR }));
+            await detached(() => subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${appSessionName(path)}`, cwd: existsSync(path) ? path : APPS_DIR }));
             seeded.add(sessionKey);
             send(200, { ok: true });
             return;

@@ -10,8 +10,9 @@
  *
  * Pinned: the page carries the install steps and its script parses; the
  * marketplace and import routes (catalogue, inspect, upload, install jobs);
- * and a source that is not a package going to the importer skill in a new
- * app's session.
+ * a source that is not a package going to the importer skill in a new app's
+ * session; and Connect (the sign-in job, its confirmation, a connected app's
+ * row and session, disconnect).
  */
 import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -101,7 +102,7 @@ try {
   assert.ok(cfg.blueprints.includes("blueprint-sidecar"));
   const script = /<script>\n([\s\S]*)<\/script><\/body>/.exec(page.text)[1];
   assert.doesNotThrow(() => new Function(script), "the page's script parses");
-  for (const panel of ["Marketplace", "Import", "/catalogue?search=", "/install?job=", "/import/agent", "/upload"]) {
+  for (const panel of ["Marketplace", "Import", "/catalogue?search=", "/install?job=", "/import/agent", "/upload", "Connect", "/connect?job=", "/connect/confirm", "/app/disconnect", "embed: !OPAQUE"]) {
     assert.ok(script.includes(panel), `the page has ${panel}`);
   }
   const token = cfg.token;
@@ -157,10 +158,44 @@ try {
   assert.equal(r.status, 200);
   await new Promise((d) => setTimeout(d, 600));
   assert.match(runs[1].message, /^Convert the marketplace app `kanban-online` from the marketplace `github:acme\/market@main` into a new Agent App\./);
+
+  // Connect: an app on another machine, approved in its own tab, then a tab and a session of its own.
+  const CRM = "http://127.0.0.1:8191";
+  assert.equal((await api("/connect", { method: "POST", body: { url: "./my-folder" } })).status, 400, "an address, never a folder");
+  r = await api("/connect", { method: "POST", body: { url: `${CRM}/board`, here: true } });
+  assert.equal(r.status, 200);
+  job = r.json.job;
+  while (!job.done) {
+    await new Promise((d) => setTimeout(d, 20));
+    job = (await api(`/connect?job=${job.id}`)).json.job;
+  }
+  assert.deepEqual([job.origin, job.ok, job.pending, job.embedded, job.approve.userCode], [CRM, true, true, true, "BCDF-GHJK"]);
+  r = await api("/connect/confirm", { method: "POST", body: { url: CRM, code: "GOOD-CODE" } });
+  assert.deepEqual([r.status, r.json.result.principalName], [200, "Bob"]);
+  r = await api("/connect", { method: "POST", body: { url: CRM, here: true, embed: false } });
+  assert.equal(r.json.job.embedded, false, "a frame with no real origin approves in the browser");
+
+  process.env.FAKE_REGISTRY = join(base, "registry.json");
+  writeFileSync(process.env.FAKE_REGISTRY, JSON.stringify({ ok: true, apps: [], connected: [
+    { origin: CRM, appId: "crm", name: "Team CRM", principal: "usr_bob", principalName: "Bob", expiresAt: null, status: "online" },
+  ] }));
+  r = await api("/apps");
+  const remote = r.json.rows.find((row) => row.remote);
+  assert.deepEqual([remote.path, remote.url, remote.status, remote.principalName, remote.embeddable], [CRM, CRM, "online", "Bob", true]);
+  r = await api("/session/send", { method: "POST", body: { path: CRM, name: "Team CRM", text: "How many open deals?" } });
+  assert.equal(r.status, 200);
+  await new Promise((d) => setTimeout(d, 600));
+  const crmRun = runs.at(-1);
+  assert.equal(crmRun.sessionKey, "subagent:agent-app:127.0.0.1-8191", "keyed by its host, no colon inside the last part");
+  assert.equal(crmRun.cwd, join(base, "home", "apps"));
+  assert.match(crmRun.message, /^You are working with the Agent App "Team CRM" at http:\/\/127\.0\.0\.1:8191, on another machine/);
+  assert.ok(crmRun.message.endsWith("How many open deals?"));
+  assert.equal((await api("/app/disconnect", { method: "POST", body: { path: "https://other.example.com" } })).status, 404);
+  assert.equal((await api("/app/disconnect", { method: "POST", body: { path: CRM } })).status, 200);
 } finally {
   rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-console.log("✓ openclaw: the page's panels parse; catalogue, inspect, upload and install jobs over the CLI; convert and adopt hand off to the importer skill");
+console.log("✓ openclaw: the page's panels parse; catalogue, inspect, upload and install jobs over the CLI; convert and adopt hand off to the importer skill; connect, a connected app's tab and session, disconnect");
 // The plugin's run queue keeps an interval for the gateway's lifetime.
 process.exit(0);

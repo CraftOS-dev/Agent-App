@@ -12,6 +12,10 @@
  *   inspect              a report; a `--from` naming "living" or "foreign" is not a package
  *   install … --events   one step line per step (`$FAKE_STEP_MS` apart), then the result;
  *                        an id and --from together exit 2 with no JSON, as the CLI does
+ *   <url> login --events an approve line, then the result; --no-browser leaves it pending,
+ *                        and --confirm GOOD-CODE finishes it; an address naming "stranger"
+ *                        is not an Agent App (exit 3, no JSON)
+ *   <url> logout         logs out
  *   anything else        `{ ok, bin, argv }`, and exit 1 when an argument is "BAD"
  */
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
@@ -94,7 +98,35 @@ async function install() {
   else out(result);
 }
 
-if (BIN === "agent-app" && argv[0] === "list") {
+function login() {
+  const emit = (line) => {
+    if (argv.includes("--events")) process.stdout.write(JSON.stringify(line) + "\n");
+  };
+  const app = { origin: argv[0], appId: "crm", name: "Team CRM" };
+  if (argv[0].includes("stranger")) {
+    process.stderr.write(`✗ ${argv[0]} is not an Agent App\n`);
+    process.exit(3);
+  }
+  const signedIn = { event: "result", ok: true, ...app, principal: "usr_bob", principalName: "Bob", scopes: ["*"], expiresAt: "2026-12-01T00:00:00.000Z" };
+  const confirm = flag("confirm");
+  if (confirm !== undefined) {
+    if (confirm === "GOOD-CODE") emit(signedIn);
+    else {
+      emit({ event: "result", ok: false, error: "that is not the confirmation code for this sign-in" });
+      process.exit(1);
+    }
+    return;
+  }
+  const waits = !argv.includes("--no-browser");
+  emit({ event: "approve", url: `${argv[0]}/_a2app/account#approve/BCDF-GHJK`, userCode: "BCDF-GHJK", expiresAt: "2026-11-01T00:10:00.000Z", ...app, waits });
+  emit(waits ? signedIn : { event: "result", ok: true, pending: true, ...app });
+}
+
+if (BIN === "a2app" && argv[1] === "login") {
+  login();
+} else if (BIN === "a2app" && argv[1] === "logout") {
+  process.stderr.write("✓ logged out of Team CRM\n");
+} else if (BIN === "agent-app" && argv[0] === "list") {
   const file = process.env.FAKE_REGISTRY;
   process.stdout.write(file && existsSync(file) ? readFileSync(file, "utf8") : JSON.stringify({ ok: true, apps: [] }));
 } else if (BIN === "agent-app" && argv[0] === "catalogue") {

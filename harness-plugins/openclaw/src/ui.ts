@@ -16,6 +16,11 @@
  * `install --events`, then opens the app in its tab. It never gives up on a
  * running install, so no client timeout is shorter than the CLI's own.
  *
+ * A fourth, Connect, is for an app on another machine, by its address. The app
+ * gets a tab at once, showing its approval page: the person signs in there and
+ * approves, the page posts the confirmation code back, and that tab becomes
+ * the connected app, which OpenClaw's agent then uses as them.
+ *
  * Embedding an app iframe needs a real origin, which OpenClaw grants plugin
  * frames only under `gateway.controlUi.embedSandbox: "trusted"`; the page
  * detects an opaque origin and shows that requirement instead of a broken frame.
@@ -227,6 +232,15 @@ textarea.input{min-height:120px;resize:vertical}
 .steps li.start .ic{color:var(--warn);animation:pulse 1.4s ease-in-out infinite}
 .steps li.done .ic{color:var(--ok)}
 .steps li.failed .ic,.steps li.failed .dt{color:var(--danger)}
+/* ── Connect ── */
+a.btn{text-decoration:none}
+.tab-where{flex:none;font-size:11px;color:var(--muted)}
+.center.fill{padding:0;align-items:stretch;overflow:hidden}
+.connecting{flex:1;min-width:0;display:flex;flex-direction:column}
+.connecting-head{flex:none;padding:8px 14px;border-bottom:1px solid var(--border);background:var(--bg);font-size:12px;color:var(--text)}
+.connecting iframe{flex:1;width:100%;border:none;background:#fff}
+.connecting-body{flex:1;overflow:auto;display:flex;justify-content:center;align-items:flex-start;padding:24px}
+.code-inline{font:12px var(--mono);padding:1px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text-strong)}
 </style></head><body>
 <header class="tabbar" id="tabbar"></header>
 <main>
@@ -246,6 +260,8 @@ textarea.input{min-height:120px;resize:vertical}
 <script>
 "use strict";
 const CFG = JSON.parse(document.getElementById("cfg").textContent);
+// The person's browser is on this machine: a sign-in approved there comes back to the CLI by itself.
+const LOOPBACK_HTTP = location.protocol === "http:" && /^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/.test(location.hostname);
 const OPAQUE = self.origin === "null";
 const S = {
   rows: [], active: null, side: false, log: [], sending: false, busy: new Set(), confirmDelete: null,
@@ -254,6 +270,10 @@ const S = {
   market: { q: "", tag: null, tags: [], data: null, error: null, loading: false, seq: 0, open: null },
   imp: { kind: "zip", from: "", file: null, origin: null, label: "", uploaded: false, report: null, error: null, busy: false },
   job: null,
+  // Connect: the address typed, and the sign-in in progress (a job on the server).
+  conn: { url: "", data: null, error: null, code: "", confirming: false, starting: false },
+  // What went wrong with a tab's last action, shown on its panel.
+  notice: null,
 };
 
 function api(path, body) {
@@ -278,31 +298,53 @@ async function refresh() {
   const data = await api("/apps");
   S.rows = data.rows;
   if (S.active === null) S.active = S.rows.length ? S.rows[0].path : "new";
-  if (S.active !== "new" && !S.rows.some((r) => r.path === S.active)) S.active = S.rows.length ? S.rows[0].path : "new";
+  if (S.active !== "new" && S.active !== connectKey() && !S.rows.some((r) => r.path === S.active)) S.active = S.rows.length ? S.rows[0].path : "new";
   render();
 }
 function activeRow() { return S.rows.find((r) => r.path === S.active) ?? null; }
 
 /* ── Tab strip ─────────────────────────────────────────── */
+/** An app that can be shown: a local one running here, a connected one answering. */
+function live(r) { return r.remote ? r.status === "online" : r.status === "running"; }
 function dotClass(r) {
   if (r.building) return "busy";
-  if (r.status === "running") return "ok";
-  if (r.status === "unreachable") return "warn";
+  if (live(r)) return "ok";
+  if (r.status === "unreachable" || r.status === "expired") return "warn";
   return "off";
 }
 function renderTabs() {
   const bar = document.getElementById("tabbar");
   bar.replaceChildren();
   for (const r of S.rows) {
-    const t = el("button", "tab" + (r.path === S.active ? " active" : "") + (r.status !== "running" && !r.building ? " offline" : ""));
+    const t = el("button", "tab" + (r.path === S.active ? " active" : "") + (!live(r) && !r.building ? " offline" : ""));
     t.appendChild(el("span", "dot " + dotClass(r)));
     t.appendChild(el("span", "tab-name", r.name));
+    if (r.remote) {
+      // Another machine's app: marked, and its address and who the agent acts as on hover.
+      t.appendChild(el("span", "tab-where", "\\u2197"));
+      t.title = r.url + (r.principalName ? " \\u2014 as " + r.principalName : "");
+    }
     const more = el("button", "tab-more", "\\u22EF");
     more.title = "App actions";
     more.onclick = (e) => { e.stopPropagation(); openMenu(r, more); };
     t.appendChild(more);
     t.onclick = () => { S.active = r.path; S.confirmDelete = null; closeMenu(); render(); };
     bar.appendChild(t);
+  }
+  if (S.conn.data) {
+    // The app being connected: its tab, before it is one of the rows.
+    const key = connectKey();
+    const ct = el("button", "tab" + (S.active === key ? " active" : ""));
+    ct.appendChild(el("span", "dot " + (connectStage(S.conn) === "error" ? "warn" : "busy")));
+    ct.appendChild(el("span", "tab-name", (S.conn.data.approve && S.conn.data.approve.name) || hostOf(S.conn.data.origin)));
+    ct.appendChild(el("span", "tab-where", "\\u2197"));
+    ct.title = S.conn.data.origin + " \\u2014 connecting";
+    const stop = el("button", "tab-more", "\\u2715");
+    stop.title = "Stop connecting";
+    stop.onclick = (e) => { e.stopPropagation(); cancelConnect(); };
+    ct.appendChild(stop);
+    ct.onclick = () => { S.active = key; closeMenu(); render(); };
+    bar.appendChild(ct);
   }
   const nt = el("button", "tab newtab" + (S.active === "new" ? " active" : ""), "New +");
   nt.onclick = () => { S.active = "new"; closeMenu(); render(); };
@@ -314,14 +356,18 @@ function openMenu(r, anchor) {
   const m = document.getElementById("menu");
   m.replaceChildren();
   const item = (label, cls, fn) => { const b = el("button", cls, label); b.onclick = fn; m.appendChild(b); };
-  if (r.status === "running") item("Pause", "", () => { closeMenu(); act(r, "stop"); });
+  // Another machine's app is opened, used and disconnected from here, never launched or deleted.
+  if (r.remote) item("Open in browser", "", () => { closeMenu(); open(r.url, "_blank", "noopener"); });
+  else if (r.status === "running") item("Pause", "", () => { closeMenu(); act(r, "stop"); });
   else if (!r.building) item("Launch", "", () => { closeMenu(); act(r, "serve"); });
   item(S.side ? "Hide session" : "Show session", "", () => { closeMenu(); toggleSide(); });
   m.appendChild(el("hr"));
-  if (S.confirmDelete === r.path) {
-    item("Confirm delete \\u2014 removes files", "danger", () => { closeMenu(); removeApp(r); });
+  if (S.confirmDelete !== r.path) {
+    item(r.remote ? "Disconnect\\u2026" : "Delete\\u2026", "danger", () => { S.confirmDelete = r.path; openMenu(r, anchor); });
+  } else if (r.remote) {
+    item("Confirm disconnect \\u2014 revokes OpenClaw\\u2019s access", "danger", () => { closeMenu(); disconnectApp(r); });
   } else {
-    item("Delete\\u2026", "danger", () => { S.confirmDelete = r.path; openMenu(r, anchor); });
+    item("Confirm delete \\u2014 removes files", "danger", () => { closeMenu(); removeApp(r); });
   }
   const rect = anchor.getBoundingClientRect();
   m.hidden = false;
@@ -329,12 +375,24 @@ function openMenu(r, anchor) {
   m.style.top = rect.bottom + 6 + "px";
 }
 function closeMenu() { document.getElementById("menu").hidden = true; S.confirmDelete = null; }
-addEventListener("click", (e) => { if (!document.getElementById("menu").contains(e.target)) closeMenu(); });
+// The event's own path, not menu.contains(target): "Delete…" re-renders the
+// menu, which detaches the clicked button before this listener runs, and a
+// detached target would read as an outside click and close the confirm step.
+addEventListener("click", (e) => { if (!e.composedPath().includes(document.getElementById("menu"))) closeMenu(); });
 
 /* ── Lifecycle actions ─────────────────────────────────── */
 async function act(r, verb) {
   S.busy.add(r.path); render();
   try { await api("/app/" + verb, { path: r.path }); } finally { S.busy.delete(r.path); }
+  await refresh();
+}
+async function disconnectApp(r) {
+  S.notice = null;
+  S.busy.add(r.path); render();
+  let out;
+  try { out = await api("/app/disconnect", { path: r.path }); } finally { S.busy.delete(r.path); }
+  if (out.ok) S.active = null;
+  else S.notice = { path: r.path, text: out.message || "The disconnect failed." };
   await refresh();
 }
 async function removeApp(r) {
@@ -353,10 +411,10 @@ function renderView() {
   const panel = document.getElementById("panel");
   const framesBox = document.getElementById("frames");
   const r = activeRow();
-  const showFrame = r && r.status === "running" && !OPAQUE;
+  const showFrame = !!(r && live(r) && r.url && embeddable(r));
   for (const [path, f] of frames) {
     const row = S.rows.find((x) => x.path === path);
-    if (!row || row.status !== "running") { f.remove(); frames.delete(path); }
+    if (!row || !live(row) || !embeddable(row)) { f.remove(); frames.delete(path); }
     else f.style.display = showFrame && path === r.path ? "block" : "none";
   }
   if (showFrame && !frames.has(r.path)) {
@@ -366,22 +424,44 @@ function renderView() {
     frames.set(r.path, f);
     framesBox.appendChild(f);
   }
-  panel.hidden = !!showFrame;
-  const isNew = S.active === "new" || !r;
+  panel.hidden = showFrame;
+  const notice = S.notice && r && S.notice.path === r.path ? S.notice.text : "";
+  const connecting = S.active !== null && S.active === connectKey();
+  const isNew = !connecting && (S.active === "new" || !r);
   const key = showFrame
     ? "frame:" + r.path
-    : isNew
-      ? "new:" + S.newMode + (S.job ? ":job" : "")
-      : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side].join("|");
+    : connecting
+      ? "connecting:" + S.active + ":" + connectStage(S.conn)
+      : isNew
+        ? "new:" + S.newMode + (S.job ? ":job" : "") + (S.conn.starting ? ":starting" : "") + (S.conn.error && !S.conn.data ? ":err" : "")
+        : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side, notice].join("|");
   if (key === viewKey) return;
   viewKey = key;
   if (showFrame) return;
   panel.replaceChildren();
+  connTab = null;
   panel.classList.toggle("top", isNew);
+  panel.classList.toggle("fill", connecting);
+  if (connecting) { panel.appendChild(connectTabView()); return; }
   if (isNew) { panel.appendChild(newPanel()); return; }
-  panel.appendChild(appPanel(r));
+  panel.appendChild(appPanel(r, notice));
 }
-function appPanel(r) {
+/**
+ * Whether a row's app can be framed here: never in a frame with no real origin
+ * (see the top), and a connected app only if an https page is not asked to
+ * frame it over http.
+ */
+function embeddable(r) { return !OPAQUE && (!r.remote || (r.embeddable && embeddableUrl(r.url))); }
+/** Why a connected app is not shown inside this page; hint is what its frame policy says. */
+function noFrameReason(hint) {
+  if (hint) return hint;
+  return OPAQUE
+    ? 'Showing it here needs a real browser origin inside this frame: set gateway.controlUi.embedSandbox: "trusted" in your OpenClaw config and restart the gateway.'
+    : "This page is served over https and the app over http, so it cannot be shown inside it.";
+}
+function embeddableUrl(url) { return !(location.protocol === "https:" && /^http:/.test(url)); }
+function appPanel(r, notice) {
+  if (r.remote) return remotePanel(r, notice);
   const c = el("div", "card");
   const busy = S.busy.has(r.path);
   if (r.building) {
@@ -417,6 +497,44 @@ function appPanel(r) {
   launch.disabled = busy;
   launch.onclick = () => act(r, "serve");
   row.appendChild(launch);
+  const sess = el("button", "btn", "Show session");
+  sess.onclick = () => toggleSide(true);
+  row.appendChild(sess);
+  c.appendChild(row);
+  return c;
+}
+
+/** A connected app that is not shown inside this page: why, and what can be done. */
+function remotePanel(r, notice) {
+  const c = el("div", "card");
+  const who = r.principalName ? " as " + r.principalName : "";
+  const until = r.expiresAt ? ", until " + new Date(r.expiresAt).toLocaleDateString() : "";
+  if (r.status === "online") {
+    c.appendChild(el("h2", null, r.name));
+    c.appendChild(el("p", "sub", "Connected" + who + until + ". OpenClaw\\u2019s agent can use it too: ask in the session panel."));
+    c.appendChild(el("p", "sub", noFrameReason(r.embedHint)));
+  } else if (r.status === "expired") {
+    c.appendChild(el("h2", null, "OpenClaw\\u2019s access to " + r.name + " expired"));
+    c.appendChild(el("p", "sub", "Sign in again to keep using it here; you approve it in the app, as before."));
+  } else if (r.status === "unreachable") {
+    c.appendChild(el("h2", null, r.name + " answers as a different app"));
+    c.appendChild(el("p", "sub", "Its address now belongs to something else, so OpenClaw will not use it. Disconnect it, or ask the app\\u2019s owner what changed."));
+  } else {
+    c.appendChild(el("h2", null, r.name + " is not answering"));
+    c.appendChild(el("p", "sub", "It runs on another machine and did not answer just now. The connection is kept; it shows here again when the app is back."));
+  }
+  c.appendChild(el("p", "meta", r.url));
+  if (notice) c.appendChild(el("p", "err", notice));
+  const row = el("div", "row");
+  if (r.status === "expired") {
+    const again = el("button", "btn primary", "Reconnect");
+    again.onclick = () => { S.active = "new"; S.newMode = "connect"; S.conn = freshConn(r.url); render(); };
+    row.appendChild(again);
+  } else if (r.status !== "unreachable") {
+    const link = el("a", "btn" + (r.status === "online" ? " primary" : ""), "Open in browser");
+    link.href = r.url; link.target = "_blank"; link.rel = "noopener";
+    row.appendChild(link);
+  }
   const sess = el("button", "btn", "Show session");
   sess.onclick = () => toggleSide(true);
   row.appendChild(sess);
@@ -468,7 +586,7 @@ async function submitBuild(btn) {
 }
 
 /* ── New tab: build · marketplace · import ─────────────── */
-const MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"]];
+const MODES = [["build", "Build"], ["market", "Marketplace"], ["import", "Import"], ["connect", "Connect"]];
 const KINDS = { "agent-app": "Agent App package", "living-ui": "CraftBot Living UI app", foreign: "Not an Agent App" };
 const ROUTES = {
   convert: "Convert: the agent rebuilds it as a new Agent App, with the original source kept read-only in reference/source/. Nothing of the original code runs afterward.",
@@ -487,7 +605,7 @@ function newPanel() {
     modes.appendChild(b);
   }
   wrap.appendChild(modes);
-  wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : buildForm());
+  wrap.appendChild(S.newMode === "market" ? marketView() : S.newMode === "import" ? importView() : S.newMode === "connect" ? connectView() : buildForm());
   return wrap;
 }
 function errorBox(message, retry) {
@@ -815,6 +933,200 @@ function handoff(origin, routes, name) {
   v.append(row, err);
   v.appendChild(el("p", "note", "The agent works in the new app\\u2019s session, in the side panel, and settles the details with you there through the importer skill."));
   return v;
+}
+
+/*
+ * Connect: sign OpenClaw's agent in to an app on another machine. The app gets
+ * a tab of its own at once, showing its approval page: the person signs in
+ * there as themselves and approves, the page hands the confirmation code back
+ * (postMessage), and the same tab becomes the connected app. Where this page
+ * may not embed the app, the tab says why and links to the approval page.
+ */
+let connTab = null;
+let connTimer = 0;
+const freshConn = (url) => ({ url: url || "", data: null, error: null, code: "", confirming: false, starting: false });
+/** The connecting app's tab, while a sign-in is in progress. */
+function connectKey() { return S.conn.data ? "connect:" + S.conn.data.origin : null; }
+function hostOf(origin) { try { return new URL(origin).host; } catch { return origin; } }
+function connectView() {
+  const v = el("div", "pane");
+  v.appendChild(el("h1", null, "Connect"));
+  v.appendChild(el("p", "lead", "Use an Agent App that runs somewhere else, like your team\\u2019s CRM, by its address. It opens here in a tab: sign in to it and approve OpenClaw, then you and OpenClaw\\u2019s agent both use it, as you."));
+  const input = el("input", "input");
+  input.placeholder = "https://crm.example.com"; input.value = S.conn.url; input.autocomplete = "off"; input.spellcheck = false;
+  input.oninput = () => { S.conn.url = input.value; };
+  const go = el("button", "btn primary", S.conn.starting ? "Connecting\\u2026" : "Connect");
+  go.disabled = S.conn.starting;
+  go.onclick = () => startConnect();
+  input.onkeydown = (e) => { if (e.key === "Enter") go.click(); };
+  const row = el("div", "row");
+  row.style.marginTop = "12px";
+  row.appendChild(go);
+  v.append(input, row);
+  if (S.conn.error && !S.conn.data) v.appendChild(errorBox(S.conn.error));
+  return v;
+}
+function startConnect() {
+  clearTimeout(connTimer);
+  if (S.active === connectKey()) S.active = "new"; // a retry from the connecting tab
+  const url = S.conn.url.trim();
+  S.conn = freshConn(url);
+  if (!url) { S.conn.error = "Type the app\\u2019s address."; viewKey = ""; render(); return; }
+  const conn = S.conn;
+  conn.starting = true;
+  render();
+  const failed = (message) => {
+    if (S.conn !== conn) return;
+    conn.starting = false; conn.error = message; viewKey = "";
+    render();
+  };
+  api("/connect", { url, here: LOOPBACK_HTTP, embed: !OPAQUE }).then((out) => {
+    if (S.conn !== conn) return;
+    if (!out.ok) { failed(out.message || "The sign-in did not start."); return; }
+    conn.starting = false;
+    conn.data = out.job;
+    S.active = connectKey(); // its tab, opened at once
+    render();
+    pollConnect();
+  }, (e) => failed(String((e && e.message) || e)));
+}
+/** What the connecting tab shows; a change rebuilds it, anything else only updates its status line. */
+function connectStage(conn) {
+  const d = conn.data;
+  if (!d) return "none";
+  if (conn.error || (d.done && !d.ok)) return "error";
+  if (!d.approve) return "checking";
+  if (d.embedded && embeddableUrl(d.origin)) return "frame";
+  return "link" + (d.done && d.pending ? ":code" : "");
+}
+function pollConnect() {
+  clearTimeout(connTimer);
+  const conn = S.conn;
+  if (!conn.data || conn.data.done) return;
+  connTimer = setTimeout(() => {
+    api("/connect?job=" + encodeURIComponent(conn.data.id)).then((out) => {
+      if (S.conn !== conn) return;
+      if (!out.ok) { conn.error = out.message || "The sign-in is no longer known here."; render(); return; }
+      const before = connectStage(conn);
+      conn.data = out.job;
+      if (connectStage(conn) !== before) render();
+      else renderConnectStatus();
+      if (conn.data.done) connected(conn);
+      else pollConnect();
+    }, () => { if (S.conn === conn) pollConnect(); }); // a dropped poll is retried; the sign-in goes on regardless
+  }, 1000);
+}
+function confirmConnect(code) {
+  const conn = S.conn;
+  code = String(code || "").trim();
+  if (!code || conn.confirming) return;
+  conn.error = null;
+  conn.confirming = true;
+  renderConnectStatus();
+  const failed = (message) => {
+    if (S.conn !== conn) return;
+    conn.confirming = false; conn.error = message;
+    render();
+  };
+  api("/connect/confirm", { url: conn.data.origin, code }).then((out) => {
+    if (S.conn !== conn) return;
+    if (!out.ok) { failed(out.message || "The sign-in did not finish."); return; }
+    conn.confirming = false;
+    conn.data = Object.assign({}, conn.data, { pending: false, result: out.result });
+    connected(conn);
+  }, (e) => failed(String((e && e.message) || e)));
+}
+// The embedded approval page hands back the code: only from that frame, that
+// origin, and for this request's code.
+addEventListener("message", (e) => {
+  const d = S.conn.data;
+  const m = e.data;
+  if (!d || !d.approve || !connTab || !connTab.frame || e.source !== connTab.frame.contentWindow) return;
+  if (e.origin !== d.origin || !m || m.a2app !== "confirmation" || m.userCode !== d.approve.userCode) return;
+  confirmConnect(m.confirmation);
+});
+/** Signed in: the connecting tab becomes the app's own. A code still to bring back keeps it open. */
+function connected(conn) {
+  if (!conn.data.ok || conn.data.pending) return;
+  const origin = conn.data.origin;
+  const key = connectKey();
+  // A failed list still ends the sign-in; the next poll brings the app's row.
+  refresh().catch(() => {}).then(() => {
+    if (S.conn !== conn) return;
+    S.conn = freshConn("");
+    if (S.active === key || S.active === "new") S.active = origin;
+    render();
+  });
+}
+function cancelConnect() {
+  clearTimeout(connTimer);
+  const key = connectKey();
+  S.conn = freshConn(S.conn.url);
+  if (S.active === key) S.active = "new";
+  render();
+}
+/** The connecting app's tab: its approval page, embedded, under a line saying what to check. */
+function connectTabView() {
+  const conn = S.conn;
+  const d = conn.data;
+  const stage = connectStage(conn);
+  const v = el("div", "connecting");
+  const status = el("div", "connecting-head");
+  v.appendChild(status);
+  connTab = { status, frame: null };
+  if (stage === "error") {
+    const body = el("div", "connecting-body");
+    body.appendChild(errorBox(conn.error || d.error || "The sign-in stopped.", startConnect));
+    v.appendChild(body);
+  } else if (stage === "frame") {
+    const f = document.createElement("iframe");
+    f.src = d.approve.url;
+    f.title = "Approve OpenClaw in " + (d.approve.name || d.origin);
+    connTab.frame = f;
+    v.appendChild(f);
+  } else if (stage.startsWith("link")) {
+    const body = el("div", "connecting-body");
+    const card = el("div", "card");
+    card.appendChild(el("h2", null, d.approve.name || hostOf(d.origin)));
+    card.appendChild(el("p", "sub", noFrameReason(d.embedHint)));
+    const link = el("a", "btn primary", "Open the approval page");
+    link.href = d.approve.url; link.target = "_blank"; link.rel = "noopener";
+    card.appendChild(link);
+    if (stage === "link:code") {
+      const paste = el("div");
+      paste.style.marginTop = "16px";
+      paste.appendChild(el("p", "sub", "Approve there, then paste the confirmation code it shows:"));
+      const code = el("input", "input");
+      code.placeholder = "Confirmation code, like ABCD-EFGH"; code.value = conn.code; code.autocomplete = "off";
+      const finish = el("button", "btn primary", "Finish");
+      finish.disabled = !conn.code.trim();
+      code.oninput = () => { conn.code = code.value; finish.disabled = !code.value.trim(); };
+      code.onkeydown = (e) => { if (e.key === "Enter") finish.click(); };
+      finish.onclick = () => confirmConnect(code.value);
+      const row = el("div", "row");
+      row.style.marginTop = "12px";
+      row.appendChild(finish);
+      paste.append(code, row);
+      card.appendChild(paste);
+    }
+    body.appendChild(card);
+    v.appendChild(body);
+  }
+  renderConnectStatus();
+  return v;
+}
+function renderConnectStatus() {
+  if (!connTab) return;
+  const conn = S.conn;
+  const d = conn.data;
+  const line = connTab.status;
+  line.replaceChildren();
+  if (!d) return;
+  const name = (d.approve && d.approve.name) || hostOf(d.origin);
+  if (conn.confirming || (d.done && d.ok && !d.pending)) line.append("Approved. Finishing the sign-in to " + name + "\\u2026");
+  else if (!d.approve) line.append("Checking " + d.origin + "\\u2026");
+  else if (conn.error || (d.done && !d.ok)) line.append("The sign-in to " + name + " stopped.");
+  else line.append("Sign in to " + name + " as yourself if it asks, check the code is ", el("span", "code-inline", d.approve.userCode), ", and approve. OpenClaw\\u2019s agent then acts as you there, within what you can do.");
 }
 
 /* An install: a job on the server, polled until it ends, then the app opens in its tab. */

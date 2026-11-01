@@ -10,7 +10,8 @@
  *
  * Beside the build form, the page has a Marketplace and an Import panel. Their
  * routes (`/catalogue`, `/inspect`, `/install`, `/upload`) are the shared
- * engine's `PackageApi` over the same CLI the tools use, and `/import/agent`
+ * engine's `PackageApi` over the same CLI the tools use (and Connect, for an
+ * app on another machine, is its `ConnectApi`), and `/import/agent`
  * hands a source that is not a package to the agent (importer skill) in a new
  * app's session, the way `/build` starts a build.
  *
@@ -30,6 +31,13 @@ import {
   runA2App,
   buildKickoffPrompt,
   listKnownApps,
+  listApps,
+  appOrigin,
+  appSessionName,
+  connectAgentName,
+  connectedSessionPreamble,
+  ConnectApi,
+  type RemoteRow,
   FRAMEWORK_BLUEPRINTS,
   INSTALL_STEPS,
   PackageApi,
@@ -41,6 +49,7 @@ import { appManagerHtml } from "./ui.js";
 
 /** Build/evolve and operate binaries. Override with AGENT_APP_CLI / A2APP_CLI. */
 const FRAMEWORK_CLI = process.env.AGENT_APP_CLI ?? "agent-app";
+const CLI = process.env.A2APP_CLI ?? "a2app";
 
 /** Where new apps are created. The framework imposes no app home (the registry
  *  tracks absolute paths), so the directory convention is the host's. */
@@ -52,7 +61,7 @@ const BUILD_STAMP = process.env.A2APP_PLUGIN_BUILD ?? "dev";
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Deterministic session id per app, stable for the app's whole life. */
-const sessionIdFor = (path: string): string => `agent-app:${basename(path)}`;
+const sessionIdFor = (path: string): string => `agent-app:${appSessionName(path)}`;
 
 const sessionPreamble = (name: string, path: string): string =>
   `You are working on the Agent App "${name}" at \`${path}\`. For a code or feature change ` +
@@ -124,6 +133,7 @@ export function registerManager(ctx: ManagerHost): () => void {
   const builds = new Map<string, BuildEntry>();
   const handles = new Map<string, DshAgentHandle>();
   const packages = new PackageApi(FRAMEWORK_CLI);
+  const connect = new ConnectApi(CLI, FRAMEWORK_CLI, { agentName: connectAgentName("dsh") });
 
   const mintToken = (): string => {
     const now = Date.now();
@@ -220,10 +230,10 @@ export function registerManager(ctx: ManagerHost): () => void {
     return session.deriveMessages().map(viewMessage).filter((m) => m.text !== "" || m.tools.length > 0);
   }
 
-  async function rows(): Promise<AppRow[]> {
-    const apps = await listKnownApps(FRAMEWORK_CLI);
+  async function rows(): Promise<Array<AppRow | RemoteRow>> {
+    const { apps, connected } = await listApps(FRAMEWORK_CLI);
     for (const a of apps) if (a.status === "running") builds.delete(a.path);
-    const out: AppRow[] = apps.map((a) => {
+    const out: Array<AppRow | RemoteRow> = apps.map((a) => {
       const b = builds.get(a.path);
       return { ...a, building: b != null && !b.ended, buildEnded: b?.ended === true };
     });
@@ -231,6 +241,8 @@ export function registerManager(ctx: ManagerHost): () => void {
       if (apps.some((a) => a.path === b.dir)) continue;
       out.push({ id: basename(b.dir), name: b.name, path: b.dir, url: null, building: !b.ended, buildEnded: b.ended, status: "stopped" });
     }
+    // Then the apps on other machines this agent is connected to, keyed by origin.
+    out.push(...connect.remoteRows(connected));
     return out;
   }
 
@@ -339,6 +351,7 @@ export function registerManager(ctx: ManagerHost): () => void {
         if (method === "GET" && sub === "/apps") { send(200, { ok: true, rows: await rows() }); return; }
         if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
         if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
+        if (method === "GET" && sub === "/connect") { reply(connect.job(url.searchParams.get("job"))); return; }
         if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
         if (sub === "/upload") {
           // The zip itself, not JSON: streamed to a private file, bounded as it arrives.
@@ -354,12 +367,18 @@ export function registerManager(ctx: ManagerHost): () => void {
         if (sub === "/inspect") { reply(await packages.inspect(body)); return; }
         if (sub === "/install") { reply(packages.install(body)); return; }
         if (sub === "/import/agent") { const r = await startImport(body); send(r.status, r.out); return; }
+        if (sub === "/connect") { reply(connect.connect(body)); return; }
+        if (sub === "/connect/confirm") { reply(await connect.confirm(body)); return; }
+        if (sub === "/app/disconnect") { reply(await connect.disconnect(body.path)); return; }
         if (sub === "/session/send") {
           const path = String(body.path ?? "");
           const text = String(body.text ?? "").trim();
           if (!text) { send(400, { ok: false, message: "empty message" }); return; }
           const seeded = transcript(sessionIdFor(path)).length > 0;
-          const message = seeded ? text : `${sessionPreamble(String(body.name ?? basename(path)), path)}\n\n${text}`;
+          const name = String(body.name ?? basename(path));
+          // A connected app (its path is its URL) is another machine's: operated, never modified.
+          const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
+          const message = seeded ? text : `${preamble}\n\n${text}`;
           await deliver(sessionIdFor(path), existsSync(path) ? path : APPS_DIR, message);
           send(200, { ok: true });
           return;

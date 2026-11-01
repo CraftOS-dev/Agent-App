@@ -4,8 +4,8 @@ Per-harness **plugins**: each exposes the framework in the harness's own plugin 
 
 | Directory | Harness | Language / API | What it registers |
 |---|---|---|---|
-| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 22 build, operate and package tools, skills, display, `runA2App`, `registerHarnessProfile`, and the manager routes for the marketplace and import (`PackageApi`, install jobs from `--events`); every plugin below uses it |
-| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel; a New + tab with a build form, a **Marketplace** and an **Import** panel) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
+| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 22 build, operate and package tools, skills, display, `runA2App`, `registerHarnessProfile`, and the manager routes for the marketplace, import and connect (`PackageApi`, install jobs from `--events`, `ConnectApi`); every plugin below uses it |
+| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel; a New + tab with a build form, a **Marketplace**, an **Import** and a **Connect** panel) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
 | [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)`; `scripts/build.py` stages a self-contained `dist/` | The 22 tools via `ctx.register_tool(...)` (a Python port of the engine), the six skills, `/agent-app` + `hermes agent-app`, and an "Agent Apps" **dashboard tab** like OpenClaw's (also in hermes-webui) |
 | [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 19 tools via `ctx.tools.register(defineTool(...))`, each run by the engine's tool of the same name; an "Agent Apps" manager like OpenClaw's in a sidebar panel |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 15 actions in the `agent_app` action set, the marketplace and import ones under CraftBot's own names |
@@ -25,6 +25,10 @@ Every surface installs through the same CLI, so an app arrives in the same state
 - **dsh** ([dsh/](dsh/)): the five package tools beside the others, and the same panels in the dsh manager.
 - **CraftBot** ([craftbot/](craftbot/)): `agent_app_marketplace_list`, `agent_app_marketplace_install`, `agent_app_inspect` and `agent_app_import`, with CraftBot's own names and arguments, so its skills and agents keep working when it moves to this framework.
 - **Pi** ([pi/](pi/)): the `/agent-app` prompt routes install, import and marketplace requests to the importer skill, and the agent runs the CLI with its bash tool.
+
+## Connecting to an app on another machine
+
+An Agent App someone else runs (a team's CRM on a public domain) is used by its address, never installed: `a2app <url> login` signs the agent in as the person who approves it in the app, and every `a2app <url> …` call then acts as them ([auth spec](../spec/v0_2/auth.md), [connect skill](../skills/connect/SKILL.md)). The manager tabs of Hermes, OpenClaw and dsh have a **Connect** panel for it: the app opens at once in a tab of its own on its approval page, the person signs in there and approves, the page hands the confirmation code back, and the tab becomes the app, signed in, which the agent then uses too. Where the tab cannot embed the app it says why, and links to the approval page in the browser instead. The routes are the shared engine's `ConnectApi` (in Hermes, its Python port), and `agent-app list` shows connected apps beside this machine's.
 
 ## Showing a launched app
 

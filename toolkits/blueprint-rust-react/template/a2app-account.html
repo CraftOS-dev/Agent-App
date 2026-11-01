@@ -423,8 +423,10 @@
             el("p", null, el("strong", null, ask.agentName || "An agent"), ` wants to use ${app.name} as you.`),
             el("p", { class: "small" }, "Code ", el("span", { class: "code" }, ask.userCode), " — check it matches what the agent shows."),
             el("p", { class: "small" },
-              `Asked ${minutesAgo === 0 ? "just now" : `${minutesAgo} minute${minutesAgo === 1 ? "" : "s"} ago`}, by an agent `,
-              ask.loopback ? "on this computer: approving returns you to it." : "elsewhere: approving gives you a code to hand it."),
+              `Asked ${minutesAgo === 0 ? "just now" : `${minutesAgo} minute${minutesAgo === 1 ? "" : "s"} ago`}, `,
+              window.parent !== window ? "by the agent showing you this page: approving finishes its sign-in."
+                : ask.loopback ? "by an agent on this computer: approving returns you to it."
+                  : "by an agent elsewhere: approving gives you a code to hand it."),
             el("p", { class: "small" }, el("strong", null, "Approve only a request your own agent just showed you."),
               " The name above is whatever the requester typed; a link someone sent you is not your agent asking."),
             el("p", { class: "small" }, `It asks to: ${askedAll ? "do everything you can do" : ask.scopes.join(", ")}, for ${days >= 1 ? `${days} day${days === 1 ? "" : "s"}` : `${Math.round(ask.expiresIn / 60)} minutes`}.`),

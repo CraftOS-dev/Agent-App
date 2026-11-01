@@ -609,12 +609,16 @@ class Manager:
 
     def connect(self, body: dict) -> tuple[int, dict]:
         """Start signing Hermes's agent in to an app on another machine: a job
-        the page polls. `here` says the page runs in a browser on this machine,
-        so the CLI waits for that browser to come back with the code."""
+        the page polls. Where this page may embed the app, it shows the approval
+        page in a tab of its own, which hands the code back to finish with (the
+        CLI waits for it: `--no-browser`). Otherwise the approval opens in the
+        browser; `here` says that browser is on this machine, so it comes back
+        to the CLI by itself (`--print-only`)."""
         origin = engine.app_origin(body.get("url"))
         if origin is None:
             return 400, {"ok": False, "message": "Type the app's address, like https://crm.example.com."}
-        return 200, {"ok": True, "job": self.connects.start(origin, body.get("here") is True)}
+        hint = self.frame_policy(origin)
+        return 200, {"ok": True, "job": self.connects.start(origin, hint is not None and body.get("here") is True, hint)}
 
     def connect_job(self, job_id: str) -> tuple[int, dict]:
         job = self.connects.get(job_id)

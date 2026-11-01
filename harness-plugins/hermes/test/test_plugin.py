@@ -1001,16 +1001,18 @@ class ConnectApi(unittest.TestCase):
     def logins(self) -> list[list[str]]:
         return [c["argv"] for c in self.box.recorded() if c["bin"] == "a2app" and c["argv"][1:2] == ["login"]]
 
-    def test_a_browser_here_signs_in_and_the_app_becomes_a_tab(self) -> None:
+    def test_an_embeddable_app_is_approved_in_its_own_tab(self) -> None:
+        # The dashboard frames any app: the approval page shows in the app's tab,
+        # which hands the code back, so the CLI waits for that code.
         r = self.client.post(self.API + "/connect", json={"url": "crm.example.com", "here": True})
         self.assertEqual(r.status_code, 200, r.text)
         job = self.wait_job(r.json()["job"]["id"])
-        self.assertTrue(job["ok"], job)
-        self.assertFalse(job["pending"])
-        self.assertEqual((job["approve"]["userCode"], job["approve"]["waits"]), ("BCDF-GHJK", True), "the page learns the link and the code")
-        self.assertEqual(job["result"]["principalName"], "Bob")
+        self.assertEqual((job["ok"], job["pending"], job["embedded"], job["embedHint"]), (True, True, True, None), job)
+        self.assertEqual(job["approve"]["userCode"], "BCDF-GHJK", "the tab learns the link and the code")
         self.assertEqual(self.logins()[-1][0], "https://crm.example.com", "a bare domain is signed in to over https")
-        self.assertIn("--print-only", self.logins()[-1], "the page opens the link itself; the CLI waits for the browser to come back")
+        self.assertIn("--no-browser", self.logins()[-1], "nothing opens a browser: the page shows the approval itself")
+        done = self.client.post(self.API + "/connect/confirm", json={"url": "https://crm.example.com", "code": "GOOD-CODE"})
+        self.assertEqual((done.status_code, done.json()["result"]["principalName"]), (200, "Bob"), "the code the page handed back finishes it")
 
         self.box.set_registry([], [{"origin": "https://crm.example.com", "appId": "crm", "name": "Team CRM", "principalName": "Bob", "expiresAt": "2026-12-01T00:00:00.000Z", "status": "online"}])
         rows = self.client.get(self.API + "/apps").json()["rows"]
@@ -1020,7 +1022,15 @@ class ConnectApi(unittest.TestCase):
                          ("https://crm.example.com", "https://crm.example.com", True, "online", "Bob"))
         self.assertEqual((row["embeddable"], row["embedHint"]), (True, None), "the dashboard frames any app")
 
+    def test_an_app_this_page_cannot_embed_is_approved_in_the_browser(self) -> None:
+        self.manager.frame_policy = lambda origin: f"add {origin} to the frame list"
+        job = self.wait_job(self.client.post(self.API + "/connect", json={"url": "https://crm.example.com", "here": True}).json()["job"]["id"])
+        self.assertEqual((job["embedded"], job["embedHint"]), (False, "add https://crm.example.com to the frame list"), "the tab says why")
+        self.assertEqual((job["ok"], job["pending"], job["approve"]["waits"]), (True, False, True), "a browser on this machine comes back by itself")
+        self.assertIn("--print-only", self.logins()[-1])
+
     def test_a_browser_elsewhere_finishes_with_the_confirmation_code(self) -> None:
+        self.manager.frame_policy = lambda origin: "not embeddable here"
         job = self.wait_job(self.client.post(self.API + "/connect", json={"url": "https://crm.example.com", "here": False}).json()["job"]["id"])
         self.assertEqual((job["ok"], job["pending"], job["approve"]["waits"]), (True, True, False), "pending the code the person brings back")
         self.assertIn("--no-browser", self.logins()[-1])

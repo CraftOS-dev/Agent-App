@@ -147,6 +147,12 @@ textarea.aa-input { min-height: 120px; resize: vertical; }
 
 /* ── New tab: build · marketplace · import ── */
 .aa-center.aa-top { align-items: flex-start; }
+.aa-center.aa-fill { padding: 0; display: block; overflow: hidden; }
+.aa-connecting { display: flex; flex-direction: column; height: 100%; }
+.aa-connecting-head { flex: none; padding: 8px 14px; border-bottom: 1px solid var(--aa-border); background: var(--aa-subtle); font-size: 12px; color: var(--aa-fg); }
+.aa-connecting iframe { flex: 1; width: 100%; border: none; background: #fff; }
+.aa-connecting-body { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 24px; }
+.aa-code-inline { font: 12px var(--aa-mono); padding: 1px 6px; border: 1px solid var(--aa-border); border-radius: var(--aa-radius-sm); background: var(--aa-base); }
 .aa-newpane { width: 100%; max-width: 560px; }
 .aa-newpane.wide { max-width: 980px; }
 .aa-modes { display: inline-flex; gap: 2px; padding: 3px; margin: 0 0 18px; border: 1px solid var(--aa-border); border-radius: var(--aa-radius); background: var(--aa-base); }

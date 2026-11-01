@@ -395,6 +395,17 @@
             location.assign(d.json.redirect);
             return null;
           }
+          if (window.parent !== window) {
+            // Embedded in the agent's own interface (a harness page, which this
+            // page's frame-ancestors allows): hand it the code to finish with.
+            // Only whoever started this request can redeem it.
+            window.parent.postMessage({ a2app: "confirmation", userCode: ask.userCode, confirmation: d.json.confirmation }, "*");
+            show(header("Approve an agent"), el("section", null,
+              el("p", null, `Approved. ${ask.agentName || "The agent"} finishes signing in.`),
+              el("p", { class: "muted small" }, "If nothing happens, give it this confirmation code: ", el("span", { class: "code" }, d.json.confirmation)),
+            ));
+            return null;
+          }
           show(header("Approve an agent"), el("section", null,
             el("p", null, `Approved. To finish, give ${ask.agentName || "the agent"} this confirmation code:`),
             el("p", null, el("span", { class: "code" }, d.json.confirmation)),

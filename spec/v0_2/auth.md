@@ -153,6 +153,7 @@ Codes:
 
 - **An agent on the person's computer** sends `loopbackPort` (1024–65535) and waits on `http://127.0.0.1:<loopbackPort>/a2app/callback` (RFC 8252). The approval's `redirect` is that URL with `?confirmation=<code>`, and the account page sends the browser there. The code reaches only the computer the person approved on.
 - **An agent elsewhere** sends no port. The account page shows the code, for the person to give to the agent they are running themselves.
+- **An agent whose own interface embeds the account page** (a harness page its `frame-ancestors` allows, §10) sends no port either. On approval the page also posts `{a2app: "confirmation", userCode, confirmation}` to its parent window, which finishes the sign-in with it.
 
 Five wrong codes void the request.
 

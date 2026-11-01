@@ -814,14 +814,17 @@ def parse_login_event(line: str) -> dict | None:
 
 class ConnectJobs(_Jobs):
     """Sign-ins the manager started: `a2app <origin> login --events` on its own
-    thread. The job carries the `approve` line (the link the page opens, and the
-    code the person checks) as soon as the CLI writes it, then how it ended:
-    signed in, `pending` the confirmation code (a browser elsewhere), or not."""
+    thread. The job carries the `approve` line (the link to the approval page,
+    and the code the person checks) as soon as the CLI writes it, then how it
+    ended: signed in, `pending` the confirmation code, or not. `embedHint` is
+    None when the page shows the approval page itself, in a tab of its own; else
+    why it cannot (and the approval opens in the browser instead)."""
 
-    def start(self, origin: str, browser_here: bool) -> dict:
+    def start(self, origin: str, browser_here: bool, embed_hint: str | None = None) -> dict:
         job = {
             "id": secrets.token_hex(8), "origin": origin, "approve": None, "done": False, "ok": False,
             "pending": False, "result": None, "error": None, "startedAt": _now(), "endedAt": None,
+            "embedded": embed_hint is None, "embedHint": embed_hint,
         }
         with self._lock:
             self._prune()

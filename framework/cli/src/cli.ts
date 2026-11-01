@@ -156,7 +156,7 @@ const COMMANDS: Record<string, CommandMeta> = {
     summary: "Ask the person to approve this agent in the app; stores the credential it is given (never printed)",
     surface: "a2app",
     scope: "app",
-    args: "[--scopes data:<entity>:read,data:<entity>:write,op:<name>] [--expires 30d] [--name <agent>] [--no-browser] | --confirm <code>",
+    args: "[--scopes data:<entity>:read,data:<entity>:write,op:<name>] [--expires 30d] [--name <agent>] [--no-browser | --print-only] [--events] | --confirm <code> [--events]",
   },
   logout: { summary: "Revoke and forget this agent's stored credential for the app", surface: "a2app", scope: "app" },
 };

@@ -1,7 +1,7 @@
 /**
  * a2app <app> login [--scopes data:<entity>:read,data:<entity>:write,op:<name>]
- *                   [--expires 30d] [--name <agent>] [--no-browser]
- * a2app <app> login --confirm <code>
+ *                   [--expires 30d] [--name <agent>] [--no-browser | --print-only] [--events]
+ * a2app <app> login --confirm <code> [--events]
  *
  * How an agent gets access to an app (spec/v0_2/auth.md §7): it asks, the
  * person approves on the app's own account page — signed in as themselves —
@@ -20,6 +20,12 @@
  *   AGENT_APP_OPEN_CMD), the link and code are printed and this process stops; the
  *   person approves and gives the agent the confirmation code, and
  *   `login --confirm <code>` finishes.
+ *
+ * `--print-only` is for a caller that opens the link itself, in a browser on
+ * this computer (a harness's own page): the code still comes back to the
+ * loopback port, and nothing else opens a window. `--events` writes one JSON
+ * line per step on stdout — `approve` with the link, then `result` — for such a
+ * caller to follow; people's messages stay on stderr.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { hostname } from "node:os";
@@ -112,13 +118,23 @@ class Loopback {
   }
 }
 
-/** Whether this process opens the person's browser, on this computer — itself,
- *  or through the harness that spawned it (AGENT_APP_OPEN_CMD; empty means
- *  never). Only then can the confirmation come back to a loopback port. */
+/** Whether the person's browser is opened on this computer — by this process,
+ *  by the harness that spawned it (AGENT_APP_OPEN_CMD; empty means never), or by
+ *  the caller itself (`--print-only`). Only then can the confirmation come back
+ *  to a loopback port. */
 function opensBrowserHere(args: string[]): boolean {
   if (hasFlag(args, "no-browser")) return false;
+  if (hasFlag(args, "print-only")) return true;
   const opener = process.env["AGENT_APP_OPEN_CMD"];
   return opener !== undefined ? opener.trim() !== "" : headlessReason() === null;
+}
+
+/** `--events`: one JSON object per line on stdout. */
+function eventsFor(args: string[]): (line: Record<string, unknown>) => void {
+  const on = hasFlag(args, "events");
+  return (line) => {
+    if (on) process.stdout.write(`${JSON.stringify(line)}\n`);
+  };
 }
 
 type IssuedBody = {
@@ -159,9 +175,36 @@ async function poll(client: A2AppClient, deviceCode: string, confirmation: strin
   }
 }
 
-async function store(issued: Extract<Polled, { kind: "issued" }>["body"], origin: string, appId: string, name: string): Promise<number> {
+async function store(
+  issued: Extract<Polled, { kind: "issued" }>["body"],
+  origin: string,
+  appId: string,
+  name: string,
+  emit: (line: Record<string, unknown>) => void,
+): Promise<number> {
   const { token, credential } = issued;
-  await saveCredential({ origin, appId, token, credentialId: credential.credentialId, principal: credential.principal, expiresAt: credential.expiresAt });
+  await saveCredential({
+    origin,
+    appId,
+    token,
+    credentialId: credential.credentialId,
+    principal: credential.principal,
+    expiresAt: credential.expiresAt,
+    name,
+    principalName: credential.principalName,
+  });
+  emit({
+    event: "result",
+    ok: true,
+    origin,
+    appId,
+    name,
+    credentialId: credential.credentialId,
+    principal: credential.principal,
+    principalName: credential.principalName,
+    scopes: credential.scopes,
+    expiresAt: credential.expiresAt,
+  });
   log.ok(
     `approved: this agent now acts as ${credential.principalName ?? credential.principal} in ${name} ` +
       `(${credential.scopes.includes("*") ? "everything they can do" : credential.scopes.join(", ")}), until ${credential.expiresAt}.`,
@@ -171,8 +214,13 @@ async function store(issued: Extract<Polled, { kind: "issued" }>["body"], origin
 }
 
 /** `login --confirm <code>`: finish a sign-in with the code the person was given. */
-async function confirm(app: string, code: string): Promise<number> {
+async function confirm(app: string, code: string, emit: (line: Record<string, unknown>) => void): Promise<number> {
   const { client, origin, appId, name } = await loginTarget(app);
+  const fail = (message: string): number => {
+    emit({ event: "result", ok: false, error: message });
+    log.error(message);
+    return 1;
+  };
   const pending = pendingLoginFor(origin, appId);
   if (pending === null) {
     throw new UsageError(`no sign-in to ${name} is waiting for a confirmation code: start one with \`a2app <app> login\`.`);
@@ -181,24 +229,30 @@ async function confirm(app: string, code: string): Promise<number> {
   switch (outcome.kind) {
     case "issued":
       await forgetPendingLogin(origin, appId);
-      return store(outcome.body, origin, appId, name);
+      return store(outcome.body, origin, appId, name, emit);
     case "wrong":
-      log.error("that is not the confirmation code for this sign-in: check it with the person and try again.");
-      return 1;
+      return fail("that is not the confirmation code for this sign-in: check it with the person and try again.");
     case "wait":
     case "confirm":
-      log.error("the person has not approved this sign-in yet: the confirmation code appears once they do.");
-      return 1;
+      return fail("the person has not approved this sign-in yet: the confirmation code appears once they do.");
     case "end":
       await forgetPendingLogin(origin, appId);
-      log.error(outcome.message);
-      return 1;
+      return fail(outcome.message);
   }
 }
 
 export async function run(args: string[], app: string): Promise<number> {
+  const emit = eventsFor(args);
   const confirmation = flag(args, "confirm");
-  if (confirmation !== undefined) return confirm(app, confirmation);
+  if (confirmation !== undefined) return confirm(app, confirmation, emit);
+  if (hasFlag(args, "no-browser") && hasFlag(args, "print-only")) {
+    throw new UsageError("--no-browser and --print-only contradict each other: pick one.");
+  }
+  const fail = (message: string): number => {
+    emit({ event: "result", ok: false, error: message });
+    log.error(message);
+    return 1;
+  };
 
   const scopes = scopesFlag(args);
   const expiresIn = parseDuration(flag(args, "expires") ?? "30d", "expires");
@@ -223,22 +277,23 @@ export async function run(args: string[], app: string): Promise<number> {
       expiresIn: number;
       interval: number;
     } | null;
-    if (started.status === 404) {
-      log.error(`${name} predates agent sign-in (protocol 0.1): ask its owner for a credential instead.`);
-      return 1;
-    }
+    if (started.status === 404) return fail(`${name} predates agent sign-in (protocol 0.1): ask its owner for a credential instead.`);
     if (started.status !== 200 || !ask?.deviceCode) {
-      log.error(`${name} refused the sign-in request (${started.status}${ask?.code ? ` ${ask.code}` : ""}): ${ask?.message ?? "no reason given"}`);
-      return 1;
+      return fail(`${name} refused the sign-in request (${started.status}${ask?.code ? ` ${ask.code}` : ""}): ${ask?.message ?? "no reason given"}`);
     }
     const expiresAt = new Date(Date.now() + ask.expiresIn * 1000).toISOString();
 
+    // `waits`: this process waits for the browser to come back with the code.
+    // Otherwise the person gives the code to whoever runs `login --confirm`.
+    emit({ event: "approve", url: ask.verificationUriComplete, userCode: ask.userCode, expiresAt, origin, appId, name, waits: loopback !== null });
     log.info(`To let this agent use ${name}, the person it will act for opens:`);
-    log.raw(ask.verificationUriComplete);
+    if (hasFlag(args, "events")) log.info(ask.verificationUriComplete);
+    else log.raw(ask.verificationUriComplete);
     log.info(`and approves code ${ask.userCode} (it expires in ${Math.round(ask.expiresIn / 60)} minutes).`);
 
     if (loopback === null) {
       await savePendingLogin({ origin, appId, deviceCode: ask.deviceCode, expiresAt });
+      emit({ event: "result", ok: true, pending: true, origin, appId, name, expiresAt });
       log.info(
         "Not signed in yet. Once they approve, the page shows a confirmation code: they give it to this agent, " +
           "which finishes with `a2app <app> login --confirm <code>`.",
@@ -246,23 +301,23 @@ export async function run(args: string[], app: string): Promise<number> {
       return 0;
     }
 
-    const opened = await openUrl(ask.verificationUriComplete, false);
-    log.info(opened.opened ? "opened it in the browser; this finishes when they approve." : "open it in the browser on this computer; this finishes when they approve.");
+    if (hasFlag(args, "print-only")) {
+      log.info("open it in the browser on this computer; this finishes when they approve.");
+    } else {
+      const opened = await openUrl(ask.verificationUriComplete, false);
+      log.info(opened.opened ? "opened it in the browser; this finishes when they approve." : "open it in the browser on this computer; this finishes when they approve.");
+    }
     let interval = ask.interval;
     while (Date.now() < Date.parse(expiresAt)) {
       await loopback.wait(interval * 1000);
       const outcome = await poll(client, ask.deviceCode, loopback.take());
-      if (outcome.kind === "issued") return store(outcome.body, origin, appId, name);
-      if (outcome.kind === "end") {
-        log.error(outcome.message);
-        return 1;
-      }
+      if (outcome.kind === "issued") return store(outcome.body, origin, appId, name, emit);
+      if (outcome.kind === "end") return fail(outcome.message);
       if (outcome.kind === "wait" && outcome.interval !== undefined) interval = outcome.interval;
       // "confirm": approved, and the browser is on its way back; "wrong": something
       // other than that browser reached the port. Either way, keep waiting for it.
     }
-    log.error("nobody approved the request in time: run `a2app <app> login` again for a new code.");
-    return 1;
+    return fail("nobody approved the request in time: run `a2app <app> login` again for a new code.");
   } finally {
     loopback?.close();
   }

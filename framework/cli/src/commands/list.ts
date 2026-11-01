@@ -10,8 +10,15 @@
  * A running app's agent work is shown too: whether a bridge is starting agent
  * runs for its queued tasks, and how many wait. Only running apps are asked —
  * a stopped app has no queue to read, and a bridge cannot start for it.
+ *
+ * Apps on other machines that this machine holds a credential for (`a2app
+ * <url> login`) are listed as `connected`, with who the credential acts for and
+ * a status probed the same way: `online` (it answers as itself), `offline`,
+ * `unreachable` (it answers as another app), or `expired` (the credential).
  */
+import { A2AppClient } from "@a2app/sdk";
 import { hasFlag } from "../lib/args.js";
+import { readCredentials, type StoredCredential } from "../lib/remote.js";
 import { list, prune, type AppView } from "../lib/registry.js";
 import { registryPath } from "../lib/registry.js";
 import { log } from "../lib/log.js";
@@ -73,6 +80,73 @@ function stuck(app: AppView, work: AgentWork | undefined, ref: string): string |
   return `${who} and no bridge is running. Start one: ${start}`;
 }
 
+/** An app on another machine this one holds a credential for. */
+interface Connected {
+  origin: string;
+  appId: string | null;
+  name: string;
+  principal: string | null;
+  principalName: string | null;
+  credentialId: string | null;
+  expiresAt: string | null;
+  status: "online" | "offline" | "unreachable" | "expired";
+}
+
+/** How long `list` waits for a connected app to answer: a dashboard runs it
+ *  every few seconds, and an app that slow is as good as offline. */
+const PROBE_TIMEOUT_MS = 3_000;
+
+async function probe(cred: StoredCredential): Promise<Connected["status"]> {
+  if (cred.expiresAt && Date.parse(cred.expiresAt) <= Date.now()) return "expired";
+  const client = new A2AppClient({ baseUrl: cred.origin, token: null, agentName: "agent-app-list", timeoutMs: PROBE_TIMEOUT_MS });
+  try {
+    const identity = await client.identity();
+    if (identity === null) return "offline";
+    return cred.appId === undefined || identity.app?.id === cred.appId ? "online" : "unreachable";
+  } catch {
+    return "offline";
+  }
+}
+
+/** Every stored credential for an app that is not one of this machine's own. */
+async function connectedApps(apps: AppView[]): Promise<Connected[]> {
+  const local = new Set(apps.map((a) => a.id));
+  const creds = readCredentials().filter((c) => !(c.appId !== undefined && local.has(c.appId)));
+  return Promise.all(
+    creds.map(async (c) => ({
+      origin: c.origin,
+      appId: c.appId ?? null,
+      name: c.name ?? new URL(c.origin).host,
+      principal: c.principal ?? null,
+      principalName: c.principalName ?? null,
+      credentialId: c.credentialId ?? null,
+      expiresAt: c.expiresAt ?? null,
+      status: await probe(c),
+    })),
+  );
+}
+
+function printConnected(connected: Connected[]): void {
+  if (connected.length === 0) return;
+  const mark = { online: "◆", offline: "◇", unreachable: "▲", expired: "✗" } as const;
+  const width = Math.max(...connected.map((c) => c.name.length));
+  log.raw("");
+  log.raw("Connected (apps on other machines):");
+  for (const c of connected) {
+    const who = c.principalName ?? c.principal;
+    log.raw(
+      `${mark[c.status]} ${c.name.padEnd(width)}  ${c.origin}  ${c.status.padEnd(11)}` +
+        `${who ? `  acts as ${who}` : ""}${c.expiresAt ? `  until ${c.expiresAt}` : ""}`,
+    );
+  }
+  if (connected.some((c) => c.status === "expired")) {
+    log.info("✗ expired: sign in again with `a2app <url> login`.");
+  }
+  if (connected.some((c) => c.status === "unreachable")) {
+    log.warn("▲ unreachable: that address now answers as a different app; the CLI will refuse to operate it.");
+  }
+}
+
 export async function run(args: string[]): Promise<number> {
   if (hasFlag(args, "prune")) {
     const gone = await prune();
@@ -81,6 +155,7 @@ export async function run(args: string[]): Promise<number> {
   }
 
   const apps = await list();
+  const connected = await connectedApps(apps);
   // Status is settled first; only an app answering as itself is asked about its
   // queue, and that answer stands in for the identity check the read needs.
   // Only the waiting tasks are read: an app's whole history is never pruned,
@@ -96,13 +171,14 @@ export async function run(args: string[]): Promise<number> {
 
   if (hasFlag(args, "json")) {
     const rows = apps.map((a) => ({ ...a, agentWork: work.get(a) ?? null }));
-    log.raw(JSON.stringify({ ok: true, registry: registryPath(), apps: rows }, null, 2));
+    log.raw(JSON.stringify({ ok: true, registry: registryPath(), apps: rows, connected }, null, 2));
     return 0;
   }
 
   if (apps.length === 0) {
     log.info(`no Agent Apps registered yet (registry: ${registryPath()})`);
-    log.raw(JSON.stringify({ ok: true, apps: [] }, null, 2));
+    printConnected(connected);
+    log.raw(JSON.stringify({ ok: true, apps: [], connected }, null, 2));
     return 0;
   }
 
@@ -128,6 +204,7 @@ export async function run(args: string[]): Promise<number> {
     const warning = stuck(app, work.get(app), refFor(app, apps));
     if (warning !== null) warnings.push(warning);
   }
+  printConnected(connected);
   for (const warning of warnings) log.warn(warning);
   if (apps.some((a) => a.status === "unreachable")) {
     log.warn("▲ unreachable: another process holds that app's port — stop it, or give the app a different port.");

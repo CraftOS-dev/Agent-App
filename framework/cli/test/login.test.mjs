@@ -18,6 +18,7 @@ import { createA2App, createA2AppServer, MemoryBinding } from "@a2app/adapter-co
 
 const here = dirname(fileURLToPath(import.meta.url));
 const A2APP = resolve(here, "..", "dist", "a2app.js");
+const AGENT_APP = resolve(here, "..", "dist", "agent-app.js");
 const ADMIN = "admin-token-login";
 
 const failures = [];
@@ -130,6 +131,73 @@ try {
   ok("…acting as the person who approved", /acts as Bob/.test(sameComputer.out));
   ok("…with nothing to type and nothing left pending", !/--confirm/.test(sameComputer.out) && pending().length === 0);
   ok("…and the credential stored", storedFor()?.principal === bob.id);
+  ok("…with the app's name and who it acts for, for a list to show", storedFor()?.name === "Login App" && storedFor()?.principalName === "Bob");
+
+  /* ---------------------------------------- a harness that opens the link */
+
+  // A harness page (Hermes's Agent Apps tab) opens the approval link in its own
+  // browser window and follows the sign-in as JSON lines: --print-only keeps the
+  // loopback return without opening another window, --events says each step.
+  await cli([base, "logout"]);
+  const lines = [];
+  const following = new Promise((done) => {
+    const env = { ...process.env, A2APP_HOME: home, AGENT_APP_OPEN_CMD: "" };
+    delete env.A2APP_TOKEN;
+    const child = spawn(process.execPath, [A2APP, base, "login", "--name", "Hermes", "--print-only", "--events"], { env, windowsHide: true });
+    let buffer = "";
+    child.stdout.on("data", (d) => {
+      buffer += d;
+      let at;
+      while ((at = buffer.indexOf("\n")) >= 0) {
+        const line = JSON.parse(buffer.slice(0, at));
+        buffer = buffer.slice(at + 1);
+        lines.push(line);
+        // What the page does on `approve`: the person approves in the window it
+        // opened, and that window follows the app's redirect home.
+        if (line.event === "approve") {
+          decide(line.userCode, { approve: true }).then((approved) => fetch(approved.redirect));
+        }
+      }
+    });
+    child.on("close", (code) => done(code));
+  });
+  check("a harness's sign-in finishes once the person approves in its window", await following, 0);
+  const approveLine = lines.find((l) => l.event === "approve");
+  ok("…announcing the link to open, and that the CLI waits for the window to come back", approveLine?.url?.includes("/_a2app/account#approve/") && approveLine.waits === true);
+  const resultLine = lines.at(-1);
+  check("…then the result, as JSON", [resultLine?.event, resultLine?.ok, resultLine?.principalName, resultLine?.name], ["result", true, "Bob", "Login App"]);
+  check("…and nothing but JSON lines on stdout", lines.every((l) => typeof l.event === "string"), true);
+
+  const elsewhere = await cli([base, "login", "--no-browser", "--events"]);
+  const elsewhereLines = elsewhere.out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+  check("anywhere else, --events says the CLI does not wait, and that the sign-in is pending", [elsewhereLines[0]?.waits, elsewhereLines.at(-1)?.pending], [false, true]);
+  const later = await decide(elsewhereLines[0].userCode, { approve: true });
+  const confirmedLine = (await cli([base, "login", "--confirm", later.confirmation, "--events"])).out.split("\n").find((l) => l.startsWith("{"));
+  check("…and --confirm --events gives the result as JSON", [JSON.parse(confirmedLine).ok, JSON.parse(confirmedLine).principalName], [true, "Bob"]);
+
+  /* -------------------------------------- a connected app in the list */
+
+  const listed = await new Promise((done) => {
+    const env = { ...process.env, A2APP_HOME: home };
+    const child = spawn(process.execPath, [AGENT_APP, "list", "--json"], { env, windowsHide: true });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.on("close", () => done(JSON.parse(out)));
+  });
+  const row = listed.connected?.find((c) => c.origin === base);
+  check(
+    "agent-app list shows the connected app: its name, who the agent acts for, and that it answers",
+    [row?.name, row?.appId, row?.principalName, row?.status],
+    ["Login App", "login_app", "Bob", "online"],
+  );
+  await cli([base, "logout"]);
+  const after = await new Promise((done) => {
+    const child = spawn(process.execPath, [AGENT_APP, "list", "--json"], { env: { ...process.env, A2APP_HOME: home }, windowsHide: true });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.on("close", () => done(JSON.parse(out)));
+  });
+  check("…and not once the agent logged out", after.connected?.some((c) => c.origin === base), false);
 } finally {
   server.close();
   rmSync(home, { recursive: true, force: true });

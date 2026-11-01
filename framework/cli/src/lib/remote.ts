@@ -38,6 +38,10 @@ export interface StoredCredential {
   credentialId?: string;
   principal?: string;
   expiresAt?: string | null;
+  /** set by `a2app <app> login`, for a person reading a list: the app's name
+   *  and the name of whoever the credential acts for */
+  name?: string;
+  principalName?: string | null;
 }
 
 export interface CredentialStore {

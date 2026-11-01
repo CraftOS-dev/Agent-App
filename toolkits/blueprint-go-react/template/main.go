@@ -247,6 +247,9 @@ type staticView struct {
 	// An opaque string mixed into version() (manifest.appVersion), so an
 	// author can move the marker deliberately.
 	salt string
+	// Who may embed these pages, as a CSP `frame-ancestors` source list
+	// (Network.FrameAncestors). Sent on every file; "" sends no framing policy.
+	frameAncestors string
 
 	// version() is polled by every open tab; a short cache bounds that cost.
 	// It is not a correctness knob (a promote is followed by a restart).
@@ -422,6 +425,9 @@ func (v *staticView) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-cache")
 	h.Set("ETag", etag)
 	h.Set("Last-Modified", lastModified.UTC().Format(http.TimeFormat))
+	if v.frameAncestors != "" {
+		h.Set("Content-Security-Policy", "frame-ancestors "+v.frameAncestors)
+	}
 
 	// ETag wins where both validators are present: it compares content, while
 	// If-Modified-Since compares a whole-second timestamp that an edit inside
@@ -539,10 +545,12 @@ func serveApp() {
 			port = p
 		}
 	}
-	// Where to listen, and the address people and agents use (A2APP_HOST,
-	// A2APP_PUBLIC_URL). A combination that would send the agent token across
-	// a network in clear is refused here, before anything is opened.
-	host, publicURL, err := NetworkPolicy(os.Getenv("A2APP_HOST"), os.Getenv("A2APP_PUBLIC_URL"))
+	// Where to listen, the address people and agents use, and who may embed
+	// the View (A2APP_HOST, A2APP_PUBLIC_URL, A2APP_FRAME_ANCESTORS). A
+	// combination that would send the agent token across a network in clear,
+	// or an embedder that is not an origin, is refused here, before anything
+	// is opened.
+	network, err := NetworkPolicy(os.Getenv("A2APP_HOST"), os.Getenv("A2APP_PUBLIC_URL"), os.Getenv("A2APP_FRAME_ANCESTORS"))
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -595,6 +603,9 @@ func serveApp() {
 		// An author who wants to move the marker by hand can bump
 		// manifest.appVersion.
 		salt: getStr(manifest, "appVersion"),
+		// Who may embed the app's pages: itself, and the harness pages on the
+		// viewer's machine unless A2APP_FRAME_ANCESTORS says otherwise.
+		frameAncestors: network.FrameAncestors,
 	}
 
 	// Durable store: records and every piece of adapter state (credentials,
@@ -627,7 +638,7 @@ func serveApp() {
 		// What each capability's agent may do (spec/v0_2/auth.md §6.2).
 		Capabilities:   CAPABILITIES,
 		AllowedOrigins: []string{fmt.Sprintf("http://localhost:%d", port), fmt.Sprintf("http://127.0.0.1:%d", port)},
-		PublicURL:      publicURL,
+		PublicURL:      network.PublicURL,
 		Runners:        OPERATION_RUNNERS,
 		// The event types this app may emit. A runner's store.trigger refuses a
 		// type that is not declared here, so the set of things the app can ever
@@ -729,7 +740,7 @@ func serveApp() {
 	// deliberately exposed the app): a same-origin request is trusted as the
 	// owner without a credential, so an app listening on the network by
 	// accident would be writable by anyone who could reach the port.
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	listener, err := net.Listen("tcp", net.JoinHostPort(network.Host, strconv.Itoa(port)))
 	if err != nil {
 		logLine("error", "crash", M{"message": err.Error()})
 		os.Exit(1)
@@ -740,7 +751,7 @@ func serveApp() {
 	}
 	logLine("info", "boot", M{
 		"app": appLabel, "a2appId": manifest["id"],
-		"url": fmt.Sprintf("http://%s:%d", host, port),
+		"url": fmt.Sprintf("http://%s:%d", network.Host, port),
 	})
 	if err := http.Serve(listener, root); err != nil {
 		logLine("error", "crash", M{"message": err.Error()})

@@ -31,7 +31,7 @@ export type { RateLimits, RouteClass, RateDecision } from "./rate.js";
 export { approvalKey, canonicalize, sha256Prefixed } from "./canon.js";
 /** Where the app listens and the address it is reached at (A2APP_HOST,
  *  A2APP_PUBLIC_URL), and the loopback rule the Host check uses. */
-export { networkPolicy, isLoopbackName, hostnameOf } from "./network.js";
+export { networkPolicy, isLoopbackName, hostnameOf, frameAncestorsOf, DEFAULT_FRAME_ANCESTORS } from "./network.js";
 /** Delegated agent credentials: how one is issued and how it is listed. */
 export { mintCredential, credentialWire, DEFAULT_EXPIRES_SECONDS, MAX_EXPIRES_SECONDS } from "./credentials.js";
 export type { NetworkPolicy } from "./network.js";

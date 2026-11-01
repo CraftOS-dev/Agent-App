@@ -68,6 +68,10 @@ export interface StaticViewOptions {
   versionSalt?: string;
   /** Default `no-cache` — see the module docstring before changing it. */
   cacheControl?: string;
+  /** Who may embed these pages, as a CSP `frame-ancestors` source list
+   *  ({@link import("./network.js").NetworkPolicy.frameAncestors}). Sent on
+   *  every file; omitted, no framing policy is sent. */
+  frameAncestors?: string;
   mime?: Record<string, string>;
   /** Served for a request that lands on the root. Default `index.html`. */
   indexFile?: string;
@@ -221,6 +225,7 @@ export function createStaticView(dir: string, options: StaticViewOptions = {}): 
       "cache-control": cacheControl,
       etag,
       "last-modified": lastModified.toUTCString(),
+      ...(options.frameAncestors !== undefined ? { "content-security-policy": `frame-ancestors ${options.frameAncestors}` } : {}),
     };
 
     // ETag wins where both validators are present: it compares content, while

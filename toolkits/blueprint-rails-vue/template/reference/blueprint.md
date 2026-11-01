@@ -364,6 +364,16 @@ A request under any other host name is refused `403 forbidden_host`: the app
 answers only to loopback and the host of `A2APP_PUBLIC_URL`. That refusal is
 also what stops a page whose DNS re-resolves to 127.0.0.1 from reading the app.
 
+**Embedding.** Every page of the View says who may show it in a frame
+(`Content-Security-Policy: frame-ancestors`): the app itself and, by default,
+agent harness pages on the viewer's own machine (`http://127.0.0.1:*
+http://localhost:*`). Set `A2APP_FRAME_ANCESTORS` to the origins that may
+embed it instead, space- or comma-separated (`https://portal.example.com`,
+`https://*.corp.example.com`, `http://127.0.0.1:*`), or to `none` for the app
+alone; an entry that is not an origin is refused at start. Over https the
+session cookie is `SameSite=None; Secure; Partitioned`, so a person stays
+signed in inside the page that embeds the app.
+
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything (`install` → `build` → `start`,

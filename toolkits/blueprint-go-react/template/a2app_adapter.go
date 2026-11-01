@@ -52,6 +52,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -1566,13 +1567,20 @@ func parseCookies(header string) map[string]string {
 
 // sessionCookie is a `Set-Cookie` value for the session cookie. A maxAge of 0
 // clears it.
+//
+// Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser then
+// keeps it for the app inside a harness page that embeds it (a partitioned
+// cookie lives only under that page, so a sign-in there is that page's alone),
+// where a `Lax` cookie is never sent and the person could not stay signed in.
+// It weakens nothing: every signed-in change must carry the app's own Origin
+// (spec/v0_2/auth.md §4). Over plain http — loopback only — it is `Lax`.
 func sessionCookie(name, value string, maxAgeSeconds int, secure bool) string {
-	attrs := []string{name + "=" + url.PathEscape(value), "Path=/", "HttpOnly", "SameSite=Lax",
-		"Max-Age=" + strconv.Itoa(maxAgeSeconds)}
+	site := []string{"SameSite=Lax"}
 	if secure {
-		attrs = append(attrs, "Secure")
+		site = []string{"SameSite=None", "Secure", "Partitioned"}
 	}
-	return strings.Join(attrs, "; ")
+	attrs := append([]string{name + "=" + url.PathEscape(value), "Path=/", "HttpOnly"}, site...)
+	return strings.Join(append(attrs, "Max-Age="+strconv.Itoa(maxAgeSeconds)), "; ")
 }
 
 // failureLimiter counts failures per key in a fixed window (sign-in failures
@@ -3881,28 +3889,80 @@ func isLoopbackName(name string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// NetworkPolicy resolves where the app listens (A2APP_HOST, default loopback)
-// and the origin people and agents reach it at (A2APP_PUBLIC_URL). It refuses
-// the combinations that would send the agent token across a network in clear:
-// a non-loopback bind without an https public URL, or a plain-http public URL
-// that does not name this machine (an SSH tunnel ends on loopback).
-func NetworkPolicy(hostEnv, publicURLEnv string) (host string, publicURL string, err error) {
-	host = strings.TrimSpace(hostEnv)
+// Network is where the app listens, the address it is reached at, and who may
+// embed it, as NetworkPolicy resolves them from the environment.
+type Network struct {
+	// Host is the bind address (A2APP_HOST, default loopback).
+	Host string
+	// PublicURL is the origin people and agents reach the app at
+	// (A2APP_PUBLIC_URL), or "" when only loopback.
+	PublicURL string
+	// FrameAncestors is the pages that may embed the app's own pages, as a CSP
+	// `frame-ancestors` source list: the app itself, plus A2APP_FRAME_ANCESTORS
+	// (default: harness pages on this machine's loopback). Served on every page
+	// of the View.
+	FrameAncestors string
+}
+
+// DefaultFrameAncestors is who may embed an app when its owner says nothing:
+// the app itself, and the agent harness pages on the viewer's own machine
+// (Hermes, OpenClaw, …).
+var DefaultFrameAncestors = []string{"http://127.0.0.1:*", "http://localhost:*"}
+
+// embedder is one A2APP_FRAME_ANCESTORS entry: an http(s) origin, optionally
+// with a `*.` subdomain wildcard and a `*` port.
+var embedder = regexp.MustCompile(`^https?://(\*\.)?[A-Za-z0-9.-]+(:(\d{1,5}|\*))?$`)
+
+// FrameAncestorsOf is the `frame-ancestors` source list for
+// A2APP_FRAME_ANCESTORS: unset, the defaults; `none`, the app alone; otherwise
+// its space- or comma-separated origins. An entry that is not an origin is
+// refused at start rather than dropped, so a typo never silently changes who
+// can embed the app.
+func FrameAncestorsOf(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return strings.Join(append([]string{"'self'"}, DefaultFrameAncestors...), " "), nil
+	}
+	if value == "none" {
+		return "'self'", nil
+	}
+	origins := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	bad := []string{}
+	for _, origin := range origins {
+		if !embedder.MatchString(origin) {
+			bad = append(bad, origin)
+		}
+	}
+	if len(bad) > 0 {
+		return "", fmt.Errorf("A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), "+
+			"or \"none\"; not %s", strings.Join(bad, ", "))
+	}
+	return strings.Join(append([]string{"'self'"}, origins...), " "), nil
+}
+
+// NetworkPolicy resolves where the app listens (A2APP_HOST, default loopback),
+// the origin people and agents reach it at (A2APP_PUBLIC_URL) and who may embed
+// it (A2APP_FRAME_ANCESTORS, see FrameAncestorsOf). It refuses the combinations
+// that would send the agent token across a network in clear: a non-loopback
+// bind without an https public URL, or a plain-http public URL that does not
+// name this machine (an SSH tunnel ends on loopback).
+func NetworkPolicy(hostEnv, publicURLEnv, frameAncestorsEnv string) (Network, error) {
+	host := strings.TrimSpace(hostEnv)
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	scheme := ""
+	scheme, publicURL := "", ""
 	if raw := strings.TrimSpace(publicURLEnv); raw != "" {
 		u, perr := url.Parse(raw)
 		if perr != nil || u.Host == "" {
-			return "", "", fmt.Errorf("A2APP_PUBLIC_URL is not a URL: %q", raw)
+			return Network{}, fmt.Errorf("A2APP_PUBLIC_URL is not a URL: %q", raw)
 		}
 		scheme = strings.ToLower(u.Scheme)
 		if scheme != "https" && scheme != "http" {
-			return "", "", fmt.Errorf("A2APP_PUBLIC_URL must be an http(s) URL, not %q", raw)
+			return Network{}, fmt.Errorf("A2APP_PUBLIC_URL must be an http(s) URL, not %q", raw)
 		}
 		if scheme == "http" && !isLoopbackName(strings.ToLower(u.Hostname())) {
-			return "", "", fmt.Errorf("A2APP_PUBLIC_URL must be https: %q would send the agent token across a network in clear. "+
+			return Network{}, fmt.Errorf("A2APP_PUBLIC_URL must be https: %q would send the agent token across a network in clear. "+
 				"Put the app behind a TLS proxy, or reach it through an SSH tunnel to a loopback address", raw)
 		}
 		// The origin, as a browser writes it in the Origin header: a default port
@@ -3914,10 +3974,14 @@ func NetworkPolicy(hostEnv, publicURLEnv string) (host string, publicURL string,
 		publicURL = scheme + "://" + host
 	}
 	if !isLoopbackName(strings.ToLower(host)) && scheme != "https" {
-		return "", "", fmt.Errorf("A2APP_HOST=%s exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "+
+		return Network{}, fmt.Errorf("A2APP_HOST=%s exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "+
 			"(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1", host)
 	}
-	return host, publicURL, nil
+	frameAncestors, err := FrameAncestorsOf(frameAncestorsEnv)
+	if err != nil {
+		return Network{}, err
+	}
+	return Network{Host: host, PublicURL: publicURL, FrameAncestors: frameAncestors}, nil
 }
 
 // isForeignOrigin is a request whose Origin is not one of the app's own. No
@@ -6459,12 +6523,29 @@ func selftest() int {
 		check("the public origin is the app's own", hostApp.allowedOrigins["https://crm.example.com"], true)
 	}
 	policy := func(host, public string) string {
-		h, p, err := NetworkPolicy(host, public)
+		network, err := NetworkPolicy(host, public, "")
 		if err != nil {
 			return "refused"
 		}
-		return h + " " + p
+		return network.Host + " " + network.PublicURL
 	}
+	embedders := func(raw string) string {
+		network, err := NetworkPolicy("", "", raw)
+		if err != nil {
+			return "refused"
+		}
+		return network.FrameAncestors
+	}
+	check("embeddable by itself and harness pages on this machine by default", embedders(""), "'self' http://127.0.0.1:* http://localhost:*")
+	check("A2APP_FRAME_ANCESTORS names the embedders",
+		embedders(" https://portal.example.com, https://*.corp.example.com:8443\thttp://localhost:* "),
+		"'self' https://portal.example.com https://*.corp.example.com:8443 http://localhost:*")
+	check("…`none` leaves only the app itself", embedders("none"), "'self'")
+	check("…and an entry that is not an origin is refused", embedders("https://ok.example.com javascript:alert(1)"), "refused")
+	check("…as is a path, which is not an origin", embedders("https://portal.example.com/app"), "refused")
+	_, refusal := FrameAncestorsOf("bogus")
+	check("…saying what it takes", fmt.Sprint(refusal),
+		`A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or "none"; not bogus`)
 	check("loopback by default", policy("", ""), "127.0.0.1 ")
 	check("an https public URL is reduced to its origin", policy("", "https://CRM.example.com/x"), "127.0.0.1 https://crm.example.com")
 	check("…without a default port", policy("", "https://crm.example.com:443/x"), "127.0.0.1 https://crm.example.com")
@@ -6499,8 +6580,12 @@ func selftest() int {
 	check("…and is refused when it is not one", normalizeUserCode("AEIO-BCDF"), "")
 	check("cookies: first occurrence wins, values decoded, junk skipped",
 		parseCookies("=z; a=1; b=x%20y; a=2; c; d=%zz"), map[string]string{"a": "1", "b": "x y"})
-	check("the session cookie's attributes",
-		sessionCookie("a2app_session_x", "v", 60, true), "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=60; Secure")
+	check("the session cookie over https is partitioned, so it works embedded",
+		sessionCookie("a2app_session_x", "v", 60, true), "a2app_session_x=v; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=60")
+	check("…and over loopback http is Lax, not Secure",
+		sessionCookie("a2app_session_x", "v", 60, false), "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=60")
+	check("…and the clearing cookie keeps the same attributes",
+		sessionCookie("a2app_session_x", "", 0, true), "a2app_session_x=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0")
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	limiter := newFailureLimiter(10, 15*time.Minute, func() time.Time { return clock })
 	for i := 0; i < 9; i++ {

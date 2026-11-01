@@ -32,13 +32,45 @@ export interface NetworkPolicy {
   host: string;
   /** the origin people and agents reach the app at, or null when only loopback */
   publicUrl: string | null;
+  /** The pages that may embed the app's own pages, as a CSP `frame-ancestors`
+   *  source list: the app itself, plus `A2APP_FRAME_ANCESTORS` (default: harness
+   *  pages on this machine's loopback). Served on every page of the View. */
+  frameAncestors: string;
+}
+
+/** Who may embed an app when its owner says nothing: the app itself, and the
+ *  agent harness pages on the viewer's own machine (Hermes, OpenClaw, …). */
+export const DEFAULT_FRAME_ANCESTORS = ["http://127.0.0.1:*", "http://localhost:*"];
+
+/** One `A2APP_FRAME_ANCESTORS` entry: an http(s) origin, optionally with a
+ *  `*.` subdomain wildcard and a `*` port. */
+const EMBEDDER = /^https?:\/\/(\*\.)?[A-Za-z0-9.-]+(:(\d{1,5}|\*))?$/;
+
+/**
+ * The `frame-ancestors` source list for `A2APP_FRAME_ANCESTORS`: unset, the
+ * defaults; `none`, the app alone; otherwise its space- or comma-separated
+ * origins. An entry that is not an origin is refused at start rather than
+ * dropped, so a typo never silently changes who can embed the app.
+ */
+export function frameAncestorsOf(raw: string | undefined): string {
+  const value = raw?.trim();
+  if (!value) return ["'self'", ...DEFAULT_FRAME_ANCESTORS].join(" ");
+  if (value === "none") return "'self'";
+  const origins = value.split(/[\s,]+/).filter((o) => o !== "");
+  const bad = origins.filter((o) => !EMBEDDER.test(o));
+  if (bad.length > 0) {
+    throw new Error(
+      `A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or "none"; not ${bad.join(", ")}.`,
+    );
+  }
+  return ["'self'", ...origins].join(" ");
 }
 
 /**
  * Resolve the bind address and public URL from the environment, or throw with
  * the reason the combination is unsafe. Call it before binding anything.
  */
-export function networkPolicy(env: { host?: string | undefined; publicUrl?: string | undefined }): NetworkPolicy {
+export function networkPolicy(env: { host?: string | undefined; publicUrl?: string | undefined; frameAncestors?: string | undefined }): NetworkPolicy {
   const host = env.host?.trim() || "127.0.0.1";
   let publicUrl: URL | null = null;
   const raw = env.publicUrl?.trim();
@@ -64,5 +96,5 @@ export function networkPolicy(env: { host?: string | undefined; publicUrl?: stri
         `(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1.`,
     );
   }
-  return { host, publicUrl: publicUrl ? publicUrl.origin : null };
+  return { host, publicUrl: publicUrl ? publicUrl.origin : null, frameAncestors: frameAncestorsOf(env.frameAncestors) };
 }

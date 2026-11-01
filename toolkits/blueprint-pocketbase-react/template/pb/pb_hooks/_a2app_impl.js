@@ -1182,6 +1182,9 @@ function managerOf(e, write) {
  */
 function nativeGate(e) {
   const rules = require(`${__hooks}/_a2app_rules.js`);
+  // Who may embed the app's pages: every response says, the View's own files
+  // (which PocketBase serves itself) included. pb-serve.mjs refused a bad value.
+  e.response.header().set("Content-Security-Policy", "frame-ancestors " + rules.frameAncestorsOf($os.getenv("A2APP_FRAME_ANCESTORS")));
   const method = String(e.request.method || "GET").toUpperCase();
   if (method === "OPTIONS") return e.next(); // CORS preflight: --origins answers it
   const path = String(e.request.url.path || "");

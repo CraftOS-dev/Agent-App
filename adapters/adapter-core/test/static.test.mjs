@@ -28,6 +28,7 @@ writeFileSync(join(dir, "extra.mjs"), "export const schema = {}\n");
 
 const view = createStaticView(pub, {
   aliases: { "/_a2app/update.js": join(dir, "mounted.js") },
+  frameAncestors: "'self' http://127.0.0.1:*",
   fingerprintPaths: [join(dir, "extra.mjs")],
   versionTtlMs: 0, // no reuse: every assertion below reads the tree as it is now
 });
@@ -57,6 +58,12 @@ await check("every response carries ETag, Last-Modified and Cache-Control", asyn
   assert.ok(res.headers.get("last-modified"), "no Last-Modified");
   assert.equal(res.headers.get("cache-control"), "no-cache");
   assert.equal(res.headers.get("content-type"), "text/javascript; charset=utf-8");
+});
+
+await check("every page says who may embed it", async () => {
+  for (const path of ["/", "/_a2app/update.js"]) {
+    assert.equal((await get(path)).headers.get("content-security-policy"), "frame-ancestors 'self' http://127.0.0.1:*", path);
+  }
 });
 
 await check("/ serves index.html", async () => {

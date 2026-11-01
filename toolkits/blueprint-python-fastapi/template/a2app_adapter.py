@@ -443,9 +443,45 @@ def hostname_of(host: str) -> Optional[str]:
         return None
 
 
-def network_policy(host_env: Optional[str], public_url_env: Optional[str]) -> tuple[str, Optional[str]]:
-    """Resolve (bind host, public origin) from A2APP_HOST / A2APP_PUBLIC_URL, or
-    raise ValueError with the reason the combination is unsafe."""
+# Who may embed an app when its owner says nothing: the app itself, and the
+# agent harness pages on the viewer's own machine (Hermes, OpenClaw, ...).
+DEFAULT_FRAME_ANCESTORS = ["http://127.0.0.1:*", "http://localhost:*"]
+
+# One A2APP_FRAME_ANCESTORS entry: an http(s) origin, optionally with a `*.`
+# subdomain wildcard and a `*` port; entries are split on JS whitespace or
+# commas. Parity: adapter-core's network.ts.
+_EMBEDDER = re.compile(r"https?://(\*\.)?[A-Za-z0-9.-]+(:([0-9]{1,5}|\*))?")
+_EMBEDDER_SEPARATORS = re.compile(f"[{_JS_SPACE},]+")
+
+
+def frame_ancestors_of(raw: Optional[str]) -> str:
+    """The CSP `frame-ancestors` source list for A2APP_FRAME_ANCESTORS: unset,
+    the defaults; `none`, the app alone; otherwise its space- or comma-separated
+    origins. An entry that is not an origin raises ValueError (refused at start)
+    rather than being dropped, so a typo never silently changes who can embed
+    the app."""
+    value = js_trim(raw or "")
+    if not value:
+        return " ".join(["'self'", *DEFAULT_FRAME_ANCESTORS])
+    if value == "none":
+        return "'self'"
+    origins = [o for o in _EMBEDDER_SEPARATORS.split(value) if o]
+    bad = [o for o in origins if not _EMBEDDER.fullmatch(o)]
+    if bad:
+        raise ValueError(
+            "A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), "
+            f'or "none"; not {", ".join(bad)}.'
+        )
+    return " ".join(["'self'", *origins])
+
+
+def network_policy(
+    host_env: Optional[str], public_url_env: Optional[str], frame_ancestors_env: Optional[str] = None
+) -> tuple[str, Optional[str], str]:
+    """Resolve (bind host, public origin, frame ancestors) from A2APP_HOST /
+    A2APP_PUBLIC_URL / A2APP_FRAME_ANCESTORS, or raise ValueError with the
+    reason the combination is unsafe. The frame ancestors are who may embed the
+    app's own pages, served on every page as CSP `frame-ancestors`."""
     host = (host_env or "").strip() or "127.0.0.1"
     public: Optional[str] = None
     scheme = ""
@@ -478,7 +514,7 @@ def network_policy(host_env: Optional[str], public_url_env: Optional[str]) -> tu
             f"A2APP_HOST={host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address "
             "(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
         )
-    return host, public
+    return host, public, frame_ancestors_of(frame_ancestors_env)
 
 
 def _valid_ymd(y: int, m: int, d: int) -> bool:
@@ -1044,11 +1080,17 @@ _URI_COMPONENT_SAFE = "!*'()"
 
 
 def session_cookie(name: str, value: str, max_age_seconds: int, secure: bool) -> str:
-    """A `Set-Cookie` value for the session cookie. `max_age_seconds=0` clears it."""
-    attrs = [f"{name}={quote(value, safe=_URI_COMPONENT_SAFE)}", "Path=/", "HttpOnly", "SameSite=Lax", f"Max-Age={max_age_seconds}"]
-    if secure:
-        attrs.append("Secure")
-    return "; ".join(attrs)
+    """A `Set-Cookie` value for the session cookie. `max_age_seconds=0` clears it.
+
+    Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser then
+    keeps it for the app inside a harness page that embeds it (a partitioned
+    cookie lives only under that page, so a sign-in there is that page's alone),
+    where a `Lax` cookie is never sent and the person could not stay signed in.
+    It weakens nothing: every signed-in change must carry the app's own Origin
+    (spec/v0_2/auth.md §4). Over plain http — loopback only — it is `Lax`.
+    """
+    site = ["SameSite=None", "Secure", "Partitioned"] if secure else ["SameSite=Lax"]
+    return "; ".join([f"{name}={quote(value, safe=_URI_COMPONENT_SAFE)}", "Path=/", "HttpOnly", *site, f"Max-Age={max_age_seconds}"])
 
 
 class FailureLimiter:
@@ -1174,18 +1216,24 @@ def _etag_matches(header: Optional[str], etag: str) -> bool:
     return any(strip(candidate) in ("*", strip(etag)) for candidate in header.split(","))
 
 
-def static_reply(method: str, headers: dict, body: bytes, modified: float, content_type: str) -> tuple[int, dict, bytes]:
+def static_reply(
+    method: str, headers: dict, body: bytes, modified: float, content_type: str, frame_ancestors: Optional[str] = None
+) -> tuple[int, dict, bytes]:
     """`(status, headers, body)` for a request naming one file the app serves.
 
     GET and HEAD only (the server drops the body of a HEAD reply). An ETag
     over the content wins over If-Modified-Since, whose whole-second clock an
-    edit within the same second cannot move.
+    edit within the same second cannot move. `frame_ancestors` (the third value
+    of `network_policy`) says who may embed the file, as a CSP
+    `frame-ancestors`; omitted, no framing policy is sent.
     """
     if method.upper() not in ("GET", "HEAD"):
         refusal = {"a2app": True, "ok": False, "code": "method_not_allowed", "message": "Static assets are GET-only."}
         return 405, {"content-type": "application/json", "allow": "GET, HEAD"}, to_json(refusal).encode()
     etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
     reply = {"content-type": content_type, "cache-control": "no-cache", "etag": etag, "last-modified": formatdate(modified, usegmt=True)}
+    if frame_ancestors is not None:
+        reply["content-security-policy"] = f"frame-ancestors {frame_ancestors}"
     inm = headers.get("if-none-match")
     fresh = _etag_matches(inm, etag)
     if not fresh and inm is None and headers.get("if-modified-since"):
@@ -4137,11 +4185,40 @@ def _selftest() -> int:
 
     def policy(host: Optional[str], public: Optional[str]) -> Any:
         try:
-            return network_policy(host, public)
+            return network_policy(host, public)[:2]
+        except ValueError:
+            return "refused"
+
+    def embedders(raw: Optional[str]) -> str:
+        try:
+            return network_policy(None, None, raw)[2]
         except ValueError:
             return "refused"
 
     check("loopback by default", policy(None, None), ("127.0.0.1", None))
+    check("embeddable by itself and harness pages on this machine by default", embedders(None), "'self' http://127.0.0.1:* http://localhost:*")
+    check("…and when A2APP_FRAME_ANCESTORS is blank", embedders("  "), "'self' http://127.0.0.1:* http://localhost:*")
+    check(
+        "A2APP_FRAME_ANCESTORS names the embedders",
+        embedders("https://portal.example.com, https://*.corp.example.com:8443\thttp://127.0.0.1:*"),
+        "'self' https://portal.example.com https://*.corp.example.com:8443 http://127.0.0.1:*",
+    )
+    check("…`none` leaves only the app itself", embedders("none"), "'self'")
+    check(
+        "…and an entry that is not an origin is refused",
+        [embedders("https://ok.example.com javascript:alert(1)"), embedders("bogus"), embedders("https://x.example.com/path"), embedders("https://x.example.com:٨٠")],
+        ["refused"] * 4,
+    )
+    refused_entries: Optional[str] = None
+    try:
+        network_policy(None, None, "https://ok.example.com bogus")
+    except ValueError as e:
+        refused_entries = str(e)
+    check(
+        "…naming the entries it refused",
+        refused_entries,
+        'A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or "none"; not bogus.',
+    )
     check("an https public URL is reduced to its origin", policy(None, "https://CRM.example.com/x"), ("127.0.0.1", "https://crm.example.com"))
     check("a non-loopback bind needs a public URL", policy("0.0.0.0", None), "refused")
     check("…an https one", policy("0.0.0.0", "http://localhost:8080"), "refused")
@@ -4184,9 +4261,19 @@ def _selftest() -> int:
         {"a": "1", "b": "x y"},
     )
     check(
-        "the session cookie: HttpOnly, SameSite=Lax, on /, Secure behind https",
+        "the session cookie behind https: HttpOnly, on /, SameSite=None, Secure, Partitioned (it works embedded)",
         session_cookie("a2app_session_x", "v/1", 10, True),
-        "a2app_session_x=v%2F1; Path=/; HttpOnly; SameSite=Lax; Max-Age=10; Secure",
+        "a2app_session_x=v%2F1; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=10",
+    )
+    check(
+        "…on loopback http: SameSite=Lax, never Secure",
+        session_cookie("a2app_session_x", "v/1", 10, False),
+        "a2app_session_x=v%2F1; Path=/; HttpOnly; SameSite=Lax; Max-Age=10",
+    )
+    check(
+        "…and clearing it keeps the same attributes",
+        [session_cookie("a2app_session_x", "", 0, True), session_cookie("a2app_session_x", "", 0, False)],
+        ["a2app_session_x=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0", "a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"],
     )
     tick = [0]
     failing = FailureLimiter(2, 60_000, lambda: tick[0])
@@ -4719,6 +4806,13 @@ def _selftest() -> int:
         [304, 304, 304, 200],
     )
     check("…GET and HEAD only", [static_reply("POST", {}, page, 0, "text/html")[0], static_reply("POST", {}, page, 0, "text/html")[1]["allow"]], [405, "GET, HEAD"])
+    framed = [static_reply("GET", h, page, 1_700_000_000, "text/html", "'self' http://127.0.0.1:*") for h in ({}, {"if-none-match": etag})]
+    check(
+        "…saying who may embed it, on a 200 and a 304 alike",
+        [[status, headers.get("content-security-policy")] for status, headers, _ in framed],
+        [[200, "frame-ancestors 'self' http://127.0.0.1:*"], [304, "frame-ancestors 'self' http://127.0.0.1:*"]],
+    )
+    check("…and no framing policy unless one is given", "content-security-policy" in served[1], False)
     check(
         "the public URL is reduced to its origin, as a browser sends it",
         [policy(None, "https://crm.example.com:443/x")[1], policy(None, "https://u:p@crm.example.com:8443")[1], policy(None, "mailto:x")],

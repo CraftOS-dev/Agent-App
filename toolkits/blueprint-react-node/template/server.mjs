@@ -50,7 +50,11 @@ const PORT = Number(process.env.PORT ?? manifest.port ?? 8091);
 // before anything is opened.
 let NETWORK;
 try {
-  NETWORK = networkPolicy({ host: process.env.A2APP_HOST, publicUrl: process.env.A2APP_PUBLIC_URL });
+  NETWORK = networkPolicy({
+    host: process.env.A2APP_HOST,
+    publicUrl: process.env.A2APP_PUBLIC_URL,
+    frameAncestors: process.env.A2APP_FRAME_ANCESTORS,
+  });
 } catch (e) {
   process.stderr.write(`${e.message}
 `);
@@ -328,6 +332,9 @@ const view = createStaticView(servedPublicDir, {
     // The framework's account page: sign in, invites, people, connected agents.
     "/_a2app/account": join(HERE, "a2app-account.html"),
   },
+  // Who may embed the app's pages: itself, and the harness pages on the
+  // viewer's machine unless A2APP_FRAME_ANCESTORS says otherwise.
+  frameAncestors: NETWORK.frameAncestors,
   fingerprintPaths: [join(HERE, "a2app.schema.mjs")],
   // An author who wants to move the marker by hand can bump manifest.appVersion.
   versionSalt: manifest.appVersion ?? "",

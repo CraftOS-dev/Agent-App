@@ -303,6 +303,16 @@ A request under any other host name is refused `403 forbidden_host`: the app
 answers only to loopback and the host of `A2APP_PUBLIC_URL`. That refusal is
 also what stops a page whose DNS re-resolves to 127.0.0.1 from reading the app.
 
+**Embedding.** The app's pages may be shown in a frame by the app itself and by
+agent harness pages on the viewer's own machine (`http://127.0.0.1:*`,
+`http://localhost:*`), sent as `Content-Security-Policy: frame-ancestors`. Set
+`A2APP_FRAME_ANCESTORS` to name the embedders instead — space- or comma-separated
+http(s) origins, `*.` subdomain and `*` port wildcards allowed (like
+`https://portal.example.com`) — or `none` for the app alone; an entry that is
+not an origin refuses to start. Behind an https `A2APP_PUBLIC_URL` the session
+cookie is `SameSite=None; Secure; Partitioned`, so a person can stay signed in
+to the app inside the harness page (that sign-in belongs to that page alone).
+
 ## Build, run, gate
 
 `manifest.json`'s `pipeline` drives everything; the app runs as `python main.py`,

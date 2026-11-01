@@ -65,6 +65,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isIPv4, isIPv6 } from "node:net";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { inflateRawSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -304,6 +305,9 @@ const migrateMode = process.argv.includes("--migrate");
  * names this machine (an SSH tunnel). The hooks read the normalized origin
  * back from the environment PocketBase inherits.
  */
+// Who may embed the app's pages (A2APP_FRAME_ANCESTORS), read by the same rule
+// the hooks apply: a bad entry is refused here, before PocketBase starts.
+const { frameAncestorsOf } = createRequire(import.meta.url)("./pb/pb_hooks/_a2app_rules.js");
 function isLoopbackName(name) {
   const n = name.toLowerCase();
   return n === "localhost" || n === "::1" || n === "[::1]" || (isIPv4(n) && n.split(".")[0] === "127");
@@ -332,7 +336,7 @@ function networkPolicy() {
         `(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1.`,
     );
   }
-  return { host, publicUrl: pub ? pub.origin : null };
+  return { host, publicUrl: pub ? pub.origin : null, frameAncestors: frameAncestorsOf(process.env.A2APP_FRAME_ANCESTORS) };
 }
 // `--migrate` binds nothing, so only a serving launch is held to it.
 let network = { host: "127.0.0.1", publicUrl: null };

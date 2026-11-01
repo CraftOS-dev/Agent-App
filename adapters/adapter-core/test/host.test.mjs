@@ -92,7 +92,11 @@ const refused = (env) => {
     return true;
   }
 };
-check("loopback by default", JSON.stringify(networkPolicy({})), JSON.stringify({ host: "127.0.0.1", publicUrl: null }));
+check("loopback by default", JSON.stringify([networkPolicy({}).host, networkPolicy({}).publicUrl]), JSON.stringify(["127.0.0.1", null]));
+check("embeddable by itself and harness pages on this machine by default", networkPolicy({}).frameAncestors, "'self' http://127.0.0.1:* http://localhost:*");
+check("A2APP_FRAME_ANCESTORS names the embedders", networkPolicy({ frameAncestors: "https://portal.example.com, https://*.corp.example.com:8443" }).frameAncestors, "'self' https://portal.example.com https://*.corp.example.com:8443");
+check("…`none` leaves only the app itself", networkPolicy({ frameAncestors: "none" }).frameAncestors, "'self'");
+check("…and an entry that is not an origin is refused", refused({ frameAncestors: "https://ok.example.com javascript:alert(1)" }), true);
 check("an https public URL is reduced to its origin", networkPolicy({ publicUrl: "https://crm.example.com/some/path" }).publicUrl, "https://crm.example.com");
 check("a non-loopback bind needs a public URL", refused({ host: "0.0.0.0" }), true);
 check("…an https one", refused({ host: "0.0.0.0", publicUrl: "http://localhost:8080" }), true);

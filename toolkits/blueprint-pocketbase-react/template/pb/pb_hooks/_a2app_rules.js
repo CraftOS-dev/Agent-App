@@ -700,11 +700,42 @@ function parseCookies(header) {
   return out;
 }
 
-/** A `Set-Cookie` value for the session cookie. `maxAgeSeconds: 0` clears it. */
+/**
+ * A `Set-Cookie` value for the session cookie. `maxAgeSeconds: 0` clears it.
+ *
+ * Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser then
+ * keeps it for the app inside a harness page that embeds it (a partitioned
+ * cookie lives only under that page), where a `Lax` cookie is never sent. Every
+ * signed-in change still needs the app's own Origin. Over plain http it is `Lax`.
+ */
 function sessionCookie(name, value, opts) {
-  var attrs = [name + "=" + encodeURIComponent(value), "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=" + opts.maxAgeSeconds];
-  if (opts.secure) attrs.push("Secure");
-  return attrs.join("; ");
+  var site = opts.secure ? ["SameSite=None", "Secure", "Partitioned"] : ["SameSite=Lax"];
+  return [name + "=" + encodeURIComponent(value), "Path=/", "HttpOnly"].concat(site, ["Max-Age=" + opts.maxAgeSeconds]).join("; ");
+}
+
+/** Who may embed the app when its owner says nothing: itself, and the agent
+ *  harness pages on the viewer's own machine. */
+var DEFAULT_FRAME_ANCESTORS = ["http://127.0.0.1:*", "http://localhost:*"];
+var EMBEDDER = /^https?:\/\/(\*\.)?[A-Za-z0-9.-]+(:(\d{1,5}|\*))?$/;
+
+/**
+ * The CSP `frame-ancestors` source list for A2APP_FRAME_ANCESTORS: unset, the
+ * defaults; `none`, the app alone; otherwise its space- or comma-separated
+ * origins. Throws on an entry that is not an origin (pb-serve.mjs refuses to
+ * start on it), so a typo never silently changes who can embed the app.
+ */
+function frameAncestorsOf(raw) {
+  var value = String(raw === undefined || raw === null ? "" : raw).trim();
+  if (value === "") return ["'self'"].concat(DEFAULT_FRAME_ANCESTORS).join(" ");
+  if (value === "none") return "'self'";
+  var origins = value.split(/[\s,]+/).filter(function (o) { return o !== ""; });
+  var bad = origins.filter(function (o) { return !EMBEDDER.test(o); });
+  if (bad.length > 0) {
+    throw new Error(
+      'A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or "none"; not ' + bad.join(", ") + ".",
+    );
+  }
+  return ["'self'"].concat(origins).join(" ");
 }
 
 /** Every scope an app declares — what `*` means: read and write on each
@@ -943,7 +974,7 @@ function ownedByProblems(entities, ownedBy) {
   return problems;
 }
 
-module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, OPEN_TASK: OPEN_TASK, newTask: newTask, taskWire: taskWire, reachesTask: reachesTask, runsTask: runsTask, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, parseLoopbackPort: parseLoopbackPort, loopbackRedirect: loopbackRedirect, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
+module.exports = { RULES_VERSION: RULES_VERSION, validate: validate, looksLikeDate: looksLikeDate, isDayKey: isDayKey, labelField: labelField, schemaVersion: schemaVersion, describeViolation: describeViolation, describeIncomplete: describeIncomplete, evaluatePredicate: evaluatePredicate, explainPredicate: explainPredicate, referencingFields: referencingFields, validateArgs: validateArgs, canonicalize: canonicalize, approvalText: approvalText, occurrenceText: occurrenceText, QUEUE: QUEUE, TERMINAL: TERMINAL, OPEN_TASK: OPEN_TASK, newTask: newTask, taskWire: taskWire, reachesTask: reachesTask, runsTask: runsTask, applyTaskAction: applyTaskAction, sweepTask: sweepTask, eventDeclared: eventDeclared, markReadOnly: markReadOnly, AUTH: AUTH, SECRET_ALPHABET: SECRET_ALPHABET, SECRET_LAST_ALPHABET: SECRET_LAST_ALPHABET, USER_CODE_ALPHABET: USER_CODE_ALPHABET, formatUserCode: formatUserCode, normalizeUserCode: normalizeUserCode, normalizeLogin: normalizeLogin, parseCookies: parseCookies, sessionCookie: sessionCookie, frameAncestorsOf: frameAncestorsOf, declaredScopes: declaredScopes, expandScopes: expandScopes, intersectScopes: intersectScopes, parseAgentName: parseAgentName, parseGrantRequest: parseGrantRequest, widerThanAsked: widerThanAsked, credentialWire: credentialWire, grantRefusal: grantRefusal, grantLive: grantLive, grantPrunable: grantPrunable, lastUsedDue: lastUsedDue, accountProblem: accountProblem, losesLastOwner: losesLastOwner, signInRetryAfter: signInRetryAfter, signInFailed: signInFailed, parseLoopbackPort: parseLoopbackPort, loopbackRedirect: loopbackRedirect, pollDevice: pollDevice, capabilityScopes: capabilityScopes, capabilityProblems: capabilityProblems, ownedByProblems: ownedByProblems };
 
 /* -------- gate self-test: `node _a2app_rules.js --selftest` -------- */
 if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--selftest") !== -1) {
@@ -1161,10 +1192,26 @@ if (typeof process !== "undefined" && process.argv && process.argv.indexOf("--se
 
   // Cookies, byte for byte as adapter-core reads and writes them.
   if (JSON.stringify(parseCookies("a=1; b=%20x; a=2; =bad; c; d=%E0%A4%A")) !== '{"a":"1","b":" x","":"bad"}') failures.push("cookie parsing");
-  if (sessionCookie("a2app_session_x", "v/1+", { maxAgeSeconds: 1209600, secure: true }) !== "a2app_session_x=v%2F1%2B; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure") {
-    failures.push("session cookie attributes");
+  if (sessionCookie("a2app_session_x", "v/1+", { maxAgeSeconds: 1209600, secure: true }) !== "a2app_session_x=v%2F1%2B; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=1209600") {
+    failures.push("session cookie attributes over https (partitioned, for a harness page that embeds the app)");
   }
+  if (sessionCookie("a2app_session_x", "v", { maxAgeSeconds: 1209600, secure: false }) !== "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600") failures.push("session cookie attributes on loopback");
   if (sessionCookie("a2app_session_x", "", { maxAgeSeconds: 0, secure: false }) !== "a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0") failures.push("clearing cookie");
+
+  // Who may embed the app (A2APP_FRAME_ANCESTORS), exactly as adapter-core reads it.
+  if (frameAncestorsOf(undefined) !== "'self' http://127.0.0.1:* http://localhost:*") failures.push("frame ancestors: default");
+  if (frameAncestorsOf(" none ") !== "'self'") failures.push("frame ancestors: none");
+  if (frameAncestorsOf("https://portal.example.com, https://*.corp.example.com:8443") !== "'self' https://portal.example.com https://*.corp.example.com:8443") {
+    failures.push("frame ancestors: a list");
+  }
+  ["bogus", "https://ok.example.com javascript:alert(1)", "https://x.example.com/path", "*"].forEach(function (raw) {
+    try {
+      frameAncestorsOf(raw);
+      failures.push("frame ancestors: " + raw + " is refused");
+    } catch (_e) {
+      /* refused, as it must be */
+    }
+  });
 
   // Scopes and the ceiling (spec §3): effective = grant ∩ what its person may do.
   var declared = declaredScopes(["tasks"], ["request-triage"]);

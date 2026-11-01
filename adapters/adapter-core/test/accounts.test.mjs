@@ -92,7 +92,7 @@ ok("…and signs the person in", alice.cookie.startsWith("a2app_session_acct_tes
 ok("…without ever serving the password hash", !JSON.stringify(accepted.json).includes("pbkdf2"));
 const setCookie = accepted.headers["set-cookie"];
 ok("the session cookie is HttpOnly, SameSite=Lax, on /", /HttpOnly/.test(setCookie) && /SameSite=Lax/.test(setCookie) && /Path=\//.test(setCookie));
-ok("…and not Secure on a loopback-only app", !/Secure/.test(setCookie));
+ok("…and not Secure or partitioned on a loopback-only app", !/Secure/.test(setCookie) && !/Partitioned/.test(setCookie));
 check("an invite is single use", (await person().call("POST", `/api/_a2app/invites/${ownerInvite.json.code}`, { name: "Eve", login: "eve@x.test", password: "correct horse battery" })).json.code, "invite_invalid");
 
 const me = await alice.call("GET", "/api/_a2app/session");
@@ -181,6 +181,9 @@ const secureAccept = await secure.handle({
   body: { name: "Owner", login: "o", password: "correct horse battery" },
 });
 ok("…and the session cookie is Secure", /Secure/.test(secureAccept.headers["set-cookie"]));
+// Over https the cookie must also reach the app inside a harness page that
+// embeds it, where a Lax cookie is never sent: partitioned to that page.
+ok("…SameSite=None and Partitioned, so it works embedded", /SameSite=None/.test(secureAccept.headers["set-cookie"]) && /Partitioned/.test(secureAccept.headers["set-cookie"]));
 
 let refused = null;
 try {

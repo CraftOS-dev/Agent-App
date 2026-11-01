@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, App, OperationRunner, Store};
+use a2app_adapter::{parse_qs, random_hex, Adapter, AdapterConfig, App, NetworkPolicy, OperationRunner, Store};
 // The defaults for the app's optional hooks (see `App`): unused when schema.rs
 // defines them all.
 #[allow(unused_imports)]
@@ -515,10 +515,16 @@ fn serve() -> Result<(), String> {
     let update_js = PathBuf::from("a2app-update.js");
     let account_html = PathBuf::from("a2app-account.html");
 
-    // Where to listen, and the address people and agents use (A2APP_HOST,
-    // A2APP_PUBLIC_URL). A combination that would send the agent token across
-    // a network in clear is refused here, before anything is opened.
-    let (host, public_url) = a2app_adapter::network_policy(std::env::var("A2APP_HOST").ok(), std::env::var("A2APP_PUBLIC_URL").ok())?;
+    // Where to listen, the address people and agents use, and who may embed
+    // the app's pages (A2APP_HOST, A2APP_PUBLIC_URL, A2APP_FRAME_ANCESTORS). A
+    // combination that would send the agent token across a network in clear,
+    // or an embedder that is not an origin, is refused here, before anything
+    // is opened.
+    let NetworkPolicy { host, public_url, frame_ancestors } = a2app_adapter::network_policy(
+        std::env::var("A2APP_HOST").ok(),
+        std::env::var("A2APP_PUBLIC_URL").ok(),
+        std::env::var("A2APP_FRAME_ANCESTORS").ok(),
+    )?;
 
     let token = agent_token()?;
     let allowed_origins = vec![
@@ -600,6 +606,13 @@ fn serve() -> Result<(), String> {
         }),
     );
 
+    let view = StaticView {
+        dir: &served_dir,
+        update_js: &update_js,
+        account_html: &account_html,
+        frame_ancestors: &frame_ancestors,
+    };
+
     // Observe every request for the log: id, method, path, status, duration.
     // Paths only — query strings can carry filters over user data.
     let mut next_request_id: u64 = 0;
@@ -610,8 +623,7 @@ fn serve() -> Result<(), String> {
         let method = request.method().as_str().to_uppercase();
         let logged = request.url().split('?').next().unwrap_or("").to_string();
         let (path, query_string) = split_target(request.url());
-        let aliases = StaticAliases { update_js: &update_js, account_html: &account_html };
-        let status = handle_request(&mut adapter, request, &method, &path, &query_string, &served_dir, &aliases);
+        let status = handle_request(&mut adapter, request, &method, &path, &query_string, &view);
         log_line(
             if status >= 500 { "error" } else { "info" },
             "http",
@@ -624,13 +636,20 @@ fn serve() -> Result<(), String> {
     Ok(())
 }
 
-/// The system-owned files served from the project root, outside the built View.
-struct StaticAliases<'a> {
-    /// `/_a2app/update.js`: the update watcher.
+/// What the static View serves, and how.
+struct StaticView<'a> {
+    /// The built View (dist/, or its live snapshot).
+    dir: &'a Path,
+    /// `/_a2app/update.js`: the update watcher, a system-owned file served from
+    /// the project root, outside the built View.
     update_js: &'a Path,
     /// `/_a2app/account`: the framework's account page — sign in, invites,
-    /// people, connected agents. The same file in every blueprint.
+    /// people, connected agents. The same file in every blueprint, served from
+    /// the project root too.
     account_html: &'a Path,
+    /// Who may embed these pages, as a CSP `frame-ancestors` source list
+    /// ([`NetworkPolicy::frame_ancestors`]). Sent on every file.
+    frame_ancestors: &'a str,
 }
 
 /// Route ownership, in order: (1) the A2App adapter sees every request first —
@@ -646,8 +665,7 @@ fn handle_request(
     method: &str,
     path: &str,
     query_string: &str,
-    served_dir: &Path,
-    aliases: &StaticAliases,
+    view: &StaticView,
 ) -> u16 {
     // Read the body under the cap, counting bytes as they arrive rather than
     // trusting Content-Length, so a client that lies gains nothing.
@@ -711,13 +729,13 @@ fn handle_request(
     // served from the project root, outside the built tree, so they survive
     // any View rewrite.
     let alias = match path {
-        "/_a2app/update.js" => Some(aliases.update_js),
-        "/_a2app/account" => Some(aliases.account_html),
+        "/_a2app/update.js" => Some(view.update_js),
+        "/_a2app/account" => Some(view.account_html),
         _ => None,
     };
     let file = match alias {
         Some(file) => Some(file.to_path_buf()).filter(|f| f.is_file()),
-        None => resolve_static(served_dir, path),
+        None => resolve_static(view.dir, path),
     };
     // Path before method: 405 is only for a file that exists.
     let file = match file {
@@ -754,6 +772,9 @@ fn handle_request(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let last_modified = http_date(mtime_secs);
+    // Who may embed the app's pages: itself, and the harness pages on the
+    // viewer's machine unless A2APP_FRAME_ANCESTORS says otherwise.
+    let framing = format!("frame-ancestors {}", view.frame_ancestors);
 
     // `Cache-Control: no-cache` is "cache it, but revalidate before every
     // use" — the right default for plain, unhashed filenames edited in place:
@@ -763,6 +784,7 @@ fn handle_request(
             .with_header(header("Cache-Control", "no-cache"))
             .with_header(header("ETag", &etag))
             .with_header(header("Last-Modified", &last_modified))
+            .with_header(header("Content-Security-Policy", &framing))
     };
 
     // ETag wins where both validators are present: it compares content, while
@@ -805,7 +827,8 @@ fn handle_request(
         .with_header(header("Content-Type", content_type_of(&file)))
         .with_header(header("Cache-Control", "no-cache"))
         .with_header(header("ETag", &etag))
-        .with_header(header("Last-Modified", &last_modified));
+        .with_header(header("Last-Modified", &last_modified))
+        .with_header(header("Content-Security-Policy", &framing));
     let _ = request.respond(response);
     200
 }

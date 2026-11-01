@@ -34,11 +34,14 @@ HERE = Path(__file__).resolve().parent
 manifest = json.loads((HERE / "manifest.json").read_text())
 PORT = int(os.environ.get("PORT", manifest.get("port", 8090)))
 
-# Where to listen, and the address people and agents use (A2APP_HOST,
-# A2APP_PUBLIC_URL). A combination that would send the agent token across a
-# network in clear is refused here, before anything is opened.
+# Where to listen, the address people and agents use, and the pages that may
+# embed the app's own (A2APP_HOST, A2APP_PUBLIC_URL, A2APP_FRAME_ANCESTORS). A
+# combination that would send the agent token across a network in clear, or an
+# embedder that is not an origin, is refused here, before anything is opened.
 try:
-    HOST, PUBLIC_URL = network_policy(os.environ.get("A2APP_HOST"), os.environ.get("A2APP_PUBLIC_URL"))
+    HOST, PUBLIC_URL, FRAME_ANCESTORS = network_policy(
+        os.environ.get("A2APP_HOST"), os.environ.get("A2APP_PUBLIC_URL"), os.environ.get("A2APP_FRAME_ANCESTORS")
+    )
 except ValueError as e:
     sys.exit(str(e))
 DATA_DIR = Path(os.environ.get("A2APP_DATA_DIR", HERE / "data")).resolve()
@@ -223,9 +226,11 @@ ALL_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 @app.api_route(ACCOUNT_URL, methods=ALL_METHODS)
 async def account_page(request: Request):
     # Served like a static file, with validators: a reload re-checks, and an
-    # unchanged page costs a bodyless 304.
+    # unchanged page costs a bodyless 304. Embeddable by the app itself and the
+    # harness pages on the viewer's machine, unless A2APP_FRAME_ANCESTORS says
+    # otherwise.
     status, headers, body = static_reply(
-        request.method, dict(request.headers), ACCOUNT_PAGE, ACCOUNT_PAGE_MODIFIED, "text/html; charset=utf-8"
+        request.method, dict(request.headers), ACCOUNT_PAGE, ACCOUNT_PAGE_MODIFIED, "text/html; charset=utf-8", FRAME_ANCESTORS
     )
     return Response(body, status_code=status, headers=headers)
 
@@ -234,10 +239,11 @@ async def account_page(request: Request):
 async def home(request: Request):
     # This stack has no View of its own, so a person who lands on the app (the
     # account page sends them to "/" after signing in) reaches the account page.
+    # The landing carries the same framing policy as the page it leads to.
     if request.method not in ("GET", "HEAD"):
         status, headers, body = static_reply(request.method, {}, b"", 0, "")
         return Response(body, status_code=status, headers=headers)
-    return RedirectResponse(ACCOUNT_URL, status_code=302)
+    return RedirectResponse(ACCOUNT_URL, status_code=302, headers={"content-security-policy": f"frame-ancestors {FRAME_ANCESTORS}"})
 
 
 @app.exception_handler(StarletteHTTPException)

@@ -245,9 +245,17 @@ module A2appAdapter
   # binding a non-loopback address needs an https public URL, and a public URL
   # may be plain http only when it names this machine (an SSH tunnel ends on
   # loopback). config/puma.rb binds with it; the controller passes the public
-  # URL to the adapter.
+  # URL to the adapter and the framing policy to the View.
   module Network
     module_function
+
+    # Who may embed an app when its owner says nothing: the app itself, and
+    # the agent harness pages on the viewer's own machine (Hermes, OpenClaw, …).
+    DEFAULT_FRAME_ANCESTORS = ["http://127.0.0.1:*", "http://localhost:*"].freeze
+
+    # One A2APP_FRAME_ANCESTORS entry: an http(s) origin, optionally with a
+    # `*.` subdomain wildcard and a `*` port.
+    EMBEDDER = %r{\Ahttps?://(\*\.)?[A-Za-z0-9.-]+(:(\d{1,5}|\*))?\z}
 
     # Is `name` a loopback name or address? Accepts a bracketed IPv6 literal.
     def loopback_name?(name)
@@ -265,9 +273,30 @@ module A2appAdapter
       nil
     end
 
-    # [bind host, public origin or nil] from A2APP_HOST / A2APP_PUBLIC_URL, or
-    # ArgumentError with the reason the combination is unsafe.
-    def policy(host_env, public_url_env)
+    # The CSP `frame-ancestors` source list for A2APP_FRAME_ANCESTORS: unset,
+    # the defaults; `none`, the app alone; otherwise its space- or
+    # comma-separated origins. An entry that is not an origin is refused at
+    # start (ArgumentError) rather than dropped, so a typo never silently
+    # changes who can embed the app.
+    def frame_ancestors_of(raw)
+      value = raw.to_s.strip
+      return ["'self'", *DEFAULT_FRAME_ANCESTORS].join(" ") if value.empty?
+      return "'self'" if value == "none"
+      origins = value.split(/[\s,]+/).reject(&:empty?)
+      bad = origins.grep_v(EMBEDDER)
+      unless bad.empty?
+        raise ArgumentError, "A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or " \
+                             "http://127.0.0.1:*), or \"none\"; not #{bad.join(", ")}."
+      end
+      ["'self'", *origins].join(" ")
+    end
+
+    # [bind host, public origin or nil, frame-ancestors source list] from
+    # A2APP_HOST / A2APP_PUBLIC_URL / A2APP_FRAME_ANCESTORS, or ArgumentError
+    # with the reason the combination is unsafe. The list is what every page
+    # of the View carries as `Content-Security-Policy: frame-ancestors …`:
+    # who may embed the app's pages.
+    def policy(host_env, public_url_env, frame_ancestors_env = nil)
       host = host_env.to_s.strip
       host = "127.0.0.1" if host.empty?
       public_url = nil
@@ -293,7 +322,7 @@ module A2appAdapter
         raise ArgumentError, "A2APP_HOST=#{host} exposes the app to the network, so A2APP_PUBLIC_URL must name its https address " \
                              "(the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
       end
-      [host, public_url]
+      [host, public_url, frame_ancestors_of(frame_ancestors_env)]
     end
   end
 
@@ -384,10 +413,17 @@ module A2appAdapter
     end
 
     # A `Set-Cookie` value for the session cookie. `max_age_seconds: 0` clears it.
+    #
+    # Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser
+    # then keeps it for the app inside a harness page that embeds it (a
+    # partitioned cookie lives only under that page, so a sign-in there is
+    # that page's alone), where a `Lax` cookie is never sent and the person
+    # could not stay signed in. It weakens nothing: every signed-in change
+    # must carry the app's own Origin (spec/v0_2/auth.md §4). Over plain http
+    # — loopback only — it is `Lax`.
     def session_cookie(name, value, max_age_seconds:, secure:)
-      attrs = ["#{name}=#{Js.encode_uri_component(value)}", "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=#{max_age_seconds}"]
-      attrs << "Secure" if secure
-      attrs.join("; ")
+      site = secure ? %w[SameSite=None Secure Partitioned] : %w[SameSite=Lax]
+      ["#{name}=#{Js.encode_uri_component(value)}", "Path=/", "HttpOnly", *site, "Max-Age=#{max_age_seconds}"].join("; ")
     end
 
     # A login as stored and compared: trimmed, lower-cased.
@@ -1760,13 +1796,17 @@ module A2appAdapter
     # system-owned helpers are served without living in the agent's View);
     # alias targets count towards `version`, as do `fingerprint_paths`.
     # `version_salt` (manifest.appVersion) lets an author move it by hand.
+    # `frame_ancestors` is who may embed these pages, as a CSP
+    # `frame-ancestors` source list (Network.policy's third value), sent on
+    # every file; nil, no framing policy is sent.
     def initialize(dir, aliases: {}, fingerprint_paths: [], version_salt: nil, cache_control: "no-cache",
-                   index_file: "index.html", version_ttl_ms: 1000)
+                   frame_ancestors: nil, index_file: "index.html", version_ttl_ms: 1000)
       @root = File.expand_path(dir)
       @aliases = aliases
       @versioned = [@root, *aliases.values, *fingerprint_paths]
       @version_salt = version_salt
       @cache_control = cache_control
+      @frame_ancestors = frame_ancestors
       @index_file = index_file
       @version_ttl_ms = version_ttl_ms
       @version_lock = Mutex.new
@@ -1829,6 +1869,7 @@ module A2appAdapter
         "etag" => %("#{Digest::SHA256.hexdigest(body)[0, 32]}"),
         "last-modified" => modified.httpdate,
       }
+      out["content-security-policy"] = "frame-ancestors #{@frame_ancestors}" unless @frame_ancestors.nil?
       # ETag wins where both validators are present: it compares content,
       # while If-Modified-Since compares whole seconds.
       none_match = headers["if-none-match"]
@@ -4234,9 +4275,9 @@ module A2appAdapter
     end
 
     # Host and network policy: the app answers only to loopback and its own
-    # origins (the public URL among them), and refuses to listen where the
-    # agent token would cross a network in clear.
-    hosted = Adapter.new(app_id: "selftest", app_name: nil, entities: {}, operations: [], store: Store.new, token: "t",
+    # origins (the public URL among them), refuses to listen where the agent
+    # token would cross a network in clear, and says who may embed its pages.
+    hosted =Adapter.new(app_id: "selftest", app_name: nil, entities: {}, operations: [], store: Store.new, token: "t",
                          modules: [{ "name" => "core" }], allowed_origins: ["http://127.0.0.1:9931"],
                          public_url: "https://crm.example.com")
     check.call("the public host is answered", hosted.allowed_host?("crm.example.com"), true)
@@ -4248,11 +4289,25 @@ module A2appAdapter
     check.call("dispatch refuses a foreign host before identity",
                hosted.dispatch("GET", "/api/_a2app", { "Host" => "evil.example.com" }, nil)[0], 403)
     policy = lambda do |host, public_url|
-      Network.policy(host, public_url)
+      Network.policy(host, public_url).first(2)
+    rescue ArgumentError
+      "refused"
+    end
+    framing = lambda do |raw|
+      Network.policy(nil, nil, raw)[2]
     rescue ArgumentError
       "refused"
     end
     check.call("loopback by default", policy.call(nil, nil), ["127.0.0.1", nil])
+    check.call("embeddable by itself and harness pages on this machine by default",
+               [framing.call(nil), framing.call("  ")], ["'self' http://127.0.0.1:* http://localhost:*"] * 2)
+    check.call("A2APP_FRAME_ANCESTORS names the embedders",
+               framing.call("https://portal.example.com, https://*.corp.example.com:8443  http://127.0.0.1:*"),
+               "'self' https://portal.example.com https://*.corp.example.com:8443 http://127.0.0.1:*")
+    check.call("…`none` leaves only the app itself", framing.call("none"), "'self'")
+    check.call("…and an entry that is not an origin is refused",
+               ["https://ok.example.com javascript:alert(1)", "https://portal.example.com/path", "'unsafe-inline'", "*"]
+                 .map { |raw| framing.call(raw) }, ["refused"] * 4)
     check.call("an https public URL is reduced to its origin", policy.call(nil, "https://CRM.example.com/x"),
                ["127.0.0.1", "https://crm.example.com"])
     check.call("a non-loopback bind needs a public URL", policy.call("0.0.0.0", nil), "refused")
@@ -4292,9 +4347,17 @@ module A2appAdapter
     check.call("cookies: the first of a name wins, values are decoded",
                Auth.parse_cookies("a=1; b=x%20y; a=2; =bad; c"), { "a" => "1", "b" => "x y", "" => "bad" })
     check.call("…and a value this app did not write is dropped", Auth.parse_cookies("x=%E0%A4%A"), {})
-    check.call("the session cookie's attributes",
+    check.call("the session cookie over loopback http: Lax, not Secure",
+               Auth.session_cookie("a2app_session_x", "v", max_age_seconds: 1_209_600, secure: false),
+               "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600")
+    # Over https it must also reach the app inside a harness page that embeds
+    # it, where a Lax cookie is never sent: partitioned to that page.
+    check.call("…over https: SameSite=None, Secure and Partitioned, so it works embedded",
                Auth.session_cookie("a2app_session_x", "v", max_age_seconds: 1_209_600, secure: true),
-               "a2app_session_x=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure")
+               "a2app_session_x=v; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=1209600")
+    check.call("…and clearing it carries the same attributes",
+               Auth.session_cookie("a2app_session_x", "", max_age_seconds: 0, secure: true),
+               "a2app_session_x=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0")
     check.call("a login is trimmed and lower-cased", Auth.normalize_login("  Bob@Example.COM "), "bob@example.com")
     clock = 0
     limiter = Auth::FailureLimiter.new(10, 900_000, -> { clock })
@@ -4734,8 +4797,15 @@ module A2appAdapter
       FileUtils.mkdir_p(File.join(public_dir, "assets"))
       File.write(File.join(public_dir, "index.html"), "<p>hi</p>")
       File.write(File.join(tmp, "watcher.js"), "// watcher")
-      view = StaticView.new(public_dir, aliases: { "/_a2app/update.js" => File.join(tmp, "watcher.js") }, version_ttl_ms: 0)
+      view = StaticView.new(public_dir, aliases: { "/_a2app/update.js" => File.join(tmp, "watcher.js") },
+                                        frame_ancestors: "'self' http://127.0.0.1:*", version_ttl_ms: 0)
       index = view.serve("GET", "/", {})
+      check.call("every page says who may embed it",
+                 [view.serve("GET", "/", {}), view.serve("GET", "/_a2app/update.js", {}),
+                  view.serve("GET", "/", { "if-none-match" => "*" })].map { |r| r[1]["content-security-policy"] },
+                 ["frame-ancestors 'self' http://127.0.0.1:*"] * 3)
+      check.call("…and without a policy, none is sent",
+                 StaticView.new(public_dir).serve("GET", "/", {})[1].key?("content-security-policy"), false)
       check.call("the index is served with an ETag, revalidated every time",
                  [index[0], index[1]["etag"].match?(/\A"\h{32}"\z/), index[1]["cache-control"], index[2]],
                  [200, true, "no-cache", "<p>hi</p>"])
@@ -4761,7 +4831,7 @@ module A2appAdapter
       return 1
     end
     puts "a2app_adapter selftest ok (guard, predicates, fingerprint, referential deletes, filter, sqlite store, " \
-         "host and network policy, auth primitives, the ceiling and refusals, ownership, who reaches a task, " \
+         "host, network and framing policy, auth primitives, the ceiling and refusals, ownership, who reaches a task, " \
          "JavaScript values and RFC 8785, operations and tasks, device confirmation, persistence across a restart, " \
          "the View)"
     0

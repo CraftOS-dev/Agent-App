@@ -13,7 +13,8 @@ class A2appController < ActionController::Base
   # adapter carries its own protection: a browser request carrying a foreign
   # Origin is refused (403 forbidden_origin) before anything else runs, a
   # change made with a multi-user app's session cookie must carry the app's
-  # own Origin (the cookie is SameSite=Lax besides), and agent writes
+  # own Origin (whatever its SameSite: Lax on loopback http, None and
+  # partitioned over https so it works embedded), and agent writes
   # authenticate with the x-a2app-token header a foreign page cannot read. A
   # Rails CSRF check would only 422 the app's own View.
   skip_forgery_protection
@@ -76,6 +77,9 @@ class A2appController < ActionController::Base
             "/_a2app/update.js" => Rails.root.join("a2app-update.js").to_s,
             "/_a2app/account" => Rails.root.join("a2app-account.html").to_s,
           },
+          # Who may embed the app's pages: itself, and the harness pages on
+          # the viewer's machine unless A2APP_FRAME_ANCESTORS says otherwise.
+          frame_ancestors: network[2],
           fingerprint_paths: [Rails.root.join("lib", "a2app_schema.rb").to_s],
           version_salt: manifest["appVersion"].to_s
         )
@@ -112,6 +116,12 @@ class A2appController < ActionController::Base
       @manifest ||= JSON.parse(Rails.root.join("manifest.json").read)
     end
 
+    # [bind host, public origin, frame-ancestors] from the environment.
+    # config/puma.rb already refused an unsafe or malformed one before binding.
+    def network
+      @network ||= A2appAdapter::Network.policy(ENV["A2APP_HOST"], ENV["A2APP_PUBLIC_URL"], ENV["A2APP_FRAME_ANCESTORS"])
+    end
+
     def build_adapter
       port = Integer(ENV.fetch("PORT") { manifest["port"] || 8096 })
       # The launch contract (`serve` and `dev` both set these; the default
@@ -144,8 +154,7 @@ class A2appController < ActionController::Base
         # level lists; every entity and operation names one.
         modules: manifest["modules"] || [],
         allowed_origins: ["http://localhost:#{port}", "http://127.0.0.1:#{port}"],
-        # config/puma.rb already refused an unsafe combination before binding.
-        public_url: A2appAdapter::Network.policy(ENV["A2APP_HOST"], ENV["A2APP_PUBLIC_URL"])[1],
+        public_url: network[1],
         operation_runners: A2appSchema::OPERATION_RUNNERS,
         # The event types this app may emit. A runner's `store.trigger` refuses
         # a type that is not declared here, so the set of things the app can

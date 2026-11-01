@@ -85,7 +85,9 @@ This is evaluated per request, never cached across requests. `whoami.scopes` rep
 
 - `POST /api/_a2app/session {login, password}` sets the cookie `a2app_session_<appId>`.
 - The cookie value is 256 random bits, stored as its sha256.
-- Cookie attributes: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` 14 days, and `Secure` when the app's public URL is https (§9).
+- Cookie attributes: `HttpOnly`, `Path=/`, `Max-Age` 14 days, and:
+  - when the app's public URL is https (§10): `SameSite=None; Secure; Partitioned`, so a person stays signed in to the app inside a harness page that embeds it (§10). A partitioned cookie lives only under the page that embeds the app, so that sign-in is separate from the app's own tab;
+  - otherwise (loopback): `SameSite=Lax`.
 - A deactivated account's sessions stop working on the next request.
 - **CSRF:** a session-authenticated request that changes anything must carry an `Origin` that is this app's own; otherwise `403 forbidden_origin`.
 - **Sign-in failures:** 10 per login per 15 minutes, then `429 rate_limited` with `retryAfterSeconds`.
@@ -211,6 +213,7 @@ The session, invite and user routes exist only on `multi-user` apps; elsewhere t
 - **Binding:** the app binds `A2APP_HOST` (default `127.0.0.1`).
 - **Refusal:** binding anything other than a loopback address without an `https` public URL is refused at start. A bearer token must not cross a network in clear.
 - **Tunnels:** an SSH tunnel to a loopback address needs neither.
+- **Embedding:** every page of the View carries `Content-Security-Policy: frame-ancestors 'self' <embedders>`. The embedders are `A2APP_FRAME_ANCESTORS` (space- or comma-separated http(s) origins, `*.` subdomain and `*` port wildcards allowed; `none` for none); unset, they are `http://127.0.0.1:* http://localhost:*`, the agent harness pages on the viewer's own machine. An entry that is not an origin is refused at start.
 
 ## 11. Clients (framework, non-normative)
 

@@ -101,11 +101,19 @@ export function parseCookies(header: string | undefined): Record<string, string>
   return out;
 }
 
-/** A `Set-Cookie` value for the session cookie. `maxAgeSeconds: 0` clears it. */
+/**
+ * A `Set-Cookie` value for the session cookie. `maxAgeSeconds: 0` clears it.
+ *
+ * Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser then
+ * keeps it for the app inside a harness page that embeds it (a partitioned
+ * cookie lives only under that page, so a sign-in there is that page's alone),
+ * where a `Lax` cookie is never sent and the person could not stay signed in.
+ * It weakens nothing: every signed-in change must carry the app's own Origin
+ * (spec/v0_2/auth.md §4). Over plain http — loopback only — it is `Lax`.
+ */
 export function sessionCookie(name: string, value: string, opts: { maxAgeSeconds: number; secure: boolean }): string {
-  const attrs = [`${name}=${encodeURIComponent(value)}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${opts.maxAgeSeconds}`];
-  if (opts.secure) attrs.push("Secure");
-  return attrs.join("; ");
+  const site = opts.secure ? ["SameSite=None", "Secure", "Partitioned"] : ["SameSite=Lax"];
+  return [`${name}=${encodeURIComponent(value)}`, "Path=/", "HttpOnly", ...site, `Max-Age=${opts.maxAgeSeconds}`].join("; ");
 }
 
 /* ----------------------------------------------------- failure limiting */

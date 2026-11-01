@@ -43,6 +43,14 @@ module RailsVueAgentApp
     # and an unchanged file costs a bodyless 304.
     config.public_file_server.enabled = false
 
+    # Who may frame the app is the adapter's to say: every page of the View
+    # carries `Content-Security-Policy: frame-ancestors` (the app itself and
+    # harness pages on the viewer's machine, or A2APP_FRAME_ANCESTORS). Rails'
+    # default `X-Frame-Options: SAMEORIGIN` would be a second policy
+    # contradicting it — the harness page embedding the app is never the
+    # app's origin — so it is not sent.
+    config.action_dispatch.default_headers = config.action_dispatch.default_headers.except("X-Frame-Options")
+
     # The Host check, in front of everything this app serves: the adapter's
     # routes, the View, and anything Rails adds itself. A request naming a
     # host the app does not answer to is refused 403 forbidden_host — which

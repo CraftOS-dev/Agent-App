@@ -1469,17 +1469,18 @@ pub fn parse_cookies(header: &str) -> BTreeMap<String, String> {
 }
 
 /// A `Set-Cookie` value for the session cookie. `max_age_seconds: 0` clears it.
+///
+/// Over https the cookie is `SameSite=None; Secure; Partitioned`: a browser then
+/// keeps it for the app inside a harness page that embeds it (a partitioned
+/// cookie lives only under that page, so a sign-in there is that page's alone),
+/// where a `Lax` cookie is never sent and the person could not stay signed in.
+/// It weakens nothing: every signed-in change must carry the app's own Origin
+/// (spec/v0_2/auth.md §4). Over plain http — loopback only — it is `Lax`.
 pub fn session_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
-    let mut attrs = vec![
-        format!("{name}={}", encode_uri_component(value)),
-        "Path=/".to_string(),
-        "HttpOnly".to_string(),
-        "SameSite=Lax".to_string(),
-        format!("Max-Age={max_age_seconds}"),
-    ];
-    if secure {
-        attrs.push("Secure".to_string());
-    }
+    let site: &[&str] = if secure { &["SameSite=None", "Secure", "Partitioned"] } else { &["SameSite=Lax"] };
+    let mut attrs = vec![format!("{name}={}", encode_uri_component(value)), "Path=/".to_string(), "HttpOnly".to_string()];
+    attrs.extend(site.iter().map(|a| a.to_string()));
+    attrs.push(format!("Max-Age={max_age_seconds}"));
     attrs.join("; ")
 }
 
@@ -2771,7 +2772,8 @@ pub struct Adapter {
     /// Per app: browsers do not separate cookies by port, so two apps on one
     /// machine would otherwise sign each other out.
     session_cookie_name: String,
-    /// `Secure` on the session cookie when the public URL is https.
+    /// The https session cookie (`SameSite=None; Secure; Partitioned`, see
+    /// [`session_cookie`]) when the public URL is https.
     secure_cookies: bool,
     sign_in_failures: FailureLimiter,
     /// Checked against when a login does not exist, so a missing account takes
@@ -2814,9 +2816,70 @@ fn origin_hosts(origin: &str) -> Vec<String> {
     }
 }
 
-/// Resolve (bind host, public origin) from A2APP_HOST / A2APP_PUBLIC_URL, or
-/// the reason the combination is unsafe.
-pub fn network_policy(host_env: Option<String>, public_url_env: Option<String>) -> Result<(String, Option<String>), String> {
+/// Where the app listens, the address it is reached at, and who may embed it.
+pub struct NetworkPolicy {
+    /// The address to bind (A2APP_HOST, default 127.0.0.1).
+    pub host: String,
+    /// The origin people and agents reach the app at, or None when only loopback.
+    pub public_url: Option<String>,
+    /// The pages that may embed the app's own pages, as a CSP `frame-ancestors`
+    /// source list: the app itself, plus A2APP_FRAME_ANCESTORS (default: harness
+    /// pages on this machine's loopback). Served on every page of the View.
+    pub frame_ancestors: String,
+}
+
+/// Who may embed an app when its owner says nothing: the app itself, and the
+/// agent harness pages on the viewer's own machine (Hermes, OpenClaw, …).
+pub const DEFAULT_FRAME_ANCESTORS: [&str; 2] = ["http://127.0.0.1:*", "http://localhost:*"];
+
+/// Is `entry` one A2APP_FRAME_ANCESTORS entry: an http(s) origin, optionally
+/// with a `*.` subdomain wildcard and a `*` port? adapter-core's rule, written
+/// out: `^https?://(\*\.)?[A-Za-z0-9.-]+(:(\d{1,5}|\*))?$`.
+fn is_embedder(entry: &str) -> bool {
+    let Some(rest) = entry.strip_prefix("https://").or_else(|| entry.strip_prefix("http://")) else { return false };
+    let rest = rest.strip_prefix("*.").unwrap_or(rest);
+    let (name, port) = match rest.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (rest, None),
+    };
+    let name_ok = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    let port_ok = port.map_or(true, |p| {
+        p == "*" || ((1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
+    });
+    name_ok && port_ok
+}
+
+/// The `frame-ancestors` source list for A2APP_FRAME_ANCESTORS: unset, the
+/// defaults; `none`, the app alone; otherwise its space- or comma-separated
+/// origins. An entry that is not an origin is refused at start rather than
+/// dropped, so a typo never silently changes who can embed the app.
+pub fn frame_ancestors_of(raw: Option<&str>) -> Result<String, String> {
+    let value = raw.map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        return Ok(std::iter::once("'self'").chain(DEFAULT_FRAME_ANCESTORS).collect::<Vec<_>>().join(" "));
+    }
+    if value == "none" {
+        return Ok("'self'".to_string());
+    }
+    let origins: Vec<&str> = value.split(|c: char| c.is_whitespace() || c == ',').filter(|o| !o.is_empty()).collect();
+    let bad: Vec<&str> = origins.iter().copied().filter(|o| !is_embedder(o)).collect();
+    if !bad.is_empty() {
+        return Err(format!(
+            "A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or \"none\"; not {}.",
+            bad.join(", ")
+        ));
+    }
+    Ok(std::iter::once("'self'").chain(origins).collect::<Vec<_>>().join(" "))
+}
+
+/// Resolve the bind host, public origin and framing policy from A2APP_HOST /
+/// A2APP_PUBLIC_URL / A2APP_FRAME_ANCESTORS, or the reason the combination is
+/// unsafe. Call it before binding anything.
+pub fn network_policy(
+    host_env: Option<String>,
+    public_url_env: Option<String>,
+    frame_ancestors_env: Option<String>,
+) -> Result<NetworkPolicy, String> {
     let host = host_env
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
@@ -2846,7 +2909,8 @@ pub fn network_policy(host_env: Option<String>, public_url_env: Option<String>) 
              (the agent token must not cross a network in clear). To reach it through a tunnel instead, keep A2APP_HOST on 127.0.0.1."
         ));
     }
-    Ok((host, public))
+    let frame_ancestors = frame_ancestors_of(frame_ancestors_env.as_deref())?;
+    Ok(NetworkPolicy { host, public_url: public, frame_ancestors })
 }
 
 /// Everything wrong with the app part's module/operation declarations.
@@ -6160,10 +6224,41 @@ pub fn selftest() -> i32 {
             );
         }
     }
-    let policy = |host: Option<&str>, public: Option<&str>| match network_policy(host.map(str::to_string), public.map(str::to_string)) {
-        Ok((h, p)) => json!([h, p]),
+    let policy = |host: Option<&str>, public: Option<&str>| match network_policy(host.map(str::to_string), public.map(str::to_string), None) {
+        Ok(p) => json!([p.host, p.public_url]),
         Err(_) => json!("refused"),
     };
+    // Who may embed the app's pages (spec/v0_2/auth.md §10): A2APP_FRAME_ANCESTORS
+    // read as adapter-core's frameAncestorsOf reads it.
+    let embedders = |raw: Option<&str>| match network_policy(None, None, raw.map(str::to_string)) {
+        Ok(p) => json!(p.frame_ancestors),
+        Err(message) => json!({ "refused": message }),
+    };
+    for (label, actual, expected) in [
+        (
+            "embeddable by itself and harness pages on this machine by default",
+            json!([embedders(None), embedders(Some("  "))]),
+            json!(["'self' http://127.0.0.1:* http://localhost:*", "'self' http://127.0.0.1:* http://localhost:*"]),
+        ),
+        (
+            "A2APP_FRAME_ANCESTORS names the embedders",
+            embedders(Some("https://portal.example.com, https://*.corp.example.com:8443 http://127.0.0.1:*")),
+            json!("'self' https://portal.example.com https://*.corp.example.com:8443 http://127.0.0.1:*"),
+        ),
+        ("…`none` leaves only the app itself", embedders(Some("none")), json!("'self'")),
+        (
+            "…and an entry that is not an origin is refused, by name",
+            embedders(Some("https://ok.example.com javascript:alert(1),https://x.example.com/path")),
+            json!({ "refused": "A2APP_FRAME_ANCESTORS takes http(s) origins (like https://portal.example.com or http://127.0.0.1:*), or \"none\"; not javascript:alert(1), https://x.example.com/path." }),
+        ),
+        (
+            "…as is a port that is not one, or a wildcard that is not a subdomain",
+            json!([embedders(Some("http://localhost:123456")), embedders(Some("https://*example.com")), embedders(Some("bogus"))].map(|r| r.get("refused").is_some())),
+            json!([true, true, true]),
+        ),
+    ] {
+        check(&mut failures, label, &actual, &expected);
+    }
     for (label, actual, expected) in [
         ("loopback by default", policy(None, None), json!(["127.0.0.1", null])),
         (
@@ -6289,15 +6384,24 @@ pub fn selftest() -> i32 {
     );
     check(
         &mut failures,
-        "the session cookie is HttpOnly, SameSite=Lax, Secure behind https",
-        &json!(session_cookie("a2app_session_x", "v a", 1_209_600, true)),
-        &json!("a2app_session_x=v%20a; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600; Secure"),
+        "the session cookie is HttpOnly and SameSite=Lax over loopback http",
+        &json!(session_cookie("a2app_session_x", "v a", 1_209_600, false)),
+        &json!("a2app_session_x=v%20a; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600"),
     );
     check(
         &mut failures,
-        "signing out clears it",
-        &json!(session_cookie("a2app_session_x", "", 0, false)),
-        &json!("a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        "…and SameSite=None, Secure and Partitioned behind https, so it works embedded",
+        &json!(session_cookie("a2app_session_x", "v a", 1_209_600, true)),
+        &json!("a2app_session_x=v%20a; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=1209600"),
+    );
+    check(
+        &mut failures,
+        "signing out clears it, in either form",
+        &json!([session_cookie("a2app_session_x", "", 0, false), session_cookie("a2app_session_x", "", 0, true)]),
+        &json!([
+            "a2app_session_x=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+            "a2app_session_x=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0"
+        ]),
     );
 
     // 11. Sign-in failures: ten per login per 15 minutes, then a wait.

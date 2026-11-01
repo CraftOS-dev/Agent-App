@@ -90,6 +90,10 @@ const identity = await call("GET", "/api/_a2app");
 check("identity: protocol 0.2", identity.json?.protocol, "0.2");
 const page = await call("GET", "/_a2app/account");
 ok("the account page is served", page.status === 200 && (page.headers.get("content-type") ?? "").startsWith("text/html"));
+// Embeddable by the app itself and by harness pages on this machine (its
+// defaults), and by nothing it was not told about.
+const ancestors = /frame-ancestors ([^;]+)/.exec(page.headers.get("content-security-policy") ?? "")?.[1]?.trim().split(/\s+/) ?? [];
+ok("…saying who may embed it: itself, and harness pages on this machine", ["'self'", "http://127.0.0.1:*", "http://localhost:*"].every((s) => ancestors.includes(s)));
 check("a foreign Host is refused", await foreignHost(), "forbidden_host");
 
 /* ------------------------------------------------- nobody without sign-in */
@@ -112,7 +116,14 @@ check("an invite is issued", [alice.invite.status, alice.invite.json?.role], [20
 ok("…with a link to the account page", alice.invite.json?.url?.includes("/_a2app/account#setup/"));
 check("accepting it makes the account", [alice.accepted.status, alice.accepted.json?.role], [201, "owner"]);
 const setCookie = alice.accepted.headers.get("set-cookie") ?? "";
-ok("…and signs them in with an HttpOnly, SameSite=Lax cookie", /HttpOnly/i.test(setCookie) && /SameSite=Lax/i.test(setCookie));
+// Over https the cookie must work inside a harness page that embeds the app
+// (SameSite=None; Secure; Partitioned); on loopback http it stays Lax.
+const attrs = setCookie.split(";").map((a) => a.trim().toLowerCase());
+const secure = attrs.includes("secure");
+ok(
+  "…and signs them in with an HttpOnly cookie: Lax on http, partitioned on https",
+  attrs.includes("httponly") && (secure ? attrs.includes("samesite=none") && attrs.includes("partitioned") : attrs.includes("samesite=lax")),
+);
 check("an invite works once", code(await call("POST", `/api/_a2app/invites/${alice.invite.json?.code}`, { body: { name: "X", login: `x-${run}`, password }, headers: { origin: base } })), "invite_invalid");
 
 const bob = await join("member", "Bob");

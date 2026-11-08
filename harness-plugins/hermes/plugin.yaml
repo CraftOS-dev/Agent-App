@@ -4,6 +4,8 @@ description: "Build, evolve, operate, install and import Agent Apps through the 
 author: CraftOS
 license: MIT
 homepage: https://github.com/CraftOS-dev/Agent-App
+# The release this was verified on; the plugin catalog entry declares the same floor.
+requires_hermes: ">=0.21.5"
 # Explicit, not defaulted: the loader reclassifies a kind-less plugin whose
 # code mentions certain provider symbols, and a standalone plugin is exactly
 # what this is (and a standalone user plugin still needs `hermes plugins enable`).

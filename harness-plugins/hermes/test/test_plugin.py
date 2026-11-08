@@ -893,7 +893,8 @@ class DashboardApi(unittest.TestCase):
     def test_turns_do_not_inherit_the_hosts_session_or_approval_state(self) -> None:
         env = self.api.turn_env({
             "HERMES_YOLO_MODE": "1", "HERMES_SESSION_KEY": "k", "HERMES_UI_SESSION_ID": "u",
-            "HERMES_CRON_SESSION": "1", "HERMES_BROWSER_CONTROL_PRINCIPAL": "p",
+            "HERMES_CRON_SESSION": "1", "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "c", "HERMES_SESSION_PARENT_CHAT_ID": "pc",
+            "HERMES_BROWSER_CONTROL_PRINCIPAL": "p",
             "HERMES_DELEGATED_CHILD_CONTEXT": "1", "HERMES_GATEWAY_SESSION": "1", "HERMES_EXEC_ASK": "1",
             "HERMES_HOME": "/h", "KEEP_ME": "yes",
         })

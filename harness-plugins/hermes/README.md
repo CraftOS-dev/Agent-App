@@ -2,6 +2,19 @@
 
 A Hermes plugin (`plugin.yaml` + `register(ctx)`, Python) whose dashboard tab is the same **Agent Apps manager** the OpenClaw and dsh plugins ship, plus the build + operate tools, the six framework skills, and the `/agent-app` command.
 
+## Before you install
+
+What the plugin does on your machine beyond the tools it registers:
+
+- **Runs the framework CLIs.** Every tool, the tab and `hermes agent-app` run `agent-app` or `a2app` (the `agent-app-framework` npm package, which you install yourself) as subprocesses, never through a shell. Installed from the catalog, the plugin has no copy of the skills and loads the ones that CLI ships.
+- **Starts Hermes turns.** A build from the tab, or a message in an app's session panel, runs `hermes --cli chat -Q` as a child process with your own model configuration. A command Hermes flags as dangerous follows `approvals.single_query_mode` (default `deny`), and the child never inherits the host's `/yolo`, session or gateway state.
+- **Leaves apps running.** An app you build, install or launch keeps serving on a loopback port, as a background process, until you pause or delete it.
+- **Writes outside its own data.** Apps go in `$A2APP_HOME/apps` (default `~/.a2app/apps`). On load the plugin adds a `hermes` entry to `$A2APP_HOME/harnesses.json` (only when there is none), so that a bridge you start yourself (`agent-app <dir> bridge start`) can run Hermes turns when an app queues work. Turn logs go to `$HERMES_HOME/plugin-data/agent-app/logs`.
+- **Reads outside its own data.** The tab reads its app sessions' transcripts from Hermes's session database, and the app registry in `$A2APP_HOME`.
+- **Network.** The Marketplace reads its catalogue from GitHub (`CraftOS-dev/agent-app-collection`); Import downloads the zip, git or GitHub URL you give it; Connect calls the app address you enter. An app's own build and dependency install reach the package registries it uses. Neither the plugin nor the CLI sends telemetry.
+- **Stores a credential.** Connect signs Hermes in to a remote app as you; the CLI keeps that credential in `$A2APP_HOME/credentials.json` (owner-only), and Disconnect revokes it.
+- **In hermes-webui only**, the tab's backend listens on a loopback port behind a token generated at each start, which it writes to `runtime.json` beside the web UI extension.
+
 ## Surfaces
 
 - **Agent Apps dashboard tab** ([dashboard/](dashboard/)): a browser-style tab strip with one tab per Agent App (status dot; the name greys out when the app is offline) and a **New +** tab. An app tab embeds the running app; an offline app shows **Launch**; the active tab's **⋯** menu offers Pause / Launch, Open in browser, Show session, and Delete (two-step confirm; `agent-app remove --yes` backs data up before deleting). The **New +** tab has a build form (name, requirement, stack, optional port) that starts the build directly, and the **Marketplace** and **Import** panels below.
@@ -52,6 +65,12 @@ A web UI started by a supervisor may not have your shell's `PATH`, so give the p
 ## Build and install
 
 Requires the framework CLIs on `PATH` (`npm i -g agent-app-framework`; from a cloned repo, `pnpm -r build` then `npm link` in `framework/cli`). The Hermes home is `$HERMES_HOME`, default `~/.hermes` (`%LOCALAPPDATA%\hermes` on native Windows).
+
+From the Hermes plugin catalog:
+
+```bash
+hermes plugins install agent-app --enable
+```
 
 From a cloned repo, [scripts/build.py](scripts/build.py) stages a self-contained `dist/` (the plugin plus the six skills from the repo-root [../../skills](../../skills)) and `--install` copies it to `$HERMES_HOME/plugins/agent-app`:
 

@@ -87,9 +87,8 @@ BUILD_WAIT_S = 2 * 60 * 60
 # a gateway nobody watches), a session-less `/yolo` (it would auto-approve the
 # turn's dangerous commands, which only the user's own config may do), the
 # delegated-child and plugin-host markers, and a TUI preference. The
-# per-session routing variables are scrubbed by prefix and, when Hermes is
-# importable, from its own map of them, which is what the kanban dispatcher
-# scrubs too.
+# per-session routing variables are scrubbed by prefix: every name in Hermes's
+# own map of them (gateway.session_context, private) starts with one of these.
 _SCRUBBED_ENV = frozenset({
     "HERMES_TUI", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK", "HERMES_INTERACTIVE",
     "HERMES_YOLO_MODE", "HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_PLUGIN_HOST_PROCESS",
@@ -100,21 +99,11 @@ _SCRUBBED_PREFIXES = ("HERMES_SESSION_", "HERMES_UI_SESSION_", "HERMES_CRON_", "
 CANCEL_GRACE_S = 5.0
 
 
-def _session_scoped_vars() -> frozenset[str]:
-    try:
-        from gateway.session_context import _VAR_MAP
-
-        return frozenset(_VAR_MAP)
-    except Exception:
-        return frozenset()
-
-
 def turn_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a session turn runs with: the host's, minus anything
     that belongs to the host's own sessions or approval state."""
     source = os.environ if environ is None else environ
-    drop = _SCRUBBED_ENV | _session_scoped_vars()
-    return {k: v for k, v in source.items() if k not in drop and not k.startswith(_SCRUBBED_PREFIXES)}
+    return {k: v for k, v in source.items() if k not in _SCRUBBED_ENV and not k.startswith(_SCRUBBED_PREFIXES)}
 
 
 def session_id_for(path: str) -> str:

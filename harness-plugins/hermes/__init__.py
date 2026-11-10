@@ -4,6 +4,8 @@
 
   - the build, operate and package tools (`agent_app_*`, toolset
     `agent_app`), each shelling a real `agent-app` or `a2app` verb;
+  - a `pre_tool_call` hook that sends the risky ones to Hermes's approval
+    prompt (see approval_reason);
   - the six framework skills, as plugin skills (`agent-app:creator`, ...);
   - a system-prompt section that routes any app request to the owning skill,
     which is how the model finds plugin skills at all (Hermes keeps them out
@@ -133,11 +135,137 @@ def agent_cwd() -> str | None:
     return cwd if cwd and os.path.isdir(cwd) else None
 
 
+_cli_version_checked = False
+
+
+def _cli_version_note() -> str | None:
+    """Once per process, on the first tool call: a note when the installed CLI
+    is not the release this plugin was tested with. Logged as well."""
+    global _cli_version_checked
+    if _cli_version_checked:
+        return None
+    _cli_version_checked = True
+    note = engine.cli_version_warning()
+    if note:
+        logger.warning("agent-app: %s", note)
+    return note
+
+
 def _tool_handler(tool: engine.Tool):
     def handler(args: dict, **_kw) -> str:
-        return tool.call(args if isinstance(args, dict) else {}, cwd=agent_cwd()).text()
+        note = _cli_version_note()
+        text = tool.call(args if isinstance(args, dict) else {}, cwd=agent_cwd()).text()
+        return f"{note}\n\n{text}" if note else text
 
     return handler
+
+
+# ── Calls that need the person's yes ─────────────────────────────────────────
+#
+# The `pre_tool_call` hook sends these to Hermes's own approval prompt, the gate
+# its dangerous commands go through: the model cannot answer it, and where no
+# person can (cron, a `-Q` run such as the tab's turns and bridge runs) Hermes
+# refuses the call. Every other call runs as before.
+
+
+def _confining_roots(base: str) -> list[str]:
+    """Where a call may write, or run an app's code, without asking: the apps
+    folder and the session's working directory. A filesystem root as the
+    working directory confines nothing, so it does not count."""
+    roots = [os.path.realpath(engine.apps_dir())]
+    here = os.path.realpath(base)
+    if os.path.dirname(here) != here:
+        roots.append(here)
+    return roots
+
+
+def _inside(path: str, roots: list[str]) -> bool:
+    for root in roots:
+        try:
+            if os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root):
+                return True
+        except ValueError:  # another drive
+            continue
+    return False
+
+
+def _app_folder(value: str, base: str) -> str | None:
+    """The folder an app's `dir` names: a path, else a registered app's id or
+    name. None for an app on another machine, or a name nothing registered
+    (the CLI refuses those itself)."""
+    if value.startswith(("http://", "https://")):
+        return None
+    path = os.path.join(base, value)
+    if os.path.isdir(path):
+        return os.path.realpath(path)
+    for app in engine.list_known_apps():
+        if value in (app["id"], app["name"]):
+            return os.path.realpath(app["path"])
+    return None
+
+
+def approval_reason(tool: str, args: dict, cwd: str | None) -> str | None:
+    """Why a tool call needs the person's yes, or None when it does not:
+      - installing or inspecting anything but an app from the default
+        marketplace, since the CLI downloads it, installs its dependencies
+        and starts it;
+      - re-running an operation the app said needs approval, with its key;
+      - writing, or running an app's code, outside the apps folder and the
+        working directory: export's `out`, install's `into`, a new app's
+        folder, and the app a serve or validate runs."""
+    base = cwd or os.getcwd()
+    roots = _confining_roots(base)
+    where = " and ".join(f"`{root}`" for root in roots)
+
+    def text(key: str) -> str | None:
+        value = args.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    reasons: list[str] = []
+
+    def outside(key: str, what: str) -> None:
+        value = text(key)
+        if value is not None and not _inside(os.path.realpath(os.path.join(base, value)), roots):
+            reasons.append(f"{what} `{value}`, outside {where}")
+
+    if tool in ("agent_app_install", "agent_app_inspect"):
+        installs = tool == "agent_app_install"
+        effect = ("the CLI downloads it, installs its dependencies and can start it on this machine" if installs
+                  else "the CLI downloads it to look inside; nothing from it runs")
+        if text("from") is not None:
+            reasons.append(f"{'install' if installs else 'inspect'} the app at `{text('from')}`, which is not from the marketplace: {effect}")
+        elif text("source") is not None:
+            reasons.append(f"{'install' if installs else 'inspect'} `{text('id') or ''}` from the marketplace `{text('source')}`, "
+                           f"not the default one: {effect}")
+        if installs:
+            outside("into", "install into")
+    elif tool == "agent_app_run_operation" and args.get("approve") is not None:
+        fields = engine._json(args["fields"]) if isinstance(args.get("fields"), dict) and args["fields"] else ""
+        reasons.append(f"run `{text('operation')}` at `{text('path') or ''}` in the app `{text('dir')}`, an operation the app "
+                       f"holds for approval{f', with {fields[:300]}' if fields else ''}")
+    elif tool == "agent_app_export":
+        outside("out", "write the package to")
+    elif tool == "agent_app_build":
+        outside("dir", "create the app in")
+    elif tool in ("agent_app_serve", "agent_app_validate"):
+        value = text("dir")
+        folder = _app_folder(value, base) if value is not None else None
+        if folder is not None and not _inside(folder, roots):
+            action = "start" if tool == "agent_app_serve" else "build and check"
+            reasons.append(f"{action} the app at `{folder}`, which runs its code, outside {where}")
+    return f"Agent App: {'; '.join(reasons)}" if reasons else None
+
+
+def _on_pre_tool_call(tool_name=None, args=None, **_kw):
+    if not isinstance(tool_name, str) or not tool_name.startswith("agent_app_"):
+        return None
+    try:
+        reason = approval_reason(tool_name, args if isinstance(args, dict) else {}, agent_cwd())
+    except Exception:
+        # A check that failed must not wave the call through.
+        logger.exception("agent-app: checking %s failed", tool_name)
+        reason = f"Agent App: {tool_name} could not be checked, so it needs your approval"
+    return {"action": "approve", "message": reason} if reason else None
 
 
 def _cli_setup(parser: argparse.ArgumentParser) -> None:
@@ -193,6 +321,7 @@ def register(ctx) -> None:
             handler=_tool_handler(tool),
             emoji=tool.emoji,
         )
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
 
     skills_home = engine.skills_dir()
     skills = engine.framework_skills(skills_home) if skills_home is not None else []

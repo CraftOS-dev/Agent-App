@@ -1,5 +1,5 @@
 name: agent-app
-version: 0.1.0
+version: 0.1.1
 description: "Build, evolve, operate, install and import Agent Apps through the agent-app and a2app CLIs. Adds the /agent-app command, `hermes agent-app`, the six framework skills, the build, operate and package tools, and an Agent Apps dashboard tab with a marketplace and an import panel."
 author: CraftOS
 license: MIT
@@ -35,3 +35,4 @@ provides_tools:
   - agent_app_export
 provides_hooks:
   - pre_gateway_dispatch
+  - pre_tool_call

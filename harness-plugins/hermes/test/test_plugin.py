@@ -41,10 +41,12 @@ FAKE_CLI = """
 const fs = require("fs");
 const BIN = %(bin)s;
 const argv = process.argv.slice(2);
-if (process.env.FAKE_CALLS) fs.appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ bin: BIN, argv, cwd: process.cwd() }) + "\\n");
+// `secret` is what a provider key in the host's environment would reach.
+if (process.env.AGENT_APP_FAKE_CALLS) fs.appendFileSync(process.env.AGENT_APP_FAKE_CALLS, JSON.stringify({ bin: BIN, argv, cwd: process.cwd(), secret: process.env.OPENAI_API_KEY ?? null }) + "\\n");
+if (argv[0] === "--version") { console.log(JSON.stringify({ [BIN]: process.env.AGENT_APP_FAKE_VERSION || "0.2.0", protocol: "0.1" })); process.exit(0); }
 const flag = (name) => { const at = argv.indexOf("--" + name); return at < 0 ? undefined : argv[at + 1]; };
 const STEPS = ["acquire", "inspect", "sanitize", "revendor", "customize", "place", "register", "dependencies", "gate", "serve", "open"];
-// install: one step line per step ($FAKE_STEP_MS apart) with --events, then the
+// install: one step line per step ($AGENT_APP_FAKE_STEP_MS apart) with --events, then the
 // result; a --from naming "foreign" is not a package and stops at inspect; an
 // id and --from together are a usage error with no JSON, as in the real CLI.
 function install() {
@@ -54,7 +56,7 @@ function install() {
   const events = argv.includes("--events");
   const emit = (line) => { if (events) console.log(JSON.stringify(line)); };
   const finish = (doc, code) => { if (events) emit({ event: "result", ...doc }); else console.log(JSON.stringify(doc)); process.exitCode = code; };
-  const delay = Number(process.env.FAKE_STEP_MS || 0);
+  const delay = Number(process.env.AGENT_APP_FAKE_STEP_MS || 0);
   let at = 0;
   const next = () => {
     const step = STEPS[at++];
@@ -74,9 +76,9 @@ function install() {
   };
   next();
 }
-if (BIN === "agent-app" && argv[0] === "skills" && argv[1] === "--path") { console.log(process.env.FAKE_SKILLS_DIR || ""); process.exit(process.env.FAKE_SKILLS_DIR ? 0 : 1); }
+if (BIN === "agent-app" && argv[0] === "skills" && argv[1] === "--path") { console.log(process.env.AGENT_APP_FAKE_SKILLS_DIR || ""); process.exit(process.env.AGENT_APP_FAKE_SKILLS_DIR ? 0 : 1); }
 if (BIN === "agent-app" && argv[0] === "list") {
-  const f = process.env.FAKE_REGISTRY;
+  const f = process.env.AGENT_APP_FAKE_REGISTRY;
   console.log(f && fs.existsSync(f) ? fs.readFileSync(f, "utf8") : JSON.stringify({ ok: true, apps: [] }));
   process.exit(0);
 }
@@ -249,9 +251,9 @@ class Sandbox:
             "A2APP_HOME": str(self.home),
             "AGENT_APP_CLI": str(self.dir / "agent-app.js"),
             "A2APP_CLI": str(self.dir / "a2app.js"),
-            "FAKE_CALLS": str(self.calls),
-            "FAKE_REGISTRY": str(self.registry),
-            "FAKE_SKILLS_DIR": str(REPO / "skills"),
+            "AGENT_APP_FAKE_CALLS": str(self.calls),
+            "AGENT_APP_FAKE_REGISTRY": str(self.registry),
+            "AGENT_APP_FAKE_SKILLS_DIR": str(REPO / "skills"),
         })
         os.environ.pop("TERMINAL_CWD", None)
 
@@ -292,6 +294,8 @@ class PluginRegistration(unittest.TestCase):
             ts = (STARTER_DIST.parent.parent / "src" / "index.ts").read_text(encoding="utf-8")
             self.assertEqual(names, set(re.findall(r'name: "(agent_app_\w+)"', ts)), "same tool set as the TypeScript engine")
         manifest = (PLUGIN / "plugin.yaml").read_text(encoding="utf-8")
+        for hook in self.ctx.hooks:
+            self.assertIn(f"  - {hook}\n", manifest, "provides_hooks lists every registered hook")
         for name in names:
             self.assertIn(f"  - {name}\n", manifest, "provides_tools lists every registered tool")
             tool = self.ctx.tools[name]
@@ -355,6 +359,84 @@ class PluginRegistration(unittest.TestCase):
         text = self.call("agent_app_list", dir="crm", entity="deals")
         self.assertIn("framework CLI not found", text)
         self.assertIn("npm i -g agent-app-framework", text)
+
+    def test_cli_children_get_none_of_the_hosts_secrets(self) -> None:
+        os.environ.update({"OPENAI_API_KEY": "sk-host", "NODE_AUTH_TOKEN": "npm-host"})
+        self.call("agent_app_get", dir="crm", entity="deals", id="D1")
+        self.assertIsNone(self.box.recorded()[-1]["secret"], "a tool's CLI")
+        entry = self.ctx.cli["agent-app"]
+        parser = argparse.ArgumentParser(prog="hermes agent-app")
+        entry["setup_fn"](parser)
+        entry["handler_fn"](parser.parse_args(["list"]))
+        self.assertIsNone(self.box.recorded()[-1]["secret"], "the passthrough")
+        self.plugin.engine.run_install({"id": "kanban-board"}, lambda _event: None)
+        self.assertIsNone(self.box.recorded()[-1]["secret"], "an install the tab follows")
+        env = self.plugin.engine.cli_env({
+            "PATH": "/bin", "SystemRoot": "C:\\Windows", "A2APP_HOME": "/a", "AGENT_APP_CLI": "x", "LC_ALL": "C",
+            "npm_config_cache": "/c", "NODE_OPTIONS": "--no-warnings",
+            "HERMES_HOME": "/h", "OPENAI_API_KEY": "k", "NODE_AUTH_TOKEN": "t", "npm_config_//registry.npmjs.org/:_authToken": "t",
+            "HERMES_YOLO_MODE": "1", "GITHUB_TOKEN": "g",
+        })
+        self.assertEqual(set(env), {"PATH", "SystemRoot", "A2APP_HOME", "AGENT_APP_CLI", "LC_ALL", "npm_config_cache", "NODE_OPTIONS", "HERMES_HOME"})
+
+    def test_risky_calls_ask_the_person_through_hermes(self) -> None:
+        hook = self.ctx.hooks["pre_tool_call"]
+        work, elsewhere, apps = self.box.dir / "work", self.box.dir / "elsewhere", self.box.home / "apps"
+        for folder in (work, elsewhere, apps / "crm"):
+            folder.mkdir(parents=True)
+        os.environ["TERMINAL_CWD"] = str(work)
+
+        def asks(tool: str, **args):
+            with fake_modules({"agent.runtime_cwd": None}):
+                result = hook(tool_name=tool, args=args, task_id="t1", session_id="s1")
+            if result is None:
+                return None
+            self.assertEqual(result["action"], "approve")
+            return result["message"]
+
+        # Installs and inspects: only the default marketplace's apps go ahead.
+        self.assertIsNone(asks("agent_app_install", id="kanban-board"))
+        self.assertIsNone(asks("agent_app_inspect", id="kanban-board"))
+        self.assertIn("`https://github.com/x/y`, which is not from the marketplace", asks("agent_app_install", **{"from": "https://github.com/x/y"}))
+        self.assertIn("nothing from it runs", asks("agent_app_inspect", **{"from": "./board.zip"}))
+        self.assertIn("the marketplace `github:acme/market`", asks("agent_app_install", id="kanban-board", source="github:acme/market"))
+        # An operation the app holds for approval, re-run with its key.
+        self.assertIsNone(asks("agent_app_run_operation", dir="crm", path="sales/invoices/INV-1", operation="void"))
+        held = asks("agent_app_run_operation", dir="crm", path="sales/invoices/INV-1", operation="void", fields={"reason": "dup"}, approve="k1")
+        self.assertIn('run `void` at `sales/invoices/INV-1` in the app `crm`', held)
+        self.assertIn('{"reason":"dup"}', held)
+        # Writing, or running an app's code, outside the apps folder and the working directory.
+        self.assertIsNone(asks("agent_app_export", dir="crm"))
+        self.assertIsNone(asks("agent_app_export", dir="crm", out="crm.zip"))
+        self.assertIn("write the package to `../elsewhere/crm.zip`", asks("agent_app_export", dir="crm", out="../elsewhere/crm.zip"))
+        self.assertIsNone(asks("agent_app_install", id="kanban-board", into=str(apps / "board")))
+        self.assertIn("install into", asks("agent_app_install", id="kanban-board", into=str(elsewhere / "board")))
+        self.assertIsNone(asks("agent_app_build", dir="crm", blueprint="blueprint-base"))
+        self.assertIsNone(asks("agent_app_build", dir=str(apps / "new"), blueprint="blueprint-base"))
+        self.assertIn("create the app in", asks("agent_app_build", dir=str(elsewhere / "new"), blueprint="blueprint-base"))
+        self.assertIsNone(asks("agent_app_serve", dir=str(apps / "crm")))
+        self.assertIn("start the app at", asks("agent_app_serve", dir=str(elsewhere)))
+        self.assertIn("build and check the app at", asks("agent_app_validate", dir=str(elsewhere)))
+        self.box.set_registry([{"id": "far", "name": "Far App", "path": str(elsewhere)}, {"id": "crm", "name": "CRM", "path": str(apps / "crm")}])
+        self.assertIn("runs its code", asks("agent_app_serve", dir="Far App"), "a registered app is judged by its folder")
+        self.assertIsNone(asks("agent_app_serve", dir="crm"))
+        self.assertIsNone(asks("agent_app_serve", dir="https://crm.example.com"))
+        # A check that fails asks rather than letting the call through.
+        with unittest.mock.patch.object(self.plugin.engine, "list_known_apps", side_effect=OSError("boom")), \
+                self.assertLogs(self.plugin.logger, "ERROR"):
+            self.assertIn("could not be checked", asks("agent_app_serve", dir="far"))
+        # Everything else, and other plugins' tools, run as before.
+        self.assertIsNone(asks("agent_app_get", dir=str(elsewhere), entity="deals", id="D1"))
+        self.assertIsNone(asks("terminal", command="ls"))
+
+    def test_the_first_tool_call_notes_a_cli_release_this_was_not_tested_with(self) -> None:
+        os.environ["AGENT_APP_FAKE_VERSION"] = "9.9.9"
+        with self.assertLogs(self.plugin.logger, "WARNING"):
+            first = self.call("agent_app_list_apps")
+        self.assertTrue(first.startswith("Note: agent-app 9.9.9 is installed"), first)
+        self.assertIn(f"agent-app-framework@{self.plugin.engine.TESTED_CLI_VERSION}", first)
+        self.assertEqual(json.loads(first.split("\n\n", 1)[1]), {"ok": True, "apps": []}, "the result follows the note")
+        self.assertEqual(json.loads(self.call("agent_app_list_apps")), {"ok": True, "apps": []}, "once per process")
 
     def test_ships_the_six_skills_and_routes_to_them(self) -> None:
         self.assertEqual(set(self.ctx.skills), {f"agent-app:{n}" for n in ("creator", "modify", "importer", "operator", "walk-verify", "connect")})
@@ -483,7 +565,7 @@ class Engine(unittest.TestCase):
 
     def test_install_jobs_follow_the_pipeline(self) -> None:
         e = self.engine
-        os.environ["FAKE_STEP_MS"] = "40"
+        os.environ["AGENT_APP_FAKE_STEP_MS"] = "40"
         jobs = e.InstallJobs()
         ended: list[dict] = []
         job = jobs.start({"from": "./board.zip", "name": "Board"}, on_end=ended.append)
@@ -502,7 +584,7 @@ class Engine(unittest.TestCase):
         self.assertEqual([step["step"] for step in done["steps"]], list(e.INSTALL_STEPS))
         self.assertEqual((done["result"]["trust"], done["result"]["name"]), ("untrusted", "Board"))
         self.assertEqual(ended, [done])
-        os.environ["FAKE_STEP_MS"] = "0"
+        os.environ["AGENT_APP_FAKE_STEP_MS"] = "0"
         failed = jobs.start({"from": "./foreign-site"})
         while not jobs.get(failed["id"])["done"]:
             time.sleep(0.01)

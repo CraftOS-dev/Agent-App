@@ -80,8 +80,13 @@ INSTALL_STEPS = (
 # Where a headless route's rendered prompt goes in its argument list.
 PROMPT_PLACEHOLDER = "{prompt}"
 
+# The framework CLI release this plugin was tested with. The skills and the
+# argv contract come from the installed CLI, so any other release is reported
+# (cli_version_warning).
+TESTED_CLI_VERSION = "0.2.0"
+
 INSTALL_HINT = (
-    "Install the framework CLIs with `npm i -g agent-app-framework`, or set "
+    f"Install the framework CLIs with `npm i -g agent-app-framework@{TESTED_CLI_VERSION}`, or set "
     "A2APP_CLI / AGENT_APP_CLI to the binaries (a path ending in .js runs with Node)."
 )
 
@@ -198,6 +203,53 @@ def command_for(binary: str) -> list[str]:
     return [found]
 
 
+# A CLI, and every app it installs and serves, gets only what the framework
+# needs from the host's environment, never the provider keys and other
+# secrets Hermes loads into its own: the system and user basics, locale,
+# proxies, git and SSH, the display and opener, the toolchains' own homes,
+# and the framework's and Node's settings. Names compare case-insensitively,
+# as Windows treats them.
+_CLI_ENV_NAMES = frozenset({
+    "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "USER", "USERNAME", "LOGNAME",
+    "USERDOMAIN", "SHELL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "ALLUSERSPROFILE", "PUBLIC", "OS", "COMPUTERNAME",
+    "HOSTNAME", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "CI",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "SSH_AUTH_SOCK",
+    "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "BROWSER",
+    "WSL_DISTRO_NAME", "WSL_INTEROP", "WSLENV",
+    "NVM_DIR", "NVM_BIN", "NVM_INC", "VOLTA_HOME", "FNM_DIR", "FNM_MULTISHELL_PATH", "PNPM_HOME",
+    "COREPACK_HOME", "GOPATH", "GOROOT", "GOBIN", "GOMODCACHE", "GOCACHE", "GOPROXY", "CARGO_HOME",
+    "RUSTUP_HOME", "GEM_HOME", "GEM_PATH", "BUNDLE_PATH", "RBENV_ROOT", "PYENV_ROOT", "VIRTUAL_ENV",
+    "UV_CACHE_DIR", "JAVA_HOME",
+    # So that a bridge started through `hermes agent-app` runs Hermes from
+    # the same home.
+    "HERMES_HOME",
+})
+_CLI_ENV_PREFIXES = ("A2APP_", "AGENT_APP_", "LC_", "XDG_")
+# Node's and npm's settings, less any credential among them (an npm registry
+# token, NODE_AUTH_TOKEN).
+_CLI_ENV_NODE_PREFIXES = ("NODE_", "NPM_CONFIG_")
+_CLI_ENV_SECRET = re.compile(r"TOKEN|AUTH|PASSWORD|SECRET|CREDENTIAL")
+
+
+def cli_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a framework CLI runs with: the host's, cut down to the
+    names above."""
+    source = os.environ if environ is None else environ
+    out: dict[str, str] = {}
+    for key, value in source.items():
+        name = key.upper()
+        if name in _CLI_ENV_NAMES or name.startswith(_CLI_ENV_PREFIXES):
+            out[key] = value
+        elif name.startswith(_CLI_ENV_NODE_PREFIXES) and not _CLI_ENV_SECRET.search(name):
+            out[key] = value
+    return out
+
+
 def run(binary: str, argv: list[str], *, cwd: str | None = None, timeout: float | None = None) -> CliResult:
     """Run one framework CLI and capture its result. Never uses a shell."""
     try:
@@ -209,6 +261,7 @@ def run(binary: str, argv: list[str], *, cwd: str | None = None, timeout: float 
         proc = subprocess.run(
             cmd,
             cwd=cwd,
+            env=cli_env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -234,7 +287,7 @@ def run_passthrough(binary: str, argv: list[str]) -> int:
         sys.stderr.write(f"framework CLI not found (looked for {binary!r}). {INSTALL_HINT}\n")
         return 127
     try:
-        return subprocess.run(cmd).returncode
+        return subprocess.run(cmd, env=cli_env()).returncode
     except FileNotFoundError:
         sys.stderr.write(f"could not start {cmd[0]!r}. {INSTALL_HINT}\n")
         return 127
@@ -246,6 +299,20 @@ def run_operate(argv: list[str], **kw: Any) -> CliResult:
 
 def run_framework(argv: list[str], **kw: Any) -> CliResult:
     return run(framework_bin(), argv, **kw)
+
+
+def cli_version_warning() -> str | None:
+    """A note when the installed `agent-app` is not the release this plugin was
+    tested with, else None (also when it cannot tell)."""
+    result = run_framework(["--version"], timeout=5)
+    doc = result.json if result.ok else None
+    version = doc.get("agent-app") if isinstance(doc, dict) else None
+    if not isinstance(version, str) or version == TESTED_CLI_VERSION:
+        return None
+    return (
+        f"Note: agent-app {version} is installed, and this plugin was tested with {TESTED_CLI_VERSION}, "
+        f"whose skills and arguments it expects. `npm i -g agent-app-framework@{TESTED_CLI_VERSION}` installs that release."
+    )
 
 
 def build_stamp() -> str:
@@ -640,7 +707,7 @@ def run_events(binary: str, argv: list[str], parse: Callable[[str], dict | None]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, env=cli_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", creationflags=flags,
         )
     except OSError:

@@ -334,7 +334,11 @@ someone leave the screen and come back.
    the DEV instance in a real browser against `reference/requirements.md` AND the
    Quality Standard. A clean pass is what earns the promote. Failures come
    back as a report (features and Q-numbered quality items): fix them, then
-   repeat step 1 and step 4.
+   repeat step 1 and step 4. **Commit before every verification** — the
+   commit is what the verifier verifies. From the second verification on,
+   give the verifier the last report and the commit it verified: it
+   re-verifies what changed since, not the whole app. Record each verdict
+   and its verified commit in the ledger.
 5. **Promote and put it in front of the user.**
    `agent-app <dir> promote` requires the gate pass from step 1 (edited since
    validating? validate again first — except the ledger, `reference/tasks.md`,

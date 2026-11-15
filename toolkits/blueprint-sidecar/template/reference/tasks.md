@@ -14,4 +14,4 @@ appends here citing the entry date.
 - [ ] All build tasks ticked.
 - [ ] Every non-destructive operation invoked through the adapter and confirmed against the app; every destructive one shape-checked (it asks for approval), never fired.
 - [ ] Quality Conformance sweep: every Q-entry true in the running app (Q10–Q15 at A-1 volume; Q16–Q18 by inspection).
-- [ ] walk-verify pass — <REPLACE: verdict, defects found, fixes — written when verification ran>
+- [ ] walk-verify pass — <REPLACE: verdict, the verified commit, defects found, fixes — written when verification ran>

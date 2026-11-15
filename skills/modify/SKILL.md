@@ -109,6 +109,11 @@ agent-app <dir> serve      # bring the changed app back up
 agent-app <dir> open       # and show it to the user (see below)
 ```
 
+**Verify only what changed.** Commit the change before verifying, and give
+the verifier the app's last verification report and the commit it verified:
+it re-verifies what changed since, not the whole app. Record the verdict and
+its verified commit in the ledger.
+
 **How the dev environment works — read this once, it removes all guesswork:**
 
 - **Nothing is copied. Your edits ARE the running candidate.** `dev` boots the

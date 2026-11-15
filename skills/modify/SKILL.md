@@ -131,10 +131,9 @@ its verified commit in the ledger.
   `.a2app/dev.json` when a browser needs it). If the instance died, operate
   commands refuse loudly with the remedy — they never silently fall back to
   live, so test writes cannot leak into user data.
-- **View edits are hot on dev** (refresh the page); **backend/hook edits need
-  `agent-app <dir> dev` again** (a fresh boot is cheap and re-proves the
-  chain). The live app serves a boot-time snapshot of the View, so nothing you
-  edit reaches users until promote + serve.
+- **Every edit needs `agent-app <dir> dev` again** (a fresh boot is cheap: it
+  rebuilds the View and re-proves the chain). The live app serves a boot-time
+  snapshot of the View, so nothing you edit reaches users until promote + serve.
 - **`promote` refuses without a fresh gate pass.** `validate` records a pass
   bound to the exact tree it gated, and only counts as promotable when the
   budget walk ran against the dev instance. Any edit after `validate`

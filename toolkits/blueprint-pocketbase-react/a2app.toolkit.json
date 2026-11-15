@@ -17,6 +17,7 @@
  ],
  "lifecycle": {
  "dataDir": "pb/pb_data",
+ "dev": "npm --prefix ui run build",
  "promote": "node pb-serve.mjs --migrate"
  }
 }

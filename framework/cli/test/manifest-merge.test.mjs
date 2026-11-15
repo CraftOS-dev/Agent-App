@@ -15,7 +15,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { createHash } from "node:crypto";
 import { APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
+import { verifySystemHashes, writeSystemHashes } from "../dist/lib/canon.js";
 import { linkLocalPackages } from "../dist/lib/localPackages.js";
 
 const failures = [];
@@ -81,6 +83,33 @@ check(
   [...APP_OWNED_MANIFEST_KEYS],
   ["id", "name", "port", "authMode", "appVersion", "modules", "modificationLock", "capabilities", "source"],
 );
+
+/* ------------------------------------------------- the manifest in the canon */
+
+// The canon locks the keys the app does not own — the pipeline the gate runs —
+// and leaves the app's own keys, modules among them, the app's to edit.
+const canonApp = mkdtempSync(join(tmpdir(), "canon-manifest-"));
+const manifestFile = join(canonApp, "manifest.json");
+const writeManifest = (m) => writeFileSync(manifestFile, JSON.stringify(m, null, 2) + "\n");
+const drift = () => verifySystemHashes(canonApp).modified;
+
+writeManifest(app);
+writeSystemHashes(canonApp, ["manifest.json"]);
+writeManifest({ ...app, name: "Invoices", authMode: "multi-user", modules: [{ name: "billing" }] });
+check("editing the app's own keys is not drift", drift(), []);
+writeManifest(Object.fromEntries(Object.entries(app).reverse()));
+check("key order is not drift", drift(), []);
+writeManifest({ ...app, pipeline: { ...app.pipeline, start: "node evil.mjs" } });
+check("editing the pipeline is drift", drift(), ["manifest.json"]);
+
+// An app sealed before the manifest's hash left out the app's keys records the
+// whole file, and stays clean until it changes.
+writeManifest(app);
+const whole = "sha256:" + createHash("sha256").update(readFileSync(manifestFile)).digest("hex");
+writeFileSync(join(canonApp, ".a2app", "system-hashes.json"), JSON.stringify({ "manifest.json": whole }));
+check("a manifest sealed whole is clean while unchanged", drift(), []);
+
+rmSync(canonApp, { recursive: true, force: true });
 
 /* -------------------------------------------------------- linkLocalPackages */
 

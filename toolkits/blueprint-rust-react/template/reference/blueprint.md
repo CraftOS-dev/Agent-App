@@ -44,7 +44,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, `dist/`, `target/`, credentials, and framework state. Extend for your own artifacts. |
 | `package.json` | build | the View's dependencies (react, vite) + scripts (`build` = vite build, `dev:ui` = vite dev server). Referenced by the pipeline. |
 | `Cargo.toml` | build | the server's dependencies (tiny_http, serde_json, rusqlite, sha2, and getrandom/pbkdf2/subtle/base64 for accounts and credentials). Referenced by the pipeline. |
-| `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
+| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `src/main.rs` | SYSTEM (hash-locked) | the tiny_http server: arg dispatch (`--selftest`/`--check-ops`/`--promote-check`), HTTP ↔ the adapter's `dispatch()`, the built View (`dist/`) with cache validators, `/_a2app/update.js`, structured logs. Never edit. |
 | `src/a2app_adapter.rs` | SYSTEM (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |

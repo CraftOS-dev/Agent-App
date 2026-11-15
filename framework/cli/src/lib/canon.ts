@@ -8,7 +8,8 @@
  * the validation gate re-hashes every entry and fails on any drift.
  *
  * The canon is never empty for a conforming app: the minimum is the adapter
- * files plus `manifest.json`.
+ * files plus `manifest.json`, whose hash covers only the keys the app does not
+ * own (see {@link hashFile}).
  */
 import { createHash } from "node:crypto";
 import {
@@ -21,15 +22,57 @@ import {
 } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { assertInside } from "./fsx.js";
+import { readJsonFile } from "./json.js";
+import { APP_OWNED_MANIFEST_KEYS } from "./manifest.js";
 import { projectToolkit } from "./toolkit.js";
 
 export const CANON_DIR = ".a2app";
 export const CANON_FILE = join(CANON_DIR, "system-hashes.json");
 /** Legacy location read during the transition window. */
 const LEGACY_CANON_FILE = join(".lui", "system-hashes.json");
+const MANIFEST = "manifest.json";
 
-function sha256(file: string): string {
-  return "sha256:" + createHash("sha256").update(readFileSync(file)).digest("hex");
+function sha256(content: string | Buffer): string {
+  return "sha256:" + createHash("sha256").update(content).digest("hex");
+}
+
+/** `value` with every object's keys in sorted order. */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value === null || typeof value !== "object") return value;
+  const object = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(object).sort().map((key) => [key, sortKeys(object[key])]));
+}
+
+/**
+ * A system file's canon hash. `manifest.json` has two owners (manifest.ts): its
+ * hash covers only the keys the app does not own — above all `pipeline`, whose
+ * commands the gate executes — so the app's own keys, `modules` among them,
+ * stay the app's to edit. Keys are sorted, so key order and formatting are not
+ * a change. A manifest that is not a JSON object is hashed whole.
+ */
+function hashFile(projectDir: string, relPath: string): string {
+  const file = join(projectDir, relPath);
+  if (relPath === MANIFEST) {
+    try {
+      const manifest = readJsonFile(file);
+      if (manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)) {
+        const locked: Record<string, unknown> = { ...manifest };
+        for (const key of APP_OWNED_MANIFEST_KEYS) delete locked[key];
+        return sha256(JSON.stringify(sortKeys(locked)));
+      }
+    } catch {
+      // Not valid JSON: hashed whole, and the framework-files check names the error.
+    }
+  }
+  return sha256(readFileSync(file));
+}
+
+/** Whether `relPath`, now hashing to `now`, matches its `recorded` hash. A
+ *  manifest sealed before its hash left out the app's keys is recorded whole,
+ *  and still matches while it is byte-identical. */
+function matchesRecord(projectDir: string, relPath: string, recorded: string, now: string): boolean {
+  return now === recorded || (relPath === MANIFEST && sha256(readFileSync(join(projectDir, relPath))) === recorded);
 }
 
 function toPosix(p: string): string {
@@ -67,7 +110,8 @@ export function computeSystemHashes(projectDir: string, systemPaths: string[]): 
     if (st.isDirectory()) {
       for (const name of readdirSync(current)) stack.push(join(current, name));
     } else {
-      hashes[toPosix(relative(projectDir, current))] = sha256(current);
+      const rel = toPosix(relative(projectDir, current));
+      hashes[rel] = hashFile(projectDir, rel);
     }
   }
   return hashes;
@@ -87,7 +131,7 @@ export function recordFileHash(projectDir: string, relPath: string): void {
   const file = canonPath(projectDir);
   if (file === null) return;
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  recorded[toPosix(relPath)] = sha256(join(projectDir, relPath));
+  recorded[toPosix(relPath)] = hashFile(projectDir, toPosix(relPath));
   writeFileSync(file, JSON.stringify(recorded, null, 2) + "\n");
 }
 
@@ -96,11 +140,11 @@ export function fileMatchesCanon(projectDir: string, relPath: string): boolean |
   const file = canonPath(projectDir);
   if (file === null) return null;
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  const want = recorded[toPosix(relPath)];
+  const rel = toPosix(relPath);
+  const want = recorded[rel];
   if (want === undefined) return null;
-  const abs = join(projectDir, relPath);
-  if (!existsSync(abs)) return false;
-  return sha256(abs) === want;
+  if (!existsSync(join(projectDir, rel))) return false;
+  return matchesRecord(projectDir, rel, want, hashFile(projectDir, rel));
 }
 
 export interface OwnershipDrift {
@@ -154,7 +198,7 @@ export function compareCanon(projectDir: string, declaredPaths: string[] | null)
   for (const [path, hash] of Object.entries(recorded)) {
     const now = current[path];
     if (now === undefined) drift.missing.push(path);
-    else if (now !== hash) drift.modified.push(path);
+    else if (!matchesRecord(projectDir, path, hash, now)) drift.modified.push(path);
   }
   for (const path of Object.keys(current)) {
     if (recorded[path] === undefined) drift.added.push(path);

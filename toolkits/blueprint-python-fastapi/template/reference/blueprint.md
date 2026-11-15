@@ -40,7 +40,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `data/`, credentials, framework state, `__pycache__`. Extend as needed. |
 | `requirements.txt` | build | Python dependencies. Add your HTTP client (e.g. `httpx`) here when you call external APIs. |
-| `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
+| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `main.py` | SYSTEM (hash-locked) | FastAPI wiring: every request meets the adapter first (body read under a size cap, Host checked on every path) and `adapter.dispatch()` answers `/api/_a2app/**`, `/api/collections/**`, `/api/ops/**` and `/.well-known/a2app.json`; serves the account page. Never edit. |
 | `a2app_adapter.py` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store + `--selftest`. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |

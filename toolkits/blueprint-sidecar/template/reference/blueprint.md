@@ -34,7 +34,7 @@ the source disagree, the source wins.
 | `upstream/` | **YOURS to place, never to edit** | the adopted app's source, exactly as it came. |
 | `sidecar.json` | **YOURS** | how the app starts (`upstream`), and which route each operation reaches (`operations`). |
 | `operations.json` | **YOURS** | what each operation is: name, module, typed `params`, `destructive`, `readOnly`, `idempotent`, description. |
-| `manifest.json` | SYSTEM (hash-locked) | identity, `authMode`, `modules`, and the `pipeline`. Edit `modules`/`authMode`, then reseal with `agent-app <dir> toolkit-sync` (the pipeline is restored from the toolkit; identity and modules are kept). |
+| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | identity, `authMode`, `modules`, and the `pipeline`. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page: sign in, invites, people, connected agents, approving an agent's sign-in. The same file in every blueprint. |
 | `package.json` | **YOURS** | installs the sidecar. Add a `build` script if the adopted app needs installing or building (see **Build, run, gate**). |
 | `AGENT_APP.md` | **YOURS** | what the app is, its modules and operations, for the agents that operate it. |
@@ -100,7 +100,7 @@ stops the app.
 3. **Name the modules.** The grouping is already there — use it. OpenAPI tags,
    route prefixes (`/api/invoices/*`, `/api/customers/*`) and controller files
    each name an area a person would recognise; make each one a module in
-   `manifest.json`, then `agent-app <dir> toolkit-sync`. Flattening a large API
+   `manifest.json`. Flattening a large API
    into one module produces a screen the describe budget (2,000 characters per
    level) will fail. Never use a reserved first segment: `data`, `identity`,
    `whoami`, `context`, `tasks`, `events`.
@@ -184,7 +184,7 @@ ships with the app.
 
 ## Accounts (`authMode: multi-user`)
 
-Set `"authMode": "multi-user"` in `manifest.json` and reseal. People then sign
+Set `"authMode": "multi-user"` in `manifest.json`. People then sign
 in on `/_a2app/account`; the admin credential (`.agent-token`) invites them, and
 each approves the agents acting for them (`a2app <dir> login`). Every request is
 held to the agent's scopes and to what its person may still do. The adopted app

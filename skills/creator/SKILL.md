@@ -38,14 +38,16 @@ says "per your stack", `reference/blueprint.md` is the answer.
 ## The ownership rule (the gate enforces this)
 
 Edit ONLY agent-accessible paths: your app/View code, your schema migrations,
-your operation implementations, the non-system entries of `operations.json`, and
-`AGENT_APP.md` (your plan/context/index — keep it current). Exact paths are per
+your operation implementations, the non-system entries of `operations.json`,
+`AGENT_APP.md` (your plan/context/index — keep it current), and the app's own
+keys in `manifest.json` (identity, `authMode`, `modules`). Exact paths are per
 your blueprint.
 
-NEVER edit system-owned files — the A2App adapter, `manifest.json`, vendored kit
-files, build config. The validation gate hashes them (the ownership canon) and
-**fails the build** if they changed, naming the file. Need a variant of a kit
-component? Wrap it in your own app code; never edit the locked original.
+NEVER edit system-owned files — the A2App adapter, the `pipeline` and version
+stamps in `manifest.json`, vendored kit files, build config. The validation
+gate hashes them (the ownership canon) and **fails the build** if they changed,
+naming the file. Need a variant of a kit component? Wrap it in your own app
+code; never edit the locked original.
 
 ## The spec comes first
 

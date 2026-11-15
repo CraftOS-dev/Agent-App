@@ -333,7 +333,9 @@ someone leave the screen and come back.
    repeat step 1 and step 4.
 5. **Promote and put it in front of the user.**
    `agent-app <dir> promote` requires the gate pass from step 1 (edited since
-   validating? validate again first), takes the pre-promote backup when a live
+   validating? validate again first — except the ledger, `reference/tasks.md`,
+   which is not gated: recording the verdict there needs no new validate),
+   takes the pre-promote backup when a live
    database exists (a first delivery has none), applies your migrations to
    live, and destroys the dev instance. Then `agent-app <dir> serve` runs the
    manifest pipeline as a managed background process, polls health, and prints

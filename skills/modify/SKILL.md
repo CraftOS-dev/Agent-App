@@ -133,7 +133,8 @@ agent-app <dir> open       # and show it to the user (see below)
 - **`promote` refuses without a fresh gate pass.** `validate` records a pass
   bound to the exact tree it gated, and only counts as promotable when the
   budget walk ran against the dev instance. Any edit after `validate`
-  invalidates the pass — the order is always: edit → `dev` (if backend
+  invalidates the pass, except to the ledger (`reference/tasks.md`), which is
+  not gated code — the order is always: edit → `dev` (if backend
   changed) → `validate` → promote. On success promote destroys the dev
   instance; on failure it keeps it (and the pass) for the retry.
 - Abandoning a change? `agent-app <dir> stop --dev` tears the candidate down

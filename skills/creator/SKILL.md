@@ -99,6 +99,10 @@ structure; walk-verify checks the running app against it.
      and overrides` — the ONE location the verifier reads. Process Flows
      only where a lifecycle exists; Operations Design must match
      `operations.json` exactly.
+   - **Write it in parts, one section per write.** Every reply has an
+     output limit, and a reply cut off at it is lost whole; a full spec in
+     one write is long enough to hit it. The same goes for any large file —
+     code included.
 4. **Get the user's approval on Part A before building.** Present a short
    summary — the goals, the Features list, and Out of Scope — and ask once.
    Corrections go into the spec first. On approval, record the date in

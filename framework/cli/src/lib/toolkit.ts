@@ -16,7 +16,8 @@
  *     "systemPaths": ["manifest.json", "pb/pb_hooks/_a2app.pb.js", ...],
  *     "adapterPaths": ["pb/pb_hooks/_a2app.pb.js", ...],  // subset re-vendored by adapter-sync
  *     "gate": [ { "name": "migrations (fresh db)", "run": "node scripts/migrate-check.mjs" } ],
- *     "lifecycle": { "dataDir": "pb/pb_data", "dev": "...", "promote": "..." }
+ *     "lifecycle": { "dataDir": "pb/pb_data", "dev": "...", "promote": "..." },
+ *     "appWritesPipeline": false               // true: the toolkit ships no pipeline; the app writes its own
  *   }
  *
  * The app records which toolkit it came from in `.a2app/toolkit.json`
@@ -48,6 +49,8 @@ export interface ToolkitManifest {
     backup?: string;
     restore?: string;
   };
+  /** the toolkit ships no runtime, so the app writes its own manifest `pipeline` */
+  appWritesPipeline?: boolean;
 }
 
 export interface ResolvedToolkit {

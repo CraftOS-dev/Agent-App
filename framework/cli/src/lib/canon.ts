@@ -23,7 +23,7 @@ import {
 import { join, relative, sep } from "node:path";
 import { assertInside } from "./fsx.js";
 import { readJsonFile } from "./json.js";
-import { APP_OWNED_MANIFEST_KEYS } from "./manifest.js";
+import { appOwnedManifestKeys } from "./manifest.js";
 import { projectToolkit } from "./toolkit.js";
 
 export const CANON_DIR = ".a2app";
@@ -47,9 +47,10 @@ function sortKeys(value: unknown): unknown {
 /**
  * A system file's canon hash. `manifest.json` has two owners (manifest.ts): its
  * hash covers only the keys the app does not own — above all `pipeline`, whose
- * commands the gate executes — so the app's own keys, `modules` among them,
- * stay the app's to edit. Keys are sorted, so key order and formatting are not
- * a change. A manifest that is not a JSON object is hashed whole.
+ * commands the gate executes, unless the app's toolkit has the app write it —
+ * so the app's own keys, `modules` among them, stay the app's to edit. Keys are
+ * sorted, so key order and formatting are not a change. A manifest that is not
+ * a JSON object is hashed whole.
  */
 function hashFile(projectDir: string, relPath: string): string {
   const file = join(projectDir, relPath);
@@ -58,7 +59,7 @@ function hashFile(projectDir: string, relPath: string): string {
       const manifest = readJsonFile(file);
       if (manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)) {
         const locked: Record<string, unknown> = { ...manifest };
-        for (const key of APP_OWNED_MANIFEST_KEYS) delete locked[key];
+        for (const key of appOwnedManifestKeys(projectToolkit(projectDir)?.manifest)) delete locked[key];
         return sha256(JSON.stringify(sortKeys(locked)));
       }
     } catch {

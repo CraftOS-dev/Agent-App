@@ -69,6 +69,9 @@ check("provenance survives", merged.source, app.source);
 // The whole point of re-vendoring: executable configuration comes from the
 // trusted toolkit, never from the app being re-vendored.
 check("pipeline is taken from the toolkit", merged.pipeline, template.pipeline);
+// …unless the toolkit ships none and the app writes its own.
+const writesPipeline = { id: "blueprint-base", systemPaths: ["manifest.json"], appWritesPipeline: true };
+check("an app that writes its pipeline keeps it", mergeManifest(template, app, "0.2.0", writesPipeline).pipeline, app.pipeline);
 check("adapterVersion is stamped", merged.adapterVersion, "0.2.0");
 check("agentAppVersion is stamped, not taken from the template", merged.agentAppVersion, "0.1.0");
 

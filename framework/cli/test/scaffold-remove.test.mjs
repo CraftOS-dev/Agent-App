@@ -11,9 +11,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifySystemHashes } from "../dist/lib/canon.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const AGENT_APP = resolve(here, "..", "dist", "agent-app.js");
+// The repository's blueprints, not a bundle an earlier pack left beside the CLI.
+const TOOLKITS = resolve(here, "..", "..", "..", "toolkits");
 
 const failures = [];
 const check = (label, got, want) => {
@@ -25,7 +28,7 @@ const ok = (label, cond) => check(label, Boolean(cond), true);
 
 function cli(args, home) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [AGENT_APP, ...args], { env: { ...process.env, A2APP_HOME: home }, windowsHide: true });
+    const child = spawn(process.execPath, [AGENT_APP, ...args], { env: { ...process.env, A2APP_HOME: home, A2APP_TOOLKITS_DIR: TOOLKITS }, windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -62,6 +65,16 @@ try {
   const made = await cli([dir, "scaffold", "--blueprint", "blueprint-base", "--name", "Keep Me"], home);
   check("scaffold on a named blueprint succeeds", made.code, 0);
   ok("…with the blueprint's own .gitignore", readFileSync(join(dir, ".gitignore"), "utf8").includes(".agent-token"));
+
+  /* ----------------------------- blueprint-base: the app writes its pipeline */
+  // The base blueprint ships no runtime, so the pipeline the app writes is
+  // neither locked nor reset to the template's placeholders by toolkit-sync.
+  const manifestFile = join(dir, "manifest.json");
+  const pipeline = { install: "npm ci", build: "npm run build", start: "node server.js", health: "/api/_a2app" };
+  writeFileSync(manifestFile, JSON.stringify({ ...JSON.parse(readFileSync(manifestFile, "utf8")), pipeline }, null, 2) + "\n");
+  check("on blueprint-base, writing the pipeline is not drift", verifySystemHashes(dir).modified, []);
+  const synced = await cli([dir, "toolkit-sync"], home);
+  check("…and toolkit-sync keeps it", [synced.code, JSON.parse(readFileSync(manifestFile, "utf8")).pipeline], [0, pipeline]);
 
   mkdirSync(join(dir, "data"), { recursive: true });
   writeFileSync(join(dir, "data", "db.txt"), "live");

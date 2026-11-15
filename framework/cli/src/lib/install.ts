@@ -333,8 +333,8 @@ function revendor(root: string, tk: ResolvedToolkit | null, id: string | null): 
   const written = vendorPaths(tk, root, tk.manifest.systemPaths);
   const template = existsSync(manifestPath) ? (readJsonFile(manifestPath) as Manifestish) : {};
   // Identity and modules stay the package's; `pipeline` — the shell commands
-  // this CLI runs — comes from the trusted toolkit.
-  writeFileAtomic(manifestPath, JSON.stringify(mergeManifest(template, packaged, adapterVersionOf(tk)), null, 2) + "\n");
+  // this CLI runs — comes from the trusted toolkit, unless the app writes its own.
+  writeFileAtomic(manifestPath, JSON.stringify(mergeManifest(template, packaged, adapterVersionOf(tk), tk.manifest), null, 2) + "\n");
   recordProjectToolkit(root, tk);
   writeSystemHashes(root, tk.manifest.systemPaths);
   return { tk, files: written.length };

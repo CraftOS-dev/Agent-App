@@ -43,8 +43,9 @@ your operation implementations, the non-system entries of `operations.json`,
 keys in `manifest.json` (identity, `authMode`, `modules`). Exact paths are per
 your blueprint.
 
-NEVER edit system-owned files — the A2App adapter, the `pipeline` and version
-stamps in `manifest.json`, vendored kit files, build config. The validation
+NEVER edit system-owned files — the A2App adapter, the version stamps in
+`manifest.json` and its `pipeline` (unless your blueprint has you write it),
+vendored kit files, build config. The validation
 gate hashes them (the ownership canon) and **fails the build** if they changed,
 naming the file. Need a variant of a kit component? Wrap it in your own app
 code; never edit the locked original.

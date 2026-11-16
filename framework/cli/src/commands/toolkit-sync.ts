@@ -49,7 +49,7 @@ export async function run(_args: string[], app: string): Promise<number> {
   // here is also what lets an author edit their modules and reseal: the canon is
   // recorded AFTER this write, so the manifest it hashes is the merged one.
   const template = readJsonFile(manifestPath) as Manifestish;
-  const merged = mergeManifest(template, existing, version);
+  const merged = mergeManifest(template, existing, version, tk.manifest);
   writeFileAtomic(manifestPath, JSON.stringify(merged, null, 2) + "\n");
 
   writeSystemHashes(project.dir, tk.manifest.systemPaths);

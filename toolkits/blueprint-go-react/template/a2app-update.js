@@ -30,8 +30,13 @@
  * back to the same dismissible banner when it does. See {@link hasUnsavedInput}:
  * if that check cannot prove the page is safe, the person is asked.
  *
- * Loading the module starts the watch. `watchForUpdates` is exported for a View
- * that wants its own affordance instead.
+ * It also keeps the page in step with the HOST it is embedded in: an app framed
+ * by an agent harness follows that host's theme — light or dark, and the style
+ * pack the person picked — as the person switches it. See
+ * {@link followHostTheme}.
+ *
+ * Loading the module starts the watch and the theme follow. `watchForUpdates` is
+ * exported for a View that wants its own affordance instead.
  */
 
 /** Poll interval while the tab is visible. Long enough to be invisible in a
@@ -361,10 +366,82 @@ export function watchForUpdates(options = {}) {
   };
 }
 
-/* Loading the module starts the watch — `<script type="module"
-   src="/_a2app/update.js">` is the whole integration. Guarded so that a View
-   which also calls `watchForUpdates()` explicitly ends up with one watcher, not
-   two racing to draw the same banner. */
+/* ---------------------------------------------------------------- host theme */
+
+/**
+ * The host's theme message, and the View's request for it. The names predate
+ * the framework; hosts already send them, so they stay as they are.
+ */
+const THEME_MESSAGE = "livingui-theme";
+const THEME_REQUEST = "craftbot-theme-request";
+const MODES = new Set(["light", "dark"]);
+/** The core colors a custom theme pins over the style pack (tokens.css derives the rest). */
+const CUSTOM_COLORS = ["bg", "surface", "text", "accent"];
+
+const isColor = (value) =>
+  typeof value === "string" && (globalThis.CSS?.supports?.("color", value) ?? /^#[0-9a-f]{3,8}$/i.test(value));
+
+/**
+ * Apply one host theme message to the page; false when it is not one.
+ *
+ * tokens.css resolves every color from two attributes on <html>: `data-theme`
+ * (light or dark) and `data-style` (the style pack). The message is
+ *
+ *     { type: "livingui-theme", mode: "light" | "dark", themeId: "<pack>",
+ *       customColors?: { bg, surface, text, accent } }
+ *
+ * `customColors` pins the core colors over the pack; a message without them
+ * clears any pinned earlier, so switching back to a preset really switches.
+ */
+export function applyHostTheme(message, root = document.documentElement) {
+  if (message === null || typeof message !== "object" || message.type !== THEME_MESSAGE) return false;
+  if (!MODES.has(message.mode)) return false;
+  root.setAttribute("data-theme", message.mode);
+  if (typeof message.themeId === "string" && /^[a-z][a-z0-9-]*$/.test(message.themeId)) {
+    root.setAttribute("data-style", message.themeId);
+  } else {
+    root.removeAttribute("data-style");
+  }
+  const colors = message.customColors !== null && typeof message.customColors === "object" ? message.customColors : {};
+  for (const name of CUSTOM_COLORS) {
+    if (isColor(colors[name])) root.style.setProperty(`--agent-app-${name}`, colors[name]);
+    else root.style.removeProperty(`--agent-app-${name}`);
+  }
+  return true;
+}
+
+/**
+ * Follow the theme of the host this page is embedded in. Returns a `stop()`.
+ *
+ * Standalone (no parent frame) there is no host to follow, and tokens.css
+ * follows the OS scheme. Embedded, only the PARENT window is listened to —
+ * another frame or a popup cannot restyle the page. The host sends its theme
+ * when the frame loads, which can be before this runtime-loaded module is
+ * listening, so the page asks for it once it is.
+ */
+export function followHostTheme(win = window) {
+  const host = win.parent;
+  if (!host || host === win) return () => {};
+  const root = win.document.documentElement;
+  const onMessage = (event) => {
+    if (event.source === host) applyHostTheme(event.data, root);
+  };
+  win.addEventListener("message", onMessage);
+  try {
+    host.postMessage({ type: THEME_REQUEST }, "*");
+  } catch {
+    // A host that cannot be asked still sends its theme on every switch.
+  }
+  return () => win.removeEventListener("message", onMessage);
+}
+
+/* Loading the module starts the watch and the theme follow — `<script
+   type="module" src="/_a2app/update.js">` is the whole integration. Guarded so
+   that a View which also calls `watchForUpdates()` or `followHostTheme()`
+   explicitly ends up with one of each, not two racing. */
 if (!globalThis.__a2appUpdateWatch) {
   globalThis.__a2appUpdateWatch = watchForUpdates();
+}
+if (!globalThis.__a2appHostTheme) {
+  globalThis.__a2appHostTheme = followHostTheme();
 }

@@ -357,12 +357,15 @@ export function requirementsFeatures(projectDir: string): string[] {
   return out;
 }
 
+/** The build ledger's path inside an app, `/`-separated. */
+export const TASKS_DOC = "reference/tasks.md";
+
 /** `reference/tasks.md` — the build ledger. A build with no ledger cannot show
  *  what it did: every task cites the Feature ID or Part B section it
  *  implements, and completed tasks are the record walk-verify's builder
  *  hand-off rests on. */
 export function validateTasksDoc(projectDir: string): FrameworkFileProblem[] {
-  const file = join("reference", "tasks.md");
+  const file = TASKS_DOC;
   const path = join(projectDir, file);
   if (!existsSync(path)) {
     return [{ file, message: "missing — derive the task ledger from the approved spec before building (one task per Feature ID or Q-entry)" }];

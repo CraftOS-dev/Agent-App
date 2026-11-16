@@ -8,7 +8,8 @@
  * the validation gate re-hashes every entry and fails on any drift.
  *
  * The canon is never empty for a conforming app: the minimum is the adapter
- * files plus `manifest.json`.
+ * files plus `manifest.json`, whose hash leaves out only the keys the app's
+ * builder edits (see {@link hashFile}).
  */
 import { createHash } from "node:crypto";
 import {
@@ -21,15 +22,59 @@ import {
 } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { assertInside } from "./fsx.js";
+import { readJsonFile } from "./json.js";
+import { appEditableManifestKeys } from "./manifest.js";
 import { projectToolkit } from "./toolkit.js";
 
 export const CANON_DIR = ".a2app";
 export const CANON_FILE = join(CANON_DIR, "system-hashes.json");
 /** Legacy location read during the transition window. */
 const LEGACY_CANON_FILE = join(".lui", "system-hashes.json");
+const MANIFEST = "manifest.json";
 
-function sha256(file: string): string {
-  return "sha256:" + createHash("sha256").update(readFileSync(file)).digest("hex");
+function sha256(content: string | Buffer): string {
+  return "sha256:" + createHash("sha256").update(content).digest("hex");
+}
+
+/** `value` with every object's keys in sorted order. */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value === null || typeof value !== "object") return value;
+  const object = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(object).sort().map((key) => [key, sortKeys(object[key])]));
+}
+
+/**
+ * A system file's canon hash. `manifest.json` has two owners (manifest.ts): its
+ * hash leaves out the keys the app's builder edits, `modules` among them, and
+ * covers the rest — above all `pipeline`, whose commands the gate executes
+ * (unless the app's toolkit has the app write it), and the identity, port,
+ * modification lock and provenance. Keys are sorted, so key order and
+ * formatting are not a change. A manifest that is not a JSON object is hashed
+ * whole.
+ */
+function hashFile(projectDir: string, relPath: string): string {
+  const file = join(projectDir, relPath);
+  if (relPath === MANIFEST) {
+    try {
+      const manifest = readJsonFile(file);
+      if (manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)) {
+        const locked: Record<string, unknown> = { ...manifest };
+        for (const key of appEditableManifestKeys(projectToolkit(projectDir)?.manifest)) delete locked[key];
+        return sha256(JSON.stringify(sortKeys(locked)));
+      }
+    } catch {
+      // Not valid JSON: hashed whole, and the framework-files check names the error.
+    }
+  }
+  return sha256(readFileSync(file));
+}
+
+/** Whether `relPath`, now hashing to `now`, matches its `recorded` hash. A
+ *  manifest sealed before its hash left out the app's keys is recorded whole,
+ *  and still matches while it is byte-identical. */
+function matchesRecord(projectDir: string, relPath: string, recorded: string, now: string): boolean {
+  return now === recorded || (relPath === MANIFEST && sha256(readFileSync(join(projectDir, relPath))) === recorded);
 }
 
 function toPosix(p: string): string {
@@ -67,7 +112,8 @@ export function computeSystemHashes(projectDir: string, systemPaths: string[]): 
     if (st.isDirectory()) {
       for (const name of readdirSync(current)) stack.push(join(current, name));
     } else {
-      hashes[toPosix(relative(projectDir, current))] = sha256(current);
+      const rel = toPosix(relative(projectDir, current));
+      hashes[rel] = hashFile(projectDir, rel);
     }
   }
   return hashes;
@@ -87,7 +133,7 @@ export function recordFileHash(projectDir: string, relPath: string): void {
   const file = canonPath(projectDir);
   if (file === null) return;
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  recorded[toPosix(relPath)] = sha256(join(projectDir, relPath));
+  recorded[toPosix(relPath)] = hashFile(projectDir, toPosix(relPath));
   writeFileSync(file, JSON.stringify(recorded, null, 2) + "\n");
 }
 
@@ -96,11 +142,11 @@ export function fileMatchesCanon(projectDir: string, relPath: string): boolean |
   const file = canonPath(projectDir);
   if (file === null) return null;
   const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
-  const want = recorded[toPosix(relPath)];
+  const rel = toPosix(relPath);
+  const want = recorded[rel];
   if (want === undefined) return null;
-  const abs = join(projectDir, relPath);
-  if (!existsSync(abs)) return false;
-  return sha256(abs) === want;
+  if (!existsSync(join(projectDir, rel))) return false;
+  return matchesRecord(projectDir, rel, want, hashFile(projectDir, rel));
 }
 
 export interface OwnershipDrift {
@@ -123,9 +169,49 @@ export interface OwnershipDrift {
  * With no toolkit there are no declared directory roots, so the recorded file
  * list IS the complete declaration of what is system-owned, and any other file
  * in the project is agent-accessible by definition.
+ *
+ * For an app's own canon only: a manifest record sealed whole is first brought
+ * up to date while the file is unchanged ({@link resealWholeManifest}). A
+ * package's canon is compared as it stands ({@link compareCanon}).
  */
 export function verifySystemHashes(projectDir: string): OwnershipDrift {
+  resealWholeManifest(projectDir);
   return compareCanon(projectDir, projectToolkit(projectDir)?.manifest.systemPaths ?? null);
+}
+
+/**
+ * Bring an app's manifest record sealed whole, before the hash left out the
+ * builder's keys, to the hash {@link hashFile} takes now. Only while the file
+ * is byte-identical to the one sealed: then there is nothing to judge, only
+ * the record's form to change, and from then on the builder's keys are its to
+ * edit. A manifest changed since cannot be told apart from a tampered one, so
+ * it is left to drift, and to a `toolkit-sync`.
+ */
+function resealWholeManifest(projectDir: string): void {
+  const file = canonPath(projectDir);
+  if (file === null || !existsSync(join(projectDir, MANIFEST))) return;
+  const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
+  const sealed = recorded[MANIFEST];
+  if (sealed === undefined) return;
+  const now = hashFile(projectDir, MANIFEST);
+  if (now === sealed || sha256(readFileSync(join(projectDir, MANIFEST))) !== sealed) return;
+  recorded[MANIFEST] = now;
+  writeFileSync(file, JSON.stringify(recorded, null, 2) + "\n");
+}
+
+/**
+ * What a drift report naming `manifest.json` owes the agent reading it: which
+ * keys are the builder's, and the one reseal an app sealed whole still needs.
+ * Empty when the manifest did not drift.
+ */
+export function manifestDriftNote(projectDir: string, drift: OwnershipDrift): string {
+  if (!drift.modified.includes(MANIFEST)) return "";
+  const keys = appEditableManifestKeys(projectToolkit(projectDir)?.manifest).map((key) => `\`${key}\``);
+  return (
+    `\nmanifest.json: only ${keys.join(", ")} are the builder's to edit; put every other key back as it was. ` +
+    "An app sealed by an older agent-app records the manifest whole: if only those keys changed, " +
+    "reseal it once with `agent-app <dir> toolkit-sync`."
+  );
 }
 
 /** Whether a tree records an ownership canon at all. */
@@ -154,7 +240,7 @@ export function compareCanon(projectDir: string, declaredPaths: string[] | null)
   for (const [path, hash] of Object.entries(recorded)) {
     const now = current[path];
     if (now === undefined) drift.missing.push(path);
-    else if (now !== hash) drift.modified.push(path);
+    else if (!matchesRecord(projectDir, path, hash, now)) drift.modified.push(path);
   }
   for (const path of Object.keys(current)) {
     if (recorded[path] === undefined) drift.added.push(path);

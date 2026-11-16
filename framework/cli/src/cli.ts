@@ -66,6 +66,12 @@ const COMMANDS: Record<string, CommandMeta> = {
   },
   export: { summary: "Write the app as a package zip: no credentials, data, runtime state or build output", surface: "agent-app", scope: "app", args: "[--out <file.zip>]" },
   validate: { summary: "Run the validation + security gate", surface: "agent-app", scope: "app" },
+  commit: {
+    summary: "Commit the app's changes to its own git repository (created if missing): the history walk-verify verifies, and re-verifies from",
+    surface: "agent-app",
+    scope: "app",
+    args: '--message "<what changed and why>"',
+  },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },
   serve: {

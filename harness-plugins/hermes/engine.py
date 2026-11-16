@@ -45,7 +45,7 @@ FRAMEWORK_SKILLS = ("creator", "modify", "importer", "operator", "walk-verify", 
 # own command table; the parity test here holds this one to that. `login` and
 # `logout` are `a2app` commands.
 FRAMEWORK_VERBS = frozenset({
-    "scaffold", "import", "export", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
+    "scaffold", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
     "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
     "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 })

@@ -7,5 +7,6 @@
  "gate": [],
  "lifecycle": {
  "dataDir": "data"
- }
+ },
+ "appWritesPipeline": true
 }

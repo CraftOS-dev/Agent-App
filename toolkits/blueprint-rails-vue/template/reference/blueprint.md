@@ -36,7 +36,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `ui/src/App.vue` | **YOURS** | the View logic (one SFC, `<script setup>`): state machine (loading/ready/error), add/advance/delete actions, filters, the `a2app:datachange` listener, boot. |
 | `ui/src/api.js` | **YOURS** | the one fetch wrapper — 10 s timeout, GET retry-once, readable error messages. |
 | `ui/src/components/Icon.vue` · `ui/src/toast.js` + `components/ToastRegion.vue` · `ui/src/confirm.js` + `components/ConfirmDialog.vue` · `ui/src/format.js` | **YOURS** | the shared pieces — icon set, `useToast`, `useConfirm` (in-app dialog, never `window.confirm`), day formatting. One impl each; compose, never re-implement. |
-| `ui/src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher. Keep it when you rewrite the View. |
+| `ui/src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher, which also follows a host's theme. Keep it when you rewrite the View. |
 | `ui/public/tokens.css` | **YOURS** | design tokens (the kit sheet): foundation `--agent-app-*` + semantic bridge, light + dark + style packs. Re-point values; keep the NAMES stable. |
 | `ui/public/ui.css` | **YOURS** | component styles (buttons, cards, list rows, dialog, toasts). Consumes semantic tokens only. |
 | `ui/vite.config.js` | **YOURS** | the View build: Vue plugin, `../public` output, dev-server proxy to the running app. |
@@ -47,13 +47,13 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `data/`, `public/`, credentials, framework state, Rails runtime dirs. Extend for your own artifacts. |
 | `Gemfile` | build | the backend's gems (rails, puma, sqlite3). Add your HTTP client here when you call external APIs. |
-| `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `config/application.rb` | SYSTEM (hash-locked) | the minimal Rails application: action_controller only (NO ActiveRecord), eager-loaded `lib/`, the adapter's Host check in front of every path, request bodies never parsed or logged by Rails, errors in the protocol's envelope, headless secret_key_base. Never edit. |
 | `config/routes.rb` | SYSTEM (hash-locked) | one catch-all route: every path and verb goes to the controller. Never edit. |
 | `config/puma.rb` | SYSTEM (hash-locked) | the launch contract: PORT (manifest fallback 8096), loopback bind (`A2APP_HOST` to override), single mode. Never edit. |
 | `app/controllers/a2app_controller.rb` | SYSTEM (hash-locked) | the wiring: Rack request → `adapter.dispatch()`, 5 MiB body cap before parsing, any error answered `adapter_error`; every other path is the View — `public/`, the watcher and the account page — served with ETag validators; identity's `appVersion` fingerprint. Never edit. |
 | `lib/a2app_adapter.rb` | SYSTEM (hash-locked) | the adapter — served surface (identity, describe, guarded CRUD, operations, tasks/events, accounts, credentials, device sign-in) + the pure rules (guard, predicates, fingerprint) + the SQLite store (records, and every table of adapter state) + the View's static server + `--selftest`. Never edit. |
-| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab, and applies the theme of a host that frames the app. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `config/boot.rb` · `config/environment.rb` · `config.ru` | build | standard Rails boot chain (bundler setup → application → rackup). Leave them alone. |
 | `scripts/check_ops.rb` | gate | the "operations resolve" gate step. Leave it alone. |
@@ -218,7 +218,10 @@ Component styles are plain CSS classes in `ui/public/ui.css`.
 `--text-primary`, `--accent-solid`, `--danger-solid`, `--focus-ring`, `--sp-*`,
 `--r-*`, `--fs-*`, `--dur-*`, …). Theme by re-pointing the foundation or picking
 a `[data-style]` pack; keep the names stable. Light and dark both resolve every
-token and hold WCAG AA. Never hardcode a value where a token exists.
+token and hold WCAG AA. Never hardcode a value where a token exists. Framed by
+a host (an agent harness that embeds the app), the update watcher sets
+`data-theme` and `data-style` on `<html>` from the host's theme as the person
+switches it; standalone, the OS scheme applies.
 
 **Realtime / staleness — `ui/src/updater.js`** bridges to the system-owned
 watcher (`/_a2app/update.js`, a RUNTIME import the bundler must leave alone).

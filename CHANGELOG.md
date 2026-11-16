@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- **Every app keeps its history in a git repository of its own** (Quality
+  Standard Q18). `scaffold`, `install` and `import` create it, with the app as
+  it arrived as the first commit. An app inside another repository is
+  versioned there, and no repository is nested in it.
+  `agent-app <dir> commit --message "<what and why>"` commits the app's
+  changes, so an agent without a shell can keep the history too. walk-verify
+  verifies that commit, and re-verifies from it. The gate fails an app that is
+  in no repository, and `validate` says when work is still uncommitted. These
+  commits are never signed, even where git signs by default: no one is there
+  to enter a passphrase for an agent.
+- **`.a2app/` is ignored as a whole** except `toolkit.json` and
+  `system-hashes.json`. Before, the describe cache and some blueprints' dev
+  and gate-pass records were left out of the ignore rules. Once committed, a
+  `dev` or `validate` changed them, so the verified tree was never a clean
+  commit.
+- **walk-verify re-verifies what changed.** Given the last report, it checks
+  that report's defects, the spec and code changed since the commit it
+  verified, and sweeps the rest for regressions, instead of walking the whole
+  app again. It walks in full when the report's commit is not one the ledger
+  records, is not an ancestor of the app's HEAD, or the Quality Standard has
+  changed since. A report from before this release names no standard, so the
+  first verification after it is a full walk.
+- **Every app ignores what a package never carries.** Every credential
+  (`.agent-token`, `.principal`, `.superuser`, `.tunnel-secret`, `.lan-secret`,
+  any `*.secret`) and `node_modules/` are in each blueprint's `.gitignore`, and
+  `scaffold`, `install`, `import`, `commit` and `validate` restore any that are
+  missing. blueprint-base listed only the first three, so an app's first
+  commit took its other secrets and its dependencies.
+
+### Changed
+
+- **The builder edits its app's `manifest.json` keys without a reseal.** The
+  ownership canon no longer hashes the manifest whole. It leaves out `name`,
+  `authMode`, `modules`, `appVersion` and `capabilities`, and on blueprint-base,
+  which ships no runtime, `pipeline` too: a base app writes its own, and
+  `toolkit-sync` keeps it. Every other key stays locked, so editing `id`, `port`,
+  `modificationLock`, `source`, the version stamps or another blueprint's
+  `pipeline` still fails the gate.
+
 ### Fixed
 
 - **Any signed-in person reached every task.** The task API checked only that
@@ -15,6 +56,13 @@
 - **A finished request could never be asked again.** A repeated request joined
   the earlier task even after it was completed, failed or canceled, so asking
   again handed back the finished task. It now joins only an open task (§6.1).
+- **An app framed by a host ignored the host's theme.** `tokens.css` themes
+  from `data-theme` and `data-style` on `<html>`, but no View ever set them,
+  so a framed app followed the OS scheme whatever the host chose. The update
+  watcher (`/_a2app/update.js`) now applies the host's theme message and asks
+  for it on load, from the parent window only. pocketbase-react, which had no
+  watcher, now serves and loads it too. The host's side is in
+  `framework/host/README.md`.
 
 ### Upgrading an existing app
 
@@ -22,6 +70,22 @@
 pocketbase-react apps take it with `agent-app <dir> toolkit-sync`. A View that
 follows a task with the person's own session keeps working, since a person
 reaches the tasks they asked for.
+
+The same sync brings the theme-following update watcher to apps on the
+react-node, go-react, rails-vue and rust-react blueprints: their Views already
+load it. A pocketbase-react View also needs the loader a new scaffold ships:
+add `ui/src/updater.js` and import it from `ui/src/main.jsx`.
+
+An app sealed before this release records its `manifest.json` whole. Its next
+`dev`, `validate` or `serve` re-records it in the new form while the file is
+unchanged, and from then on the builder's keys are its to edit. If they were
+edited first, the gate names `manifest.json` as drift: run
+`agent-app <dir> toolkit-sync` once to reseal it.
+
+An app created before this release has no repository, so its next `validate`
+fails on version control. Run `agent-app <dir> commit --message "Start the
+history"` once: it creates the repository, writes the missing ignore rules,
+and commits the app as it stands.
 
 ## 0.2.0 — protocol 0.2
 

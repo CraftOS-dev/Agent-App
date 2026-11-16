@@ -15,6 +15,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
+import { TASKS_DOC } from "./frameworkFiles.js";
 import { copyDirAtomic, replaceDirAtomic } from "./fsx.js";
 import { identifyApp } from "./net.js";
 import { EnvError, type Project } from "./project.js";
@@ -168,9 +169,11 @@ const FINGERPRINT_SKIP_FILES = new Set([".agent-token", ".principal", ".superuse
 
 /**
  * A content fingerprint of the app's code surface: every file except framework
- * runtime state (`.a2app/`), VCS internals, dependency trees, credentials, and
- * the toolkit's declared live data directory. Deterministic across platforms
- * (paths normalized to `/`, sorted, content-hashed — never mtimes).
+ * runtime state (`.a2app/`), VCS internals, dependency trees, credentials, the
+ * toolkit's declared live data directory, and the build ledger — a record of
+ * the workflow, not code: the skills tick its tasks and write the walk-verify
+ * verdict into it after `validate`. Deterministic across platforms (paths
+ * normalized to `/`, sorted, content-hashed — never mtimes).
  */
 export function codeFingerprint(projectDir: string): string {
   const root = resolve(projectDir);
@@ -195,7 +198,8 @@ export function codeFingerprint(projectDir: string): string {
     }
   }
   const hash = createHash("sha256");
-  for (const file of files.map((f) => ({ f, rel: relative(root, f).split(sep).join("/") })).sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
+  const gated = files.map((f) => ({ f, rel: relative(root, f).split(sep).join("/") })).filter((file) => file.rel !== TASKS_DOC);
+  for (const file of gated.sort((a, b) => (a.rel < b.rel ? -1 : 1))) {
     hash.update(file.rel);
     hash.update("\0");
     hash.update(readFileSync(file.f));

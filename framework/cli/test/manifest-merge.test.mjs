@@ -15,7 +15,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
+import { createHash } from "node:crypto";
+import { APP_EDITABLE_MANIFEST_KEYS, APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
+import { manifestDriftNote, verifySystemHashes, writeSystemHashes } from "../dist/lib/canon.js";
 import { linkLocalPackages } from "../dist/lib/localPackages.js";
 
 const failures = [];
@@ -67,6 +69,9 @@ check("provenance survives", merged.source, app.source);
 // The whole point of re-vendoring: executable configuration comes from the
 // trusted toolkit, never from the app being re-vendored.
 check("pipeline is taken from the toolkit", merged.pipeline, template.pipeline);
+// …unless the toolkit ships none and the app writes its own.
+const writesPipeline = { id: "blueprint-base", systemPaths: ["manifest.json"], appWritesPipeline: true };
+check("an app that writes its pipeline keeps it", mergeManifest(template, app, "0.2.0", writesPipeline).pipeline, app.pipeline);
 check("adapterVersion is stamped", merged.adapterVersion, "0.2.0");
 check("agentAppVersion is stamped, not taken from the template", merged.agentAppVersion, "0.1.0");
 
@@ -81,6 +86,71 @@ check(
   [...APP_OWNED_MANIFEST_KEYS],
   ["id", "name", "port", "authMode", "appVersion", "modules", "modificationLock", "capabilities", "source"],
 );
+
+/* ------------------------------------------------- the manifest in the canon */
+
+// The canon leaves out the keys the app's builder edits, modules among them,
+// and locks the rest: the pipeline the gate runs, and the app-owned keys that
+// are not the builder's — its identity, port, modification lock and provenance.
+check(
+  "the builder's keys are exactly the documented set",
+  [...APP_EDITABLE_MANIFEST_KEYS],
+  ["name", "authMode", "appVersion", "modules", "capabilities"],
+);
+check("…every one of them survives a re-vendor", APP_EDITABLE_MANIFEST_KEYS.filter((k) => !APP_OWNED_MANIFEST_KEYS.includes(k)), []);
+
+const canonApp = mkdtempSync(join(tmpdir(), "canon-manifest-"));
+const manifestFile = join(canonApp, "manifest.json");
+const writeManifest = (m) => writeFileSync(manifestFile, JSON.stringify(m, null, 2) + "\n");
+const drift = () => verifySystemHashes(canonApp).modified;
+
+writeManifest(app);
+writeSystemHashes(canonApp, ["manifest.json"]);
+writeManifest({ ...app, name: "Invoices", authMode: "multi-user", appVersion: "0.2.0", modules: [{ name: "billing" }], capabilities: { integrations: ["mail"] } });
+check("editing the builder's keys is not drift", drift(), []);
+writeManifest(Object.fromEntries(Object.entries(app).reverse()));
+check("key order is not drift", drift(), []);
+writeManifest({ ...app, pipeline: { ...app.pipeline, start: "node evil.mjs" } });
+check("editing the pipeline is drift", drift(), ["manifest.json"]);
+for (const [key, value] of [["modificationLock", true], ["id", "someone-else"], ["port", 8094], ["source", { kind: "zip", installedAt: "x" }]]) {
+  writeManifest({ ...app, [key]: value });
+  check(`editing ${key} is drift`, drift(), ["manifest.json"]);
+}
+// The lock the owner set stays set: clearing it is drift, not the builder's call.
+writeManifest({ ...app, modificationLock: true });
+writeSystemHashes(canonApp, ["manifest.json"]);
+writeManifest({ ...app, modificationLock: false });
+check("clearing a sealed modificationLock is drift", drift(), ["manifest.json"]);
+
+// An app sealed before the manifest's hash left out the builder's keys records
+// the whole file. Verified while unchanged, its record is brought up to date,
+// and the builder's keys are then its to edit.
+writeManifest(app);
+const whole = "sha256:" + createHash("sha256").update(readFileSync(manifestFile)).digest("hex");
+const canonFile = join(canonApp, ".a2app", "system-hashes.json");
+const sealed = () => JSON.parse(readFileSync(canonFile, "utf8"))["manifest.json"];
+writeFileSync(canonFile, JSON.stringify({ "manifest.json": whole }));
+check("a manifest sealed whole is clean while unchanged", drift(), []);
+check("…and verifying it reseals it without the builder's keys", sealed() !== whole, true);
+writeManifest({ ...app, modules: [{ name: "billing" }] });
+check("…so editing the builder's keys is then not drift", drift(), []);
+writeManifest({ ...app, modificationLock: true });
+check("…while editing a locked key still is", drift(), ["manifest.json"]);
+
+// One changed since it was sealed whole cannot be told from a tampered one: it
+// is drift, left sealed whole, and the report names the builder's keys and the
+// one reseal it needs.
+writeManifest(app);
+writeFileSync(canonFile, JSON.stringify({ "manifest.json": whole }));
+writeManifest({ ...app, modules: [{ name: "billing" }] });
+const changed = verifySystemHashes(canonApp);
+check("a manifest changed since it was sealed whole is drift", changed.modified, ["manifest.json"]);
+check("…and stays sealed whole", sealed(), whole);
+const note = manifestDriftNote(canonApp, changed);
+check("…named with the builder's keys and the reseal", [note.includes("`modules`"), note.includes("toolkit-sync")], [true, true]);
+check("no note when the manifest did not drift", manifestDriftNote(canonApp, { modified: ["a2app-account.html"], missing: [], added: [] }), "");
+
+rmSync(canonApp, { recursive: true, force: true });
 
 /* -------------------------------------------------------- linkLocalPackages */
 

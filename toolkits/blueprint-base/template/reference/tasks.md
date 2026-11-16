@@ -11,4 +11,4 @@ appends here citing the entry date.
 - [ ] All build tasks ticked.
 - [ ] Quality Conformance sweep: every Q-entry true in the running app (Q1–Q9 walked incl. narrow width + keyboard-only; Q10–Q15 at A-1 volume; Q16–Q18 by inspection).
 - [ ] Self-review against QUALITY.md.
-- [ ] walk-verify pass — <REPLACE: verdict, defects found, fixes — written when verification ran>
+- [ ] walk-verify pass — <REPLACE: verdict, the verified commit, defects found, fixes — written when verification ran>

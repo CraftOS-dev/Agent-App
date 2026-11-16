@@ -117,6 +117,7 @@ Every source goes through the same steps, in this order. A step that fails stops
    - Reserve a free port and mint a fresh `.agent-token` (0600). The port customize wrote (`--port` when free) is the one reserved; if another app took it meanwhile and a port token was written, the install stops and can be run again.
    - Write the scaffold's ignore rules and harness guides, and link local toolkit packages (re-pointing a `file:` path the package carries from the machine it came from).
    - Record `source` (provenance) in `manifest.json`: `{ kind, location, ref?, catalogueId?, version?, sha256?, commit?, installedAt }`, where `kind` is `marketplace`, `zip`, `folder`, `github` or `git`. The canon is recorded over this final manifest.
+   - Start the app's history: a git repository of its own, whose first commit is the app as installed. A package never carries `.git/` (§1), so the history starts here. An app placed inside another repository's work tree is versioned by that repository instead. Without git on the machine the install goes on, and the gate reports version control as unchecked.
 8. **dependencies**: run the manifest's `pipeline.install`.
 9. **gate**: `validate`. A failure stops the install; the app stays registered so it can be fixed, and the result says so.
 10. **serve**: launch and health-poll, unless `--no-start`.

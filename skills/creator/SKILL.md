@@ -25,7 +25,8 @@ says "per your stack", `reference/blueprint.md` is the answer.
 1. **You were given a project directory** → it is already scaffolded; use it,
    skip scaffolding.
 2. **No project yet** → `agent-app <dir> scaffold --blueprint <id>` scaffolds the
-   framework files, the adapter, and the ownership canon. `agent-app blueprints`
+   framework files, the adapter, the ownership canon, and the app's git
+   repository, with the scaffold as its first commit. `agent-app blueprints`
    lists the ids and what each is built with; `blueprint-base` is the one with
    no stack, for when none of the others fit. Pick `authMode` from
    requirements, with `--auth-mode`: `none` (one person's tool — the default) or
@@ -38,14 +39,37 @@ says "per your stack", `reference/blueprint.md` is the answer.
 ## The ownership rule (the gate enforces this)
 
 Edit ONLY agent-accessible paths: your app/View code, your schema migrations,
-your operation implementations, the non-system entries of `operations.json`, and
-`AGENT_APP.md` (your plan/context/index — keep it current). Exact paths are per
-your blueprint.
+your operation implementations, the non-system entries of `operations.json`,
+`AGENT_APP.md` (your plan/context/index — keep it current), and in
+`manifest.json` the keys `name`, `authMode`, `modules`, `appVersion` and
+`capabilities`. Exact paths are per your blueprint.
 
-NEVER edit system-owned files — the A2App adapter, `manifest.json`, vendored kit
-files, build config. The validation gate hashes them (the ownership canon) and
-**fails the build** if they changed, naming the file. Need a variant of a kit
-component? Wrap it in your own app code; never edit the locked original.
+NEVER edit system-owned files — the A2App adapter, every other key in
+`manifest.json` (its `id`, `port`, `modificationLock`, `source`, version
+stamps, and `pipeline` unless your blueprint has you write it), vendored kit
+files, build config. The validation
+gate hashes them (the ownership canon) and **fails the build** if they changed,
+naming the file. Need a variant of a kit component? Wrap it in your own app
+code; never edit the locked original.
+
+## Commit as you go
+
+The app is its own git repository, and its history is part of the app
+(Quality Standard Q18): it is how a change is reviewed, rolled back, and
+verified. Keep it the way an engineer does:
+
+- **One coherent unit per commit, as you finish it** — the approved spec, one
+  feature (its schema, operations and UI together), one fix, one refactor —
+  with `agent-app <dir> commit --message "<what changed and why>"`. Never one
+  commit for the whole build at the end.
+- **Commit before every verification.** walk-verify verifies a commit;
+  uncommitted work is a walk that no later re-verify can start from.
+  `validate` says when work is still uncommitted.
+- The ignore rules keep credentials (any `*.secret` included), the database,
+  runtime state and `node_modules/` out of every commit; `commit` and
+  `validate` restore any that are missing. Other build output is your stack's:
+  add it to `.gitignore` before the first commit that would take it. The gate
+  fails an app that is not in a repository, and `commit` creates one.
 
 ## The spec comes first
 
@@ -99,6 +123,10 @@ structure; walk-verify checks the running app against it.
      and overrides` — the ONE location the verifier reads. Process Flows
      only where a lifecycle exists; Operations Design must match
      `operations.json` exactly.
+   - **Write it in parts, one section per write.** Every reply has an
+     output limit, and a reply cut off at it is lost whole; a full spec in
+     one write is long enough to hit it. The same goes for any large file —
+     code included.
 4. **Get the user's approval on Part A before building.** Present a short
    summary — the goals, the Features list, and Out of Scope — and ask once.
    Corrections go into the spec first. On approval, record the date in
@@ -330,10 +358,17 @@ someone leave the screen and come back.
    the DEV instance in a real browser against `reference/requirements.md` AND the
    Quality Standard. A clean pass is what earns the promote. Failures come
    back as a report (features and Q-numbered quality items): fix them, then
-   repeat step 1 and step 4.
+   repeat step 1 and step 4. **Commit before every verification**
+   (`agent-app <dir> commit --message "<what and why>"`) — the commit is what
+   the verifier verifies. From the second verification on, give the verifier
+   the last report and the commit it verified: it re-verifies what changed
+   since, not the whole app. Record each verdict and its verified commit in
+   the ledger, and commit that too.
 5. **Promote and put it in front of the user.**
    `agent-app <dir> promote` requires the gate pass from step 1 (edited since
-   validating? validate again first), takes the pre-promote backup when a live
+   validating? validate again first — except the ledger, `reference/tasks.md`,
+   which is not gated: recording the verdict there needs no new validate),
+   takes the pre-promote backup when a live
    database exists (a first delivery has none), applies your migrations to
    live, and destroys the dev instance. Then `agent-app <dir> serve` runs the
    manifest pipeline as a managed background process, polls health, and prints

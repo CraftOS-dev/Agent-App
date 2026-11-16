@@ -39,6 +39,7 @@ import { IDENTITY_TOKENS, PORT_TOKENS, slugify, substitutePlaceholders, systemFi
 import { exitCodeOf, PackageRefusedError } from "./packageErrors.js";
 import { loadProject, UsageError } from "./project.js";
 import { pickFreePort, readRegistry, register as registerEntry, reserveApp, unregister, type RegistryEntry } from "./registry.js";
+import { startHistory } from "./repo.js";
 import { ensureIgnoreRules, writeHarnessGuides } from "./scaffoldFiles.js";
 import { runShell } from "./shell.js";
 import { acquire, createStaging, parseFrom, removeStaging, type Provenance, type Request } from "./sources.js";
@@ -333,8 +334,8 @@ function revendor(root: string, tk: ResolvedToolkit | null, id: string | null): 
   const written = vendorPaths(tk, root, tk.manifest.systemPaths);
   const template = existsSync(manifestPath) ? (readJsonFile(manifestPath) as Manifestish) : {};
   // Identity and modules stay the package's; `pipeline` — the shell commands
-  // this CLI runs — comes from the trusted toolkit.
-  writeFileAtomic(manifestPath, JSON.stringify(mergeManifest(template, packaged, adapterVersionOf(tk)), null, 2) + "\n");
+  // this CLI runs — comes from the trusted toolkit, unless the app writes its own.
+  writeFileAtomic(manifestPath, JSON.stringify(mergeManifest(template, packaged, adapterVersionOf(tk), tk.manifest), null, 2) + "\n");
   recordProjectToolkit(root, tk);
   writeSystemHashes(root, tk.manifest.systemPaths);
   return { tk, files: written.length };
@@ -369,14 +370,19 @@ function placeholderValues(identity: Identity, set: Map<string, string>, entryFi
   return values;
 }
 
-/** §4 step 7: identity, port, credential, guides, provenance — then the canon over the final manifest. */
+/**
+ * §4 step 7: identity, port, credential, guides, provenance — then the canon
+ * over the final manifest, and the app's history from there. A package never
+ * carries `.git/` (§1), so the history starts at the install.
+ */
 async function register(
   dir: string,
   tk: ResolvedToolkit,
   identity: Identity,
   provenance: Provenance,
   portWritten: boolean,
-): Promise<{ id: string; port: number }> {
+  imported: boolean,
+): Promise<{ id: string; port: number; commit: string | null }> {
   const port = await reserveApp({ id: identity.id, name: identity.name, path: dir, blueprint: tk.manifest.id, createdAt: identity.createdAt }, identity.port);
   if (port !== identity.port && portWritten) {
     throw new Error(`port ${identity.port}, already written into the app's files, was taken by another app during the install — run the install again`);
@@ -395,7 +401,8 @@ async function register(
     log.step(`linked ${dep.name} ${dep.from} -> ${dep.to} (the source in the toolkit's repo)`);
   }
   writeSystemHashes(dir, tk.manifest.systemPaths);
-  return { id: identity.id, port };
+  const commit = startHistory(dir, imported ? `Import ${identity.name}` : `Install ${identity.name} from ${provenance.location}`);
+  return { id: identity.id, port, commit };
 }
 
 /* ---------------------------------------------------------------- pipeline */
@@ -468,9 +475,9 @@ export async function install(opts: InstallOptions): Promise<number> {
       "register",
       () => {
         registered = { dir, previous: readRegistry().apps.find((a) => resolve(a.path) === resolve(dir)) ?? null };
-        return register(dir, toolkit, identity, acquired.provenance, portWritten);
+        return register(dir, toolkit, identity, acquired.provenance, portWritten, opts.request.kind === "in-place");
       },
-      (r) => ({ id: r.id, port: r.port }),
+      (r) => ({ id: r.id, port: r.port, commit: r.commit }),
     );
 
     const project = loadProject(dir);

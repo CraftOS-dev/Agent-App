@@ -3,8 +3,8 @@
  "description": "Agent App blueprint: PocketBase backend + React frontend, with an in-process A2App adapter as PocketBase JS hooks. NOT part of the framework.",
  "template": "template",
  "adapterVersionFrom": "pb/pb_hooks/_a2app.pb.js",
- "systemPaths": ["manifest.json", "pb-serve.mjs", "pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_impl.js", "pb/pb_hooks/_a2app_rules.js", "pb/pb_migrations/1759622300_a2app_accounts.js", "a2app-account.html"],
- "adapterPaths": ["pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_impl.js", "pb/pb_hooks/_a2app_rules.js", "a2app-account.html"],
+ "systemPaths": ["manifest.json", "pb-serve.mjs", "pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_impl.js", "pb/pb_hooks/_a2app_rules.js", "pb/pb_migrations/1759622300_a2app_accounts.js", "a2app-update.js", "a2app-account.html"],
+ "adapterPaths": ["pb/pb_hooks/_a2app.pb.js", "pb/pb_hooks/_a2app_impl.js", "pb/pb_hooks/_a2app_rules.js", "a2app-update.js", "a2app-account.html"],
  "gate": [
  {
  "name": "hooks syntax + rules self-test",
@@ -17,6 +17,7 @@
  ],
  "lifecycle": {
  "dataDir": "pb/pb_data",
+ "dev": "npm --prefix ui run build",
  "promote": "node pb-serve.mjs --migrate"
  }
 }

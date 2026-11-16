@@ -69,7 +69,7 @@ fresh scaffold:
 
 | Path | Owner | What it is |
 |---|---|---|
-| `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, and the `pipeline` (install/build/start/health) you fill in for your stack. |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`, `pipeline`; every other key hash-locked | app identity, `modules[]`, `authMode`, and the `pipeline` (install/build/start/health) you fill in for your stack. |
 | `operations.json` | **YOURS** | operation declarations (name, module, typed params, entity, appliesWhen, flags). Starts empty. |
 | `AGENT_APP.md` | **YOURS** | this app's index: plan, modules, entities, operations, conventions, checklist. |
 | `reference/requirements.md` | **YOURS** | the binding spec — Part A (SRS) + Part B (tech spec + Quality Conformance). |

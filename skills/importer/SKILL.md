@@ -18,7 +18,8 @@ never re-vendor someone else's app yourself. What the pipeline guarantees:
   is the pipeline of a toolkit **installed on this machine**, chosen by the id
   the package records, never by a path it records.
 - Credentials, data, runtime state, `.git/`, `node_modules/` and build output
-  are dropped; the app gets a fresh identity, port and credential.
+  are dropped; the app gets a fresh identity, port and credential, and a git
+  repository of its own whose first commit is the app as installed.
 - A step that fails leaves nothing behind. The one exception is the gate: an app
   that fails it stays installed so it can be fixed, and the result says so.
 

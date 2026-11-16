@@ -34,7 +34,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `src/App.jsx` | **YOURS** | the View logic: state machine (loading/ready/error), add/advance/delete actions, filters, the `a2app:datachange` listener, boot. |
 | `src/api.js` | **YOURS** | the one fetch wrapper — 10 s timeout, GET retry-once, readable error messages. |
 | `src/Icon.jsx` · `src/toast.jsx` · `src/ConfirmDialog.jsx` · `src/format.js` | **YOURS** | the shared pieces — icon set, `useToast`, `useConfirm` (in-app dialog, never `window.confirm`), day formatting. One impl each; compose, never re-implement. |
-| `src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher. Keep it when you rewrite the View. |
+| `src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher, which also follows a host's theme. Keep it when you rewrite the View. |
 | `public/tokens.css` | **YOURS** | design tokens (the kit sheet): foundation `--agent-app-*` + semantic bridge, light + dark + style packs. Re-point values; keep the NAMES stable. |
 | `public/ui.css` | **YOURS** | component styles (buttons, cards, list rows, dialog, toasts). Consumes semantic tokens only. |
 | `vite.config.js` | **YOURS** | the View build: React plugin, `dist/` output, dev-server proxy to the running app. |
@@ -45,10 +45,10 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, `dist/`, `bin/`, credentials, and framework state. Extend for your own artifacts. |
 | `go.mod` | build | the Go module: one dependency (modernc.org/sqlite — pure Go, no cgo). Referenced by the pipeline; `go mod tidy` maintains it. |
 | `package.json` | build | the View's build tooling only (react, vite) + scripts (`build` = vite build, `dev:ui` = vite dev server). npm never touches the server. |
-| `manifest.json` | SYSTEM (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). Change modules via the CLI, never by hand-editing a locked field. |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `main.go` | SYSTEM (hash-locked) | the server + tooling flags: serves the records API, identity, describe, the built View (`dist/`), `/_a2app/update.js`; `--selftest`, `--check-ops`, `--promote-check`. Never edit. |
 | `a2app_adapter.go` | SYSTEM (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store. Never edit. |
-| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab, and applies the theme of a host that frames the app. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `dist/` | build output | the compiled View (`npm run build`). Git-ignored; served by `main.go`. Never edit by hand. |
 | `data/` | runtime | the live SQLite database (git-ignored, created on first boot). Never edit by hand; never commit. |
@@ -209,7 +209,10 @@ semantic bridge. Components consume ONLY semantic tokens (`--bg-surface`,
 `--text-primary`, `--accent-solid`, `--danger-solid`, `--focus-ring`, `--sp-*`,
 `--r-*`, `--fs-*`, `--dur-*`, …). Theme by re-pointing the foundation or picking
 a `[data-style]` pack; keep the names stable. Light and dark both resolve every
-token and hold WCAG AA. Never hardcode a value where a token exists.
+token and hold WCAG AA. Never hardcode a value where a token exists. Framed by
+a host (an agent harness that embeds the app), the update watcher sets
+`data-theme` and `data-style` on `<html>` from the host's theme as the person
+switches it; standalone, the OS scheme applies.
 
 **Realtime / staleness — `src/updater.js`** bridges to the system-owned
 watcher (`/_a2app/update.js`, a RUNTIME import the bundler must leave alone).

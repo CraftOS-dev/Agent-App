@@ -82,6 +82,16 @@ const registered = () => {
 const appsDir = () => (existsSync(join(home, "apps")) ? readdirSync(join(home, "apps")).sort() : []);
 const stagingLeft = () => (existsSync(join(home, "staging")) ? readdirSync(join(home, "staging")) : []);
 const read = (...parts) => readFileSync(join(...parts), "utf8");
+const hasGit = (() => {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** An app's history, newest first: one subject per commit. */
+const history = (dir) => execFileSync("git", ["log", "--format=%s"], { cwd: dir, encoding: "utf8" }).trim().split("\n");
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
 /** Every path under a folder, `/`-separated; folders end in `/`. */
@@ -519,14 +529,19 @@ test("install --from a zip: sanitize strips everything §1 lists; untrusted trus
   assert.equal(result.dir, into);
   assert.equal(result.trust, "untrusted");
   assert.ok(result.next.some((n) => /walk-verify/.test(n)), "an untrusted install owes a walk-verify");
-  // The install writes two of these itself: a fresh credential, and the pass of its own gate.
-  const rewritten = new Set([".agent-token", ".a2app/gate-pass.json"]);
+  // The install writes three of these itself: a fresh credential, the pass of
+  // its own gate, and the app's own repository.
+  const rewritten = new Set([".agent-token", ".a2app/gate-pass.json", ".git/config"]);
   for (const [rel] of garbage) {
     if (rewritten.has(rel)) continue;
     assert.equal(existsSync(join(into, ...rel.split("/"))), false, `${rel} was stripped`);
   }
   assert.notEqual(read(into, ".agent-token").trim(), "attacker-known-key", "a shipped credential is never kept");
   assert.notEqual(read(into, ".a2app", "gate-pass.json"), "{}", "a shipped gate pass is never kept");
+  if (hasGit) {
+    assert.notEqual(read(into, ".git", "config"), "[core]", "a shipped repository is never kept");
+    assert.deepEqual(history(into), [`Install ${result.name} from ${zip}`], "the history starts at the install");
+  }
   assert.equal(existsSync(join(into, "keys")), true, "only the secret goes, not its folder");
   assert.deepEqual(result.source.kind, "zip");
   assert.equal(result.source.sha256, sha256(readFileSync(zip)));
@@ -549,7 +564,7 @@ test("install --from a folder: the folder itself is left as it was", async () =>
   assert.deepEqual(listTree(folder), before, "the source folder is untouched");
 });
 
-test("install --from git+: a shallow clone, no .git, the commit recorded", async () => {
+test("install --from git+: a shallow clone, the commit recorded, the history starting at the install", async () => {
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
   } catch {
@@ -574,7 +589,9 @@ test("install --from git+: a shallow clone, no .git, the commit recorded", async
   const result = json(await run(["install", "--from", `git+${url}#main`, "--no-start", "--name", "From Git"]));
   assert.equal(result.ok, true);
   assert.deepEqual({ kind: result.source.kind, location: result.source.location, ref: result.source.ref, commit: result.source.commit }, { kind: "git", location: url, ref: "main", commit });
-  assert.equal(existsSync(join(result.dir, ".git")), false);
+  // The package's history never arrives: the app's own starts at the install.
+  assert.deepEqual(history(result.dir), [`Install From Git from ${url}`]);
+  assert.notEqual(git(["rev-parse", "HEAD"], result.dir).trim(), commit);
   const missing = await run(["install", "--from", `git+${url}#no-such-branch`, "--no-start"], 1);
   assert.equal(JSON.parse(missing.stdout).step, "acquire");
 });
@@ -717,7 +734,11 @@ test("in-place import: sanitized, re-vendored from the local toolkit — never o
   assert.equal(result.trust, "untrusted");
   assert.deepEqual({ kind: result.source.kind, location: result.source.location }, { kind: "folder", location: dir });
   assert.notEqual(read(dir, ".agent-token").trim(), "attacker-known-key");
-  for (const gone of ["data", ".git", ".a2app/serve.json"]) assert.equal(existsSync(join(dir, ...gone.split("/"))), false, gone);
+  for (const gone of ["data", ".a2app/serve.json"]) assert.equal(existsSync(join(dir, ...gone.split("/"))), false, gone);
+  if (hasGit) {
+    assert.notEqual(read(dir, ".git", "config"), "[core]", "the folder's own repository is never kept");
+    assert.deepEqual(history(dir), [`Import ${result.name}`], "the history starts at the import");
+  }
   assert.equal(read(dir, "server.mjs"), read(reactNode, "template", "server.mjs"));
   assert.equal(JSON.parse(read(dir, ".a2app", "toolkit.json")).source, reactNode);
   assert.ok(registered().includes(dir));

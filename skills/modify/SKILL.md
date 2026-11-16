@@ -102,12 +102,25 @@ modification: use the **operator** skill directly, no rebuild. A **code change**
 ```
 agent-app <dir> dev        # boot the CANDIDATE on a hidden port with a fresh DB
 agent-app <dir> validate   # the gate — measures the dev instance, records the gate pass
+agent-app <dir> commit --message "<what and why>"   # the verifier verifies a commit
 # then the walk-verify skill — the verifier drives the dev URL
 agent-app <dir> stop       # stop the LIVE app (promote refuses while it serves; dev stays up)
 agent-app <dir> promote    # requires the gate pass; backup, apply migrations, destroy dev
 agent-app <dir> serve      # bring the changed app back up
 agent-app <dir> open       # and show it to the user (see below)
 ```
+
+**Commit as you go.** The app is its own git repository (Quality Standard
+Q18): commit each coherent unit of the change as you finish it — the spec
+entry, one feature, one fix — with `agent-app <dir> commit --message "<what
+changed and why>"`, never one commit for everything at the end. An app from
+before the framework kept history has no repository yet: the gate says so,
+and the first `commit` creates it.
+
+**Verify only what changed.** Commit the change before verifying, and give
+the verifier the app's last verification report and the commit it verified:
+it re-verifies what changed since, not the whole app. Record the verdict and
+its verified commit in the ledger, and commit that too.
 
 **How the dev environment works — read this once, it removes all guesswork:**
 
@@ -126,14 +139,14 @@ agent-app <dir> open       # and show it to the user (see below)
   `.a2app/dev.json` when a browser needs it). If the instance died, operate
   commands refuse loudly with the remedy — they never silently fall back to
   live, so test writes cannot leak into user data.
-- **View edits are hot on dev** (refresh the page); **backend/hook edits need
-  `agent-app <dir> dev` again** (a fresh boot is cheap and re-proves the
-  chain). The live app serves a boot-time snapshot of the View, so nothing you
-  edit reaches users until promote + serve.
+- **Every edit needs `agent-app <dir> dev` again** (a fresh boot is cheap: it
+  rebuilds the View and re-proves the chain). The live app serves a boot-time
+  snapshot of the View, so nothing you edit reaches users until promote + serve.
 - **`promote` refuses without a fresh gate pass.** `validate` records a pass
   bound to the exact tree it gated, and only counts as promotable when the
   budget walk ran against the dev instance. Any edit after `validate`
-  invalidates the pass — the order is always: edit → `dev` (if backend
+  invalidates the pass, except to the ledger (`reference/tasks.md`), which is
+  not gated code — the order is always: edit → `dev` (if backend
   changed) → `validate` → promote. On success promote destroys the dev
   instance; on failure it keeps it (and the pass) for the retry.
 - Abandoning a change? `agent-app <dir> stop --dev` tears the candidate down

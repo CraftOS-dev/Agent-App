@@ -12,7 +12,7 @@ uses it. Follow `reference/blueprint.md` to adopt it.
 Modules are the organizing unit: every operation belongs to exactly one, and
 describe's root screen lists them. Take them from the app's own grouping — its
 OpenAPI tags, its route prefixes, its controllers — and declare them in
-`manifest.json`, then reseal it with `agent-app <dir> toolkit-sync`.
+`manifest.json`.
 - **core** — rename it after the app's first area; add one module per area.
 
 ## Entities

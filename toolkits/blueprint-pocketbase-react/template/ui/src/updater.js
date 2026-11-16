@@ -1,0 +1,22 @@
+/**
+ * Bridge to the update watcher (AGENT-OWNED; the watcher itself is system-owned,
+ * served by the adapter hooks at /_a2app/update.js from the project root).
+ *
+ * It is a RUNTIME import — the file exists only on the running server, so the
+ * `@vite-ignore` comment keeps the bundler from trying to resolve it at build
+ * time. Loading it makes the page follow the theme of a host that frames it
+ * (light/dark and the style pack), and starts the watch: a CODE change reloads
+ * when the page holds nothing unsaved (else offers a banner). Records need no
+ * watching here — PocketBase's realtime already pushes them. Keep this bridge
+ * when you rewrite the View — without it, an embedded app ignores its host's
+ * theme and already-open tabs keep running superseded code.
+ */
+const watcher = import(/* @vite-ignore */ "/_a2app/update.js").catch(() => null);
+
+/** Does the page hold anything a reload or re-render would destroy? Falls back
+ *  to `true` (assume unsaved) when the watcher is unreachable — the failure
+ *  mode must be a skipped refresh, never discarded work. */
+export async function hasUnsavedInput() {
+  const mod = await watcher;
+  return mod === null ? true : mod.hasUnsavedInput();
+}

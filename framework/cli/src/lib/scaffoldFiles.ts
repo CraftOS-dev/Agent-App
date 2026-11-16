@@ -89,9 +89,9 @@ export function writeHarnessGuides(dir: string, name: string): void {
         "",
         "Never build against the live app, never edit an applied migration, never drop a",
         "collection holding user data, and never write a system-owned file listed in",
-        "`.a2app/system-hashes.json` — the gate fails on drift. In `manifest.json` only",
-        "the version stamps and the `pipeline` (unless the blueprint has you write it)",
-        "are locked; its other keys are the app's.",
+        "`.a2app/system-hashes.json` — the gate fails on drift. In `manifest.json` the",
+        "keys `name`, `authMode`, `modules`, `appVersion` and `capabilities` are yours",
+        "(and `pipeline` where the blueprint has you write it); every other key is locked.",
         "",
       ].join("\n"),
     );

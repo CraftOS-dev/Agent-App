@@ -47,7 +47,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `data/`, `public/`, credentials, framework state, Rails runtime dirs. Extend for your own artifacts. |
 | `Gemfile` | build | the backend's gems (rails, puma, sqlite3). Add your HTTP client here when you call external APIs. |
-| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `config/application.rb` | SYSTEM (hash-locked) | the minimal Rails application: action_controller only (NO ActiveRecord), eager-loaded `lib/`, the adapter's Host check in front of every path, request bodies never parsed or logged by Rails, errors in the protocol's envelope, headless secret_key_base. Never edit. |
 | `config/routes.rb` | SYSTEM (hash-locked) | one catch-all route: every path and verb goes to the controller. Never edit. |
 | `config/puma.rb` | SYSTEM (hash-locked) | the launch contract: PORT (manifest fallback 8096), loopback bind (`A2APP_HOST` to override), single mode. Never edit. |

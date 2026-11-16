@@ -8,8 +8,8 @@
  * the validation gate re-hashes every entry and fails on any drift.
  *
  * The canon is never empty for a conforming app: the minimum is the adapter
- * files plus `manifest.json`, whose hash covers only the keys the app does not
- * own (see {@link hashFile}).
+ * files plus `manifest.json`, whose hash leaves out only the keys the app's
+ * builder edits (see {@link hashFile}).
  */
 import { createHash } from "node:crypto";
 import {
@@ -23,7 +23,7 @@ import {
 import { join, relative, sep } from "node:path";
 import { assertInside } from "./fsx.js";
 import { readJsonFile } from "./json.js";
-import { appOwnedManifestKeys } from "./manifest.js";
+import { appEditableManifestKeys } from "./manifest.js";
 import { projectToolkit } from "./toolkit.js";
 
 export const CANON_DIR = ".a2app";
@@ -46,11 +46,12 @@ function sortKeys(value: unknown): unknown {
 
 /**
  * A system file's canon hash. `manifest.json` has two owners (manifest.ts): its
- * hash covers only the keys the app does not own — above all `pipeline`, whose
- * commands the gate executes, unless the app's toolkit has the app write it —
- * so the app's own keys, `modules` among them, stay the app's to edit. Keys are
- * sorted, so key order and formatting are not a change. A manifest that is not
- * a JSON object is hashed whole.
+ * hash leaves out the keys the app's builder edits, `modules` among them, and
+ * covers the rest — above all `pipeline`, whose commands the gate executes
+ * (unless the app's toolkit has the app write it), and the identity, port,
+ * modification lock and provenance. Keys are sorted, so key order and
+ * formatting are not a change. A manifest that is not a JSON object is hashed
+ * whole.
  */
 function hashFile(projectDir: string, relPath: string): string {
   const file = join(projectDir, relPath);
@@ -59,7 +60,7 @@ function hashFile(projectDir: string, relPath: string): string {
       const manifest = readJsonFile(file);
       if (manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)) {
         const locked: Record<string, unknown> = { ...manifest };
-        for (const key of appOwnedManifestKeys(projectToolkit(projectDir)?.manifest)) delete locked[key];
+        for (const key of appEditableManifestKeys(projectToolkit(projectDir)?.manifest)) delete locked[key];
         return sha256(JSON.stringify(sortKeys(locked)));
       }
     } catch {

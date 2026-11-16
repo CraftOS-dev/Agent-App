@@ -43,7 +43,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `reference/blueprint.md` | reference | this file — the stack map. |
 | `.gitignore` | **YOURS** | ignores `data/`, `dist/`, credentials, and framework state. Extend for your own artifacts. |
 | `package.json` | build | dependencies (react, hono, better-sqlite3, adapter-core) + scripts (`build` = vite build, `dev:ui` = vite dev server). Referenced by the pipeline. |
-| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `server.mjs` | SYSTEM (hash-locked) | the Hono server + `@a2app/adapter-core` middleware + the SQLite binding: serves the records API, identity, describe, the built View (`dist/`), and `/_a2app/update.js`. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab, and applies the theme of a host that frames the app. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |

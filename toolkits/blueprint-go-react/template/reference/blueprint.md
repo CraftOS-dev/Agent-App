@@ -45,7 +45,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `.gitignore` | **YOURS** | ignores `data/`, `dist/`, `bin/`, credentials, and framework state. Extend for your own artifacts. |
 | `go.mod` | build | the Go module: one dependency (modernc.org/sqlite — pure Go, no cgo). Referenced by the pipeline; `go mod tidy` maintains it. |
 | `package.json` | build | the View's build tooling only (react, vite) + scripts (`build` = vite build, `dev:ui` = vite dev server). npm never touches the server. |
-| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `main.go` | SYSTEM (hash-locked) | the server + tooling flags: serves the records API, identity, describe, the built View (`dist/`), `/_a2app/update.js`; `--selftest`, `--check-ops`, `--promote-check`. Never edit. |
 | `a2app_adapter.go` | SYSTEM (hash-locked) | the served surface + pure rules (parity with `@a2app/rules`) + the SQLite store. Never edit. |
 | `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab, and applies the theme of a host that frames the app. Never edit. |

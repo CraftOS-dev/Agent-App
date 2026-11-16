@@ -56,6 +56,27 @@ export function appOwnedManifestKeys(toolkit?: ToolkitManifest | null): string[]
 }
 
 /**
+ * The app-owned keys its builder edits: what the app is called, who signs in,
+ * its modules, its version and the capabilities it asks for. The ownership
+ * canon leaves these out of `manifest.json`'s hash.
+ *
+ * The rest of {@link APP_OWNED_MANIFEST_KEYS} is the app's but not its
+ * builder's: `id` and `port` are assigned at scaffold or install and held in
+ * the registry, `modificationLock` is the owner's, and `source` is the
+ * provenance install records. They survive a re-vendor and stay hash-locked,
+ * so an agent that clears the lock or rewrites the identity fails the gate.
+ */
+export const APP_EDITABLE_MANIFEST_KEYS = ["name", "authMode", "appVersion", "modules", "capabilities"] as const;
+
+/**
+ * The keys the canon leaves out of `manifest.json`'s hash on `toolkit`:
+ * {@link APP_EDITABLE_MANIFEST_KEYS}, plus `pipeline` when the app writes its own.
+ */
+export function appEditableManifestKeys(toolkit?: ToolkitManifest | null): string[] {
+  return toolkit?.appWritesPipeline ? [...APP_EDITABLE_MANIFEST_KEYS, "pipeline"] : [...APP_EDITABLE_MANIFEST_KEYS];
+}
+
+/**
  * Merge an app's manifest onto a toolkit template's.
  *
  * @param template  the toolkit's manifest (trusted; source of `pipeline`)

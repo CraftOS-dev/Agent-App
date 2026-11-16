@@ -34,7 +34,7 @@ the source disagree, the source wins.
 | `upstream/` | **YOURS to place, never to edit** | the adopted app's source, exactly as it came. |
 | `sidecar.json` | **YOURS** | how the app starts (`upstream`), and which route each operation reaches (`operations`). |
 | `operations.json` | **YOURS** | what each operation is: name, module, typed `params`, `destructive`, `readOnly`, `idempotent`, description. |
-| `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | identity, `authMode`, `modules`, and the `pipeline`. |
+| `manifest.json` | **YOURS**: `name`, `authMode`, `modules`, `appVersion`, `capabilities`; every other key hash-locked | identity, `authMode`, `modules`, and the `pipeline`. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page: sign in, invites, people, connected agents, approving an agent's sign-in. The same file in every blueprint. |
 | `package.json` | **YOURS** | installs the sidecar. Add a `build` script if the adopted app needs installing or building (see **Build, run, gate**). |
 | `AGENT_APP.md` | **YOURS** | what the app is, its modules and operations, for the agents that operate it. |

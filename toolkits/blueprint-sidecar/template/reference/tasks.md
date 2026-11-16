@@ -7,7 +7,7 @@ appends here citing the entry date.
 ## Build
 - [ ] T-1 (F-APP-1): The adopted source is in `upstream/`, unchanged from its origin.
 - [ ] T-2 (F-APP-1): `sidecar.json` declares how it starts — argv, port, environment, health path — and `agent-app serve` brings it up.
-- [ ] T-3 (Q1): Modules declared in `manifest.json` from the app's own grouping, resealed with `toolkit-sync`.
+- [ ] T-3 (Q1): Modules declared in `manifest.json` from the app's own grouping.
 - [ ] T-4 (<REPLACE: F-ID>): <REPLACE: one task per operation — declared in operations.json with typed params, mapped in sidecar.json>
 
 ## Verification

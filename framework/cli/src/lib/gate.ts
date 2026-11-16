@@ -75,9 +75,10 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
   });
 
   // Ownership canon FIRST — the one v1-required security-gate check. It must run
-  // BEFORE any manifest/toolkit shell executes: `manifest.json` is a system-owned,
-  // canon-covered file, so if it was tampered to inject a malicious build/start
-  // string, the canon check has to fail the gate before that shell ever runs. A
+  // BEFORE any manifest/toolkit shell executes: the manifest's `pipeline` is
+  // canon-covered (except on a toolkit that has the app write its own), so if it
+  // was tampered to inject a malicious build/start string, the canon check has
+  // to fail the gate before that shell ever runs. A
   // security check that runs after the code it is meant to gate protects nothing.
   runStep(errors, "ownership (system files unmodified)", () => {
     if (!existsSync(join(projectDir, ".a2app", "system-hashes.json")) &&

@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
-import { APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
+import { APP_EDITABLE_MANIFEST_KEYS, APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
 import { verifySystemHashes, writeSystemHashes } from "../dist/lib/canon.js";
 import { linkLocalPackages } from "../dist/lib/localPackages.js";
 
@@ -89,8 +89,16 @@ check(
 
 /* ------------------------------------------------- the manifest in the canon */
 
-// The canon locks the keys the app does not own — the pipeline the gate runs —
-// and leaves the app's own keys, modules among them, the app's to edit.
+// The canon leaves out the keys the app's builder edits, modules among them,
+// and locks the rest: the pipeline the gate runs, and the app-owned keys that
+// are not the builder's — its identity, port, modification lock and provenance.
+check(
+  "the builder's keys are exactly the documented set",
+  [...APP_EDITABLE_MANIFEST_KEYS],
+  ["name", "authMode", "appVersion", "modules", "capabilities"],
+);
+check("…every one of them survives a re-vendor", APP_EDITABLE_MANIFEST_KEYS.filter((k) => !APP_OWNED_MANIFEST_KEYS.includes(k)), []);
+
 const canonApp = mkdtempSync(join(tmpdir(), "canon-manifest-"));
 const manifestFile = join(canonApp, "manifest.json");
 const writeManifest = (m) => writeFileSync(manifestFile, JSON.stringify(m, null, 2) + "\n");
@@ -98,12 +106,21 @@ const drift = () => verifySystemHashes(canonApp).modified;
 
 writeManifest(app);
 writeSystemHashes(canonApp, ["manifest.json"]);
-writeManifest({ ...app, name: "Invoices", authMode: "multi-user", modules: [{ name: "billing" }] });
-check("editing the app's own keys is not drift", drift(), []);
+writeManifest({ ...app, name: "Invoices", authMode: "multi-user", appVersion: "0.2.0", modules: [{ name: "billing" }], capabilities: { integrations: ["mail"] } });
+check("editing the builder's keys is not drift", drift(), []);
 writeManifest(Object.fromEntries(Object.entries(app).reverse()));
 check("key order is not drift", drift(), []);
 writeManifest({ ...app, pipeline: { ...app.pipeline, start: "node evil.mjs" } });
 check("editing the pipeline is drift", drift(), ["manifest.json"]);
+for (const [key, value] of [["modificationLock", true], ["id", "someone-else"], ["port", 8094], ["source", { kind: "zip", installedAt: "x" }]]) {
+  writeManifest({ ...app, [key]: value });
+  check(`editing ${key} is drift`, drift(), ["manifest.json"]);
+}
+// The lock the owner set stays set: clearing it is drift, not the builder's call.
+writeManifest({ ...app, modificationLock: true });
+writeSystemHashes(canonApp, ["manifest.json"]);
+writeManifest({ ...app, modificationLock: false });
+check("clearing a sealed modificationLock is drift", drift(), ["manifest.json"]);
 
 // An app sealed before the manifest's hash left out the app's keys records the
 // whole file, and stays clean until it changes.

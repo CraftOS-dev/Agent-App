@@ -18,6 +18,16 @@
   `dev` or `validate` changed them, so the verified tree was never a clean
   commit.
 
+### Changed
+
+- **The builder edits its app's `manifest.json` keys without a reseal.** The
+  ownership canon no longer hashes the manifest whole. It leaves out `name`,
+  `authMode`, `modules`, `appVersion` and `capabilities`, and on blueprint-base,
+  which ships no runtime, `pipeline` too: a base app writes its own, and
+  `toolkit-sync` keeps it. Every other key stays locked, so editing `id`, `port`,
+  `modificationLock`, `source`, the version stamps or another blueprint's
+  `pipeline` still fails the gate.
+
 ### Fixed
 
 - **Any signed-in person reached every task.** The task API checked only that

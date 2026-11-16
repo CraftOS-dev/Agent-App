@@ -31,9 +31,10 @@ export class GitMissingError extends EnvError {
 }
 
 /**
- * Run git in `dir`. It never prompts: a commit that would need a person (a
- * signing passphrase, a credential) fails within the timeout instead of
- * waiting, since the CLI may be running where no one can answer.
+ * Run git in `dir`. It never prompts: anything that would need a person (a
+ * credential, a passphrase) fails within the timeout instead of waiting, since
+ * the CLI may be running where no one can answer. Commits are never signed for
+ * the same reason ({@link commitApp}).
  */
 function run(dir: string, args: string[]): { ok: true; stdout: string } | { ok: false; stderr: string } {
   try {
@@ -114,12 +115,16 @@ export interface Commit {
  * Commit everything under `dir` its ignore rules do not exclude. Only `dir`'s
  * own paths are staged and committed, so in a larger repository nothing else
  * already staged there is swept in.
+ *
+ * Never signed, whatever `commit.gpgsign` says: a signing key asks for its
+ * passphrase, and an agent's commit has no one to answer it, so a signed
+ * commit would wait out the timeout and fail.
  */
 export function commitApp(dir: string, message: string): Commit {
   git(dir, ["add", "--all", "--", "."]);
   const files = lines(git(dir, ["diff", "--cached", "--name-only", "--relative", "--", "."]));
   if (files.length === 0) return { commit: head(dir), committed: false, files };
-  git(dir, [...identity(dir), "commit", "--quiet", "--message", message, "--", "."]);
+  git(dir, [...identity(dir), "-c", "commit.gpgsign=false", "commit", "--quiet", "--message", message, "--", "."]);
   return { commit: head(dir), committed: true, files };
 }
 

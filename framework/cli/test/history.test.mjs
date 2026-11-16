@@ -47,9 +47,9 @@ const emptyConfig = join(base, "empty.gitconfig");
 writeFileSync(emptyConfig, "");
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: "1" };
 
-function cli(args) {
+function cli(args, env = {}) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [AGENT_APP, ...args], { env: { ...gitEnv, A2APP_HOME: home, A2APP_TOOLKITS_DIR: TOOLKITS }, windowsHide: true });
+    const child = spawn(process.execPath, [AGENT_APP, ...args], { env: { ...gitEnv, A2APP_HOME: home, A2APP_TOOLKITS_DIR: TOOLKITS, ...env }, windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -118,6 +118,15 @@ try {
   check("…having restored the rule", hasRule("*.secret"), true);
   await cli([app, "commit", "--message", "Restore the ignore rules"]);
   check("…so the commit after it leaves the pass valid", readGatePass(app)?.fingerprint, codeFingerprint(app));
+
+  /* -------------------------------------- a machine that signs every commit */
+  // No one can enter an agent's passphrase, so its commits are never signed:
+  // where git signs by default, with no signer that works, it still commits.
+  const signing = join(base, "signing.gitconfig");
+  writeFileSync(signing, "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = a2app-no-such-signer\n");
+  writeFileSync(join(app, "notes.md"), "signed?\n");
+  const unsigned = await cli([app, "commit", "--message", "Unsigned"], { GIT_CONFIG_GLOBAL: signing });
+  check("a commit where git signs by default is made, unsigned", [unsigned.code, unsigned.result?.committed], [0, true]);
 
   /* ------------------------- what a package never carries is never committed */
   const board = join(base, "board");

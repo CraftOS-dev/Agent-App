@@ -11,7 +11,9 @@
   `agent-app <dir> commit --message "<what and why>"` commits the app's
   changes, so an agent without a shell can keep the history too. walk-verify
   verifies that commit, and re-verifies from it. The gate fails an app that is
-  in no repository, and `validate` says when work is still uncommitted.
+  in no repository, and `validate` says when work is still uncommitted. These
+  commits are never signed, even where git signs by default: no one is there
+  to enter a passphrase for an agent.
 - **`.a2app/` is ignored as a whole** except `toolkit.json` and
   `system-hashes.json`. Before, the describe cache and some blueprints' dev
   and gate-pass records were left out of the ignore rules. Once committed, a

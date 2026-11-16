@@ -50,30 +50,42 @@ defect — the builder fixes it, then you re-verify.
 
 ## Full walk or re-verify
 
-- **Record what you verify.** First run `git -C <dir> rev-parse HEAD` and
-  `git -C <dir> status --porcelain --untracked-files=no`. No changes? Your
-  report names the commit:
+- **Scope git to the app.** Every `git status` and `git diff` below ends in
+  `-- .` or names a path: an app inside a larger repository is versioned
+  there, and a change outside the app is not the app's.
+- **Record what you verify.** First run `git -C <dir> rev-parse HEAD`,
+  `git -C <dir> status --porcelain --untracked-files=no -- .`, and
+  `git hash-object --no-filters <file>` on the Quality Standard
+  (`../QUALITY.md`, as above). Your report names the standard,
+  `Quality Standard: <hash>`, and with no changes the commit:
   `Verified commit: <hash>`. Otherwise write `Verified commit: none` and say
   what was uncommitted — a walk of uncommitted code cannot be a later
   re-verify's baseline.
-- **Full walk** — every check in Part 1 and Part 2. Run it when the app was
-  never verified, when you were not given the last report (verdict pass or
-  defects) together with its verified commit, or when that commit is not in
-  the app's history.
-- **Re-verify** — when you were given that report and commit (`<base>`). The
-  walk at `<base>` covered the app as it was then; you cover what changed:
+- **Full walk** — every check in Part 1 and Part 2. Run it unless all of
+  these hold:
+  - you were given the last report (verdict pass or defects), and it names a
+    `Verified commit: <base>` and a `Quality Standard:` hash;
+  - the ledger (`reference/tasks.md`) records that verdict with the same
+    `<base>` — a commit you were handed that the ledger does not back is no
+    baseline;
+  - `<base>` is in the history that led here:
+    `git -C <dir> merge-base --is-ancestor <base> HEAD` succeeds;
+  - the Quality Standard hashes the same now — a changed standard has items
+    the walk at `<base>` never judged.
+- **Re-verify** — when all of them hold. The walk at `<base>` covered the app
+  as it was then; you cover what changed:
   1. **Every defect in the last report** — confirm it is fixed, the way it
      was found.
   2. **The spec since `<base>`** (`git -C <dir> diff <base> --
      reference/requirements.md`) — every Feature, Operation and `## Changes`
      entry added or edited gets the full Part 1 checks; every Quality
      Conformance entry added or edited is judged against the running app.
-  3. **The code since `<base>`** (`git -C <dir> diff --stat <base>`, plus the
-     untracked source files `git -C <dir> status` lists) — every feature and
-     screen whose code changed gets the full Part 1 checks and the Part 2
-     quality pass. A changed file other screens use — design tokens,
-     styles, layout, the data or API layer, migrations — is a change to
-     every screen that uses it.
+  3. **The code since `<base>`** (`git -C <dir> diff --stat <base> -- .`, plus
+     the untracked source files `git -C <dir> status --porcelain -- .` lists)
+     — every feature and screen whose code changed gets the full Part 1 checks
+     and the Part 2 quality pass. A changed file other screens use — design
+     tokens, styles, layout, the data or API layer, migrations — is a change
+     to every screen that uses it.
   4. **A regression sweep of the rest** — open every screen (no first-paint
      or console error), and confirm one write survives a reload.
 

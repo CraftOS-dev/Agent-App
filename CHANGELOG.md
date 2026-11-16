@@ -17,6 +17,13 @@
   and gate-pass records were left out of the ignore rules. Once committed, a
   `dev` or `validate` changed them, so the verified tree was never a clean
   commit.
+- **walk-verify re-verifies what changed.** Given the last report, it checks
+  that report's defects, the spec and code changed since the commit it
+  verified, and sweeps the rest for regressions, instead of walking the whole
+  app again. It walks in full when the report's commit is not one the ledger
+  records, is not an ancestor of the app's HEAD, or the Quality Standard has
+  changed since. A report from before this release names no standard, so the
+  first verification after it is a full walk.
 - **Every app ignores what a package never carries.** Every credential
   (`.agent-token`, `.principal`, `.superuser`, `.tunnel-secret`, `.lan-secret`,
   any `*.secret`) and `node_modules/` are in each blueprint's `.gitignore`, and

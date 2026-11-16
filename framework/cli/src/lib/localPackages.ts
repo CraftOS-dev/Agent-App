@@ -3,7 +3,7 @@
  * repository.
  *
  * A blueprint template declares its adapter as an ordinary registry dependency
- * (`"@a2app/adapter-core": "^0.2.0"`), which is what a published CLI installs.
+ * (`"@a2app/adapter-core": "^0.2.1"`), which is what a published CLI installs.
  * Scaffolded from a source checkout, though, the app must run the source beside
  * it: a change to the adapter is what is being tested, and the registry's copy
  * is the last release (or, for a package not yet published, a 404 that fails the

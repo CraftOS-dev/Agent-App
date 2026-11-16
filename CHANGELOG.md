@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — protocol 0.2
+
+`agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and
+`@a2app/reverse-proxy` are released together at 0.2.1. They pin each other
+exactly, so `@a2app/reverse-proxy` is released to carry the fixed
+`@a2app/adapter-core`; the react-node and sidecar blueprints now depend on
+`^0.2.1`, so a new app never resolves the adapter before the fix.
 
 ### Added
 

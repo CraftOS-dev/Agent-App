@@ -38,7 +38,7 @@
  */
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { verifySystemHashes } from "../lib/canon.js";
+import { manifestDriftNote, verifySystemHashes } from "../lib/canon.js";
 import { clearDevRecord, devJsonPath, mintDevBootDir, readDevRecord, stopDevInstance, sweepDevBootDirs } from "../lib/instance.js";
 import { dataDir, dataFingerprint, lifecycleCommand, lifecycleLock } from "../lib/lifecycle.js";
 import { withLock } from "../lib/lock.js";
@@ -96,7 +96,8 @@ export async function run(args: string[], app: string): Promise<number> {
     if (drifted.length > 0) {
       log.error(
         `refusing to boot — system-managed files changed outside tooling:\n${drifted.join("\n")}\n` +
-          "If a toolkit upgrade is intended, run `agent-app <dir> toolkit-sync`; agent edits belong in app-owned paths.",
+          "If a toolkit upgrade is intended, run `agent-app <dir> toolkit-sync`; agent edits belong in app-owned paths." +
+          manifestDriftNote(project.dir, drift),
       );
       return 1;
     }

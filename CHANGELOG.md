@@ -61,6 +61,12 @@ react-node, go-react, rails-vue and rust-react blueprints: their Views already
 load it. A pocketbase-react View also needs the loader a new scaffold ships:
 add `ui/src/updater.js` and import it from `ui/src/main.jsx`.
 
+An app sealed before this release records its `manifest.json` whole. Its next
+`dev`, `validate` or `serve` re-records it in the new form while the file is
+unchanged, and from then on the builder's keys are its to edit. If they were
+edited first, the gate names `manifest.json` as drift: run
+`agent-app <dir> toolkit-sync` once to reseal it.
+
 An app created before this release has no repository, so its next `validate`
 fails on version control. Run `agent-app <dir> commit --message "Start the
 history"` once: it creates the repository, writes the missing ignore rules,

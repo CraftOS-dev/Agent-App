@@ -169,9 +169,49 @@ export interface OwnershipDrift {
  * With no toolkit there are no declared directory roots, so the recorded file
  * list IS the complete declaration of what is system-owned, and any other file
  * in the project is agent-accessible by definition.
+ *
+ * For an app's own canon only: a manifest record sealed whole is first brought
+ * up to date while the file is unchanged ({@link resealWholeManifest}). A
+ * package's canon is compared as it stands ({@link compareCanon}).
  */
 export function verifySystemHashes(projectDir: string): OwnershipDrift {
+  resealWholeManifest(projectDir);
   return compareCanon(projectDir, projectToolkit(projectDir)?.manifest.systemPaths ?? null);
+}
+
+/**
+ * Bring an app's manifest record sealed whole, before the hash left out the
+ * builder's keys, to the hash {@link hashFile} takes now. Only while the file
+ * is byte-identical to the one sealed: then there is nothing to judge, only
+ * the record's form to change, and from then on the builder's keys are its to
+ * edit. A manifest changed since cannot be told apart from a tampered one, so
+ * it is left to drift, and to a `toolkit-sync`.
+ */
+function resealWholeManifest(projectDir: string): void {
+  const file = canonPath(projectDir);
+  if (file === null || !existsSync(join(projectDir, MANIFEST))) return;
+  const recorded = JSON.parse(readFileSync(file, "utf8")) as Record<string, string>;
+  const sealed = recorded[MANIFEST];
+  if (sealed === undefined) return;
+  const now = hashFile(projectDir, MANIFEST);
+  if (now === sealed || sha256(readFileSync(join(projectDir, MANIFEST))) !== sealed) return;
+  recorded[MANIFEST] = now;
+  writeFileSync(file, JSON.stringify(recorded, null, 2) + "\n");
+}
+
+/**
+ * What a drift report naming `manifest.json` owes the agent reading it: which
+ * keys are the builder's, and the one reseal an app sealed whole still needs.
+ * Empty when the manifest did not drift.
+ */
+export function manifestDriftNote(projectDir: string, drift: OwnershipDrift): string {
+  if (!drift.modified.includes(MANIFEST)) return "";
+  const keys = appEditableManifestKeys(projectToolkit(projectDir)?.manifest).map((key) => `\`${key}\``);
+  return (
+    `\nmanifest.json: only ${keys.join(", ")} are the builder's to edit; put every other key back as it was. ` +
+    "An app sealed by an older agent-app records the manifest whole: if only those keys changed, " +
+    "reseal it once with `agent-app <dir> toolkit-sync`."
+  );
 }
 
 /** Whether a tree records an ownership canon at all. */

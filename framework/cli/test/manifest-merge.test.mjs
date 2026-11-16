@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
 import { APP_EDITABLE_MANIFEST_KEYS, APP_OWNED_MANIFEST_KEYS, mergeManifest } from "../dist/lib/manifest.js";
-import { verifySystemHashes, writeSystemHashes } from "../dist/lib/canon.js";
+import { manifestDriftNote, verifySystemHashes, writeSystemHashes } from "../dist/lib/canon.js";
 import { linkLocalPackages } from "../dist/lib/localPackages.js";
 
 const failures = [];
@@ -122,12 +122,33 @@ writeSystemHashes(canonApp, ["manifest.json"]);
 writeManifest({ ...app, modificationLock: false });
 check("clearing a sealed modificationLock is drift", drift(), ["manifest.json"]);
 
-// An app sealed before the manifest's hash left out the app's keys records the
-// whole file, and stays clean until it changes.
+// An app sealed before the manifest's hash left out the builder's keys records
+// the whole file. Verified while unchanged, its record is brought up to date,
+// and the builder's keys are then its to edit.
 writeManifest(app);
 const whole = "sha256:" + createHash("sha256").update(readFileSync(manifestFile)).digest("hex");
-writeFileSync(join(canonApp, ".a2app", "system-hashes.json"), JSON.stringify({ "manifest.json": whole }));
+const canonFile = join(canonApp, ".a2app", "system-hashes.json");
+const sealed = () => JSON.parse(readFileSync(canonFile, "utf8"))["manifest.json"];
+writeFileSync(canonFile, JSON.stringify({ "manifest.json": whole }));
 check("a manifest sealed whole is clean while unchanged", drift(), []);
+check("…and verifying it reseals it without the builder's keys", sealed() !== whole, true);
+writeManifest({ ...app, modules: [{ name: "billing" }] });
+check("…so editing the builder's keys is then not drift", drift(), []);
+writeManifest({ ...app, modificationLock: true });
+check("…while editing a locked key still is", drift(), ["manifest.json"]);
+
+// One changed since it was sealed whole cannot be told from a tampered one: it
+// is drift, left sealed whole, and the report names the builder's keys and the
+// one reseal it needs.
+writeManifest(app);
+writeFileSync(canonFile, JSON.stringify({ "manifest.json": whole }));
+writeManifest({ ...app, modules: [{ name: "billing" }] });
+const changed = verifySystemHashes(canonApp);
+check("a manifest changed since it was sealed whole is drift", changed.modified, ["manifest.json"]);
+check("…and stays sealed whole", sealed(), whole);
+const note = manifestDriftNote(canonApp, changed);
+check("…named with the builder's keys and the reseal", [note.includes("`modules`"), note.includes("toolkit-sync")], [true, true]);
+check("no note when the manifest did not drift", manifestDriftNote(canonApp, { modified: ["a2app-account.html"], missing: [], added: [] }), "");
 
 rmSync(canonApp, { recursive: true, force: true });
 

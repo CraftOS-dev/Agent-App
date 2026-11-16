@@ -11,7 +11,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { verifySystemHashes } from "./canon.js";
+import { manifestDriftNote, verifySystemHashes } from "./canon.js";
 import { validateFrameworkFiles } from "./frameworkFiles.js";
 import { DESCRIBE_BUDGET_CHARS } from "@a2app/rules";
 import { A2AppClient, fetchEntityIndex } from "@a2app/sdk";
@@ -96,7 +96,8 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
     if (problems.length > 0) {
       throw new Error(
         `system-managed files changed outside tooling:\n${problems.join("\n")}\n` +
-          "If a toolkit upgrade is intended, run `agent-app toolkit-sync`; agent edits belong in app-owned paths.",
+          "If a toolkit upgrade is intended, run `agent-app toolkit-sync`; agent edits belong in app-owned paths." +
+          manifestDriftNote(projectDir, drift),
       );
     }
   });

@@ -31,6 +31,13 @@
 - **A finished request could never be asked again.** A repeated request joined
   the earlier task even after it was completed, failed or canceled, so asking
   again handed back the finished task. It now joins only an open task (§6.1).
+- **An app framed by a host ignored the host's theme.** `tokens.css` themes
+  from `data-theme` and `data-style` on `<html>`, but no View ever set them,
+  so a framed app followed the OS scheme whatever the host chose. The update
+  watcher (`/_a2app/update.js`) now applies the host's theme message and asks
+  for it on load, from the parent window only. pocketbase-react, which had no
+  watcher, now serves and loads it too. The host's side is in
+  `framework/host/README.md`.
 
 ### Upgrading an existing app
 
@@ -38,6 +45,11 @@
 pocketbase-react apps take it with `agent-app <dir> toolkit-sync`. A View that
 follows a task with the person's own session keeps working, since a person
 reaches the tasks they asked for.
+
+The same sync brings the theme-following update watcher to apps on the
+react-node, go-react, rails-vue and rust-react blueprints: their Views already
+load it. A pocketbase-react View also needs the loader a new scaffold ships:
+add `ui/src/updater.js` and import it from `ui/src/main.jsx`.
 
 An app created before this release has no repository, so its next `validate`
 fails on version control. Run `agent-app <dir> commit --message "Start the

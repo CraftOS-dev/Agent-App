@@ -8,6 +8,7 @@ Responsibilities:
 - **Safe-evolve**: dev copy on a hidden port with fresh migration-replayed DB; pre-promote backup; structural first-vs-update detection; restore with capture-first + auto-rollback.
 - **Host features**: crash watchdog, build supervision/state machine, live build view, session management.
 - **Host security obligations**: receipts, false-claim gate, approval UI, capability consent at install, credential hygiene.
+- **Theme, for a host that frames an app's View**: post `{ type: "livingui-theme", mode: "light" | "dark", themeId: "<style pack>", customColors?: { bg, surface, text, accent } }` to the app's frame when it loads, every time the person switches theme, and in answer to the View's `{ type: "craftbot-theme-request" }`. The View's `/_a2app/update.js` applies it as `data-theme` and `data-style` on `<html>`; a message without `customColors` clears any pinned before. Unframed, the app follows the OS scheme.
 - **Conformance (Host artifact class)**: launches via the pipeline block only; never edits agent-owned or system-owned files.
 
 Design rule: split responsibilities per module, no god-objects.

@@ -52,6 +52,7 @@ that work until it is done. Replace all three with your own.
 | `pb/pb_hooks/_a2app_rules.js` | SYSTEM (hash-locked) | the pure rules (guard, predicates, fingerprint, operation args, approval/dedup keys, task lifecycle, sweep, scopes and the ceiling, credentials, cookies, user codes, sign-in limits, device polling and confirmation) + `--selftest`. Never edit. |
 | `pb/pb_migrations/1759622300_a2app_accounts.js` | SYSTEM (hash-locked) | prepares PocketBase's `users` collection to hold a multi-user app's accounts (`login`, `role`, `active`), turns off PocketBase's own sign-in and locks its rules. Applied once, before your migrations. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
+| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — reloads an open tab onto a new build, and applies the theme of a host that frames the app. The same file in every blueprint with a View. Never edit. |
 
 **You create or obtain (nothing ships for these):**
 
@@ -201,8 +202,14 @@ A React (Vite) starter View ships in `ui/`: the same to-do screens as the
 react-node blueprint — states (loading/empty/error/list), toasts, an in-app
 confirm dialog, keyboard shortcut — built on the kit's design tokens
 (`ui/public/tokens.css`, light + dark, WCAG AA). The pipeline build compiles it
-into `pb/pb_public/`, which PocketBase serves statically; no system-owned file
-is involved.
+into `pb/pb_public/`, which PocketBase serves statically.
+
+`ui/src/updater.js` loads the system-owned update watcher (`/_a2app/update.js`,
+a RUNTIME import the bundler must leave alone). Framed by a host (an agent
+harness that embeds the app), it sets `data-theme` and `data-style` on
+`<html>` from the host's theme as the person switches it; standalone, the OS
+scheme applies. It also reloads an open tab onto a new build when nothing is
+unsaved. Keep it when you rewrite the View.
 
 The starter reads the `tasks` collection its migration creates. When you
 replace that collection, repoint `ui/src/App.jsx` at your own entities.

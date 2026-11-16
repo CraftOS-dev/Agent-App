@@ -122,6 +122,10 @@ routerAdd("POST", "/api/_a2app/auth/token", (e) => require(`${__hooks}/_a2app_im
 // acting for you, and approving an agent's sign-in.
 routerAdd("GET", "/_a2app/account", (e) => require(`${__hooks}/_a2app_impl.js`).accountPage(e));
 
+// The framework's script in every View (ui/src/updater.js loads it): it keeps
+// an open page current with the app, and with the theme of a host framing it.
+routerAdd("GET", "/_a2app/update.js", (e) => require(`${__hooks}/_a2app_impl.js`).updateScript(e));
+
 /* ------------------------------------------- access to PocketBase's own routes */
 
 // PocketBase serves records, realtime, files and batch itself, outside the

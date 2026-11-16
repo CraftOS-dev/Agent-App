@@ -6,8 +6,10 @@
  * `@vite-ignore` comment keeps the bundler from trying to resolve it at build
  * time. Loading it starts the watch: a CODE change reloads when the page holds
  * nothing unsaved (else offers a banner); a DATA change dispatches
- * `a2app:datachange` on window, which App.vue listens for. Keep this bridge
- * when you rewrite the View — without it, already-open tabs go stale forever.
+ * `a2app:datachange` on window, which App.vue listens for. It also makes the
+ * page follow the theme of a host that frames it (light/dark and the style
+ * pack). Keep this bridge when you rewrite the View — without it, already-open
+ * tabs go stale forever and an embedded app ignores its host's theme.
  */
 const watcher = import(/* @vite-ignore */ "/_a2app/update.js").catch(() => null);
 

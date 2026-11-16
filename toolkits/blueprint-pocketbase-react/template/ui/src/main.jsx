@@ -16,6 +16,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
 import { ToastProvider } from "./toast.jsx";
+// Importing the bridge starts the system-owned update watcher and host theme (see updater.js).
+import "./updater.js";
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>

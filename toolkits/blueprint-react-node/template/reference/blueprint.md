@@ -33,7 +33,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `src/App.jsx` | **YOURS** | the View logic: state machine (loading/ready/error), add/advance/delete actions, filters, the `a2app:datachange` listener, boot. |
 | `src/api.js` | **YOURS** | the one fetch wrapper — 10 s timeout, GET retry-once, readable error messages. |
 | `src/Icon.jsx` · `src/toast.jsx` · `src/ConfirmDialog.jsx` · `src/format.js` | **YOURS** | the shared pieces — icon set, `useToast`, `useConfirm` (in-app dialog, never `window.confirm`), day formatting. One impl each; compose, never re-implement. |
-| `src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher. Keep it when you rewrite the View. |
+| `src/updater.js` | **YOURS** | the runtime bridge to the system-owned update watcher, which also follows a host's theme. Keep it when you rewrite the View. |
 | `public/tokens.css` | **YOURS** | design tokens (the kit sheet): foundation `--agent-app-*` + semantic bridge, light + dark + style packs. Re-point values; keep the NAMES stable. |
 | `public/ui.css` | **YOURS** | component styles (buttons, cards, list rows, dialog, toasts). Consumes semantic tokens only. |
 | `vite.config.js` | **YOURS** | the View build: React plugin, `dist/` output, dev-server proxy to the running app. |
@@ -45,7 +45,7 @@ Every file that ships on a fresh scaffold, in the order you meet them:
 | `package.json` | build | dependencies (react, hono, better-sqlite3, adapter-core) + scripts (`build` = vite build, `dev:ui` = vite dev server). Referenced by the pipeline. |
 | `manifest.json` | **YOURS**, except `pipeline` and the version stamps (hash-locked) | app identity, `modules[]`, `authMode`, `pipeline` (install/build/start/health). |
 | `server.mjs` | SYSTEM (hash-locked) | the Hono server + `@a2app/adapter-core` middleware + the SQLite binding: serves the records API, identity, describe, the built View (`dist/`), and `/_a2app/update.js`. Never edit. |
-| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab. Never edit. |
+| `a2app-update.js` | SYSTEM (hash-locked) | the update watcher served at `/_a2app/update.js` — detects code vs. data staleness in an open tab, and applies the theme of a host that frames the app. Never edit. |
 | `a2app-account.html` | SYSTEM (hash-locked) | the framework's account page at `/_a2app/account`: sign in, accept an invite, people (owner), the agents acting for you. The same file in every blueprint. Never edit. |
 | `scripts/dev-prepare.mjs` | lifecycle | run by `agent-app dev`: builds a fresh, seeded SQLite store in an isolated dir. Leave it alone. |
 | `scripts/promote-apply.mjs` | lifecycle | run by `agent-app promote`: applies to live after a mandatory backup. Leave it alone. |
@@ -191,7 +191,10 @@ semantic bridge. Components consume ONLY semantic tokens (`--bg-surface`,
 `--text-primary`, `--accent-solid`, `--danger-solid`, `--focus-ring`, `--sp-*`,
 `--r-*`, `--fs-*`, `--dur-*`, …). Theme by re-pointing the foundation or picking
 a `[data-style]` pack; keep the names stable. Light and dark both resolve every
-token and hold WCAG AA. Never hardcode a value where a token exists.
+token and hold WCAG AA. Never hardcode a value where a token exists. Framed by
+a host (an agent harness that embeds the app), the update watcher sets
+`data-theme` and `data-style` on `<html>` from the host's theme as the person
+switches it; standalone, the OS scheme applies.
 
 **Realtime / staleness — `src/updater.js`** bridges to the system-owned
 watcher (`/_a2app/update.js`, a RUNTIME import the bundler must leave alone).

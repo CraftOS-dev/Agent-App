@@ -2466,6 +2466,21 @@ function accountPage(e) {
   return e.html(200, page);
 }
 
+/* ----------------------------------------------------- update watcher */
+
+/** GET /_a2app/update.js — the framework's script in every View, the same file
+ *  in every blueprint with one: it keeps an open page current with the app and
+ *  with the theme of a host that frames it. */
+function updateScript(e) {
+  let script;
+  try {
+    script = $os.readFile(`${__hooks}/../../a2app-update.js`);
+  } catch (_missing) {
+    return fail(e, 404, "not_found", "This app ships no update script (a2app-update.js).");
+  }
+  return e.blob(200, "text/javascript; charset=utf-8", script);
+}
+
 module.exports = {
   identity: identity, describe: describe, guard: guard, deleteGuard: deleteGuard,
   nativeGate: nativeGate,
@@ -2476,5 +2491,5 @@ module.exports = {
   session: session, createInvite: createInvite, invite: invite, users: users,
   listCredentials: listCredentials, issueCredential: issueCredential, revokeCredential: revokeCredential,
   startDevice: startDevice, reviewDevice: reviewDevice, decideDevice: decideDevice, pollDevice: pollDevice,
-  accountPage: accountPage,
+  accountPage: accountPage, updateScript: updateScript,
 };

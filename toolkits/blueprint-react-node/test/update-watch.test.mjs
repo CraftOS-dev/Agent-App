@@ -14,9 +14,14 @@
  * current and reloading would cost the person their half-typed form to fix a
  * change that was never about their page.
  *
+ * The same module follows the theme of the host the View is framed in: only the
+ * parent window's theme message restyles the page, and the page asks for it,
+ * because the host's first message can arrive before the module is loaded.
+ *
  * Run: node test/update-watch.test.mjs
  */
 import assert from "node:assert/strict";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
@@ -163,8 +168,10 @@ Object.defineProperty(globalThis, "navigator", {
 // here. That the guard honours a slot already taken is part of the contract —
 // a View that also calls watchForUpdates() gets one watcher, not two.
 globalThis.__a2appUpdateWatch = "test-harness";
-const { watchForUpdates, hasUnsavedInput } = await import(pathToFileURL(WATCHER).href);
+globalThis.__a2appHostTheme = "test-harness";
+const { watchForUpdates, hasUnsavedInput, applyHostTheme, followHostTheme } = await import(pathToFileURL(WATCHER).href);
 assert.equal(globalThis.__a2appUpdateWatch, "test-harness", "auto-start must not clobber an existing watcher");
+assert.equal(globalThis.__a2appHostTheme, "test-harness", "auto-start must not clobber an existing theme follow");
 
 const banner = () => document.getElementById("a2app-update-banner");
 const settle = () => new Promise((r) => setTimeout(r, 250));
@@ -526,6 +533,138 @@ await check("stop() ends the watch", async () => {
   await settle();
   await settle();
   assert.equal(seen.length, 0);
+});
+
+/* ---------------------------------------------------------- host theme */
+
+/** <html> as the bridge writes it: its attributes and its inline custom properties. */
+function fakeRoot() {
+  const attrs = {};
+  const props = {};
+  return {
+    attrs,
+    props,
+    setAttribute(k, v) {
+      attrs[k] = v;
+    },
+    removeAttribute(k) {
+      delete attrs[k];
+    },
+    style: {
+      setProperty(k, v) {
+        props[k] = v;
+      },
+      removeProperty(k) {
+        delete props[k];
+      },
+    },
+  };
+}
+
+/** A framed page: its window, the host window above it, and a way to post into it from anyone. */
+function fakeFrame() {
+  const listeners = new Map();
+  const posted = [];
+  const host = {
+    postMessage(message, origin) {
+      posted.push({ message, origin });
+    },
+  };
+  const root = fakeRoot();
+  const win = {
+    parent: host,
+    document: { documentElement: root },
+    addEventListener(k, fn) {
+      listeners.set(k, fn);
+    },
+    removeEventListener(k, fn) {
+      if (listeners.get(k) === fn) listeners.delete(k);
+    },
+  };
+  const deliver = (data, source = host) => listeners.get("message")?.({ data, source });
+  return { win, host, root, posted, deliver, listening: () => listeners.has("message") };
+}
+
+const theme = (fields) => ({ type: "livingui-theme", ...fields });
+
+await check("a host theme message sets the mode and the style pack", () => {
+  const root = fakeRoot();
+  assert.equal(applyHostTheme(theme({ mode: "light", themeId: "ocean" }), root), true);
+  assert.deepEqual(root.attrs, { "data-theme": "light", "data-style": "ocean" });
+  applyHostTheme(theme({ mode: "dark", themeId: "craftbot" }), root);
+  assert.deepEqual(root.attrs, { "data-theme": "dark", "data-style": "craftbot" }, "switching the host's theme switches the page");
+});
+
+await check("custom colors are pinned, and cleared by the next preset", () => {
+  const root = fakeRoot();
+  const customColors = { bg: "#101010", surface: "#202020", text: "#eeeeee", accent: "#ff00aa" };
+  applyHostTheme(theme({ mode: "dark", themeId: "craftbot", customColors }), root);
+  assert.deepEqual(root.props, {
+    "--agent-app-bg": "#101010",
+    "--agent-app-surface": "#202020",
+    "--agent-app-text": "#eeeeee",
+    "--agent-app-accent": "#ff00aa",
+  });
+  applyHostTheme(theme({ mode: "dark", themeId: "forest" }), root);
+  assert.deepEqual(root.props, {}, "a preset after a custom theme must not keep the pinned colors");
+});
+
+await check("anything else is not a theme, and changes nothing", () => {
+  const root = fakeRoot();
+  for (const message of [
+    null,
+    "dark",
+    { type: "something-else", mode: "dark" },
+    theme({ mode: "sepia", themeId: "ocean" }),
+    theme({ themeId: "ocean" }),
+  ]) {
+    assert.equal(applyHostTheme(message, root), false, JSON.stringify(message));
+  }
+  assert.deepEqual([root.attrs, root.props], [{}, {}]);
+
+  applyHostTheme(theme({ mode: "dark", themeId: "x'] , :root { color: red", customColors: { bg: "url(evil)", accent: "#abc" } }), root);
+  assert.deepEqual(root.attrs, { "data-theme": "dark" }, "a style id that is not one is dropped, not written");
+  assert.deepEqual(root.props, { "--agent-app-accent": "#abc" }, "only real colors are pinned");
+});
+
+await check("embedded, the page asks its host for the theme and follows only the host", () => {
+  const frame = fakeFrame();
+  const stop = followHostTheme(frame.win);
+  assert.deepEqual(frame.posted, [{ message: { type: "craftbot-theme-request" }, origin: "*" }], "the theme sent at load may predate the listener, so it asks");
+
+  frame.deliver(theme({ mode: "light", themeId: "ocean" }));
+  assert.deepEqual(frame.root.attrs, { "data-theme": "light", "data-style": "ocean" });
+  frame.deliver(theme({ mode: "dark", themeId: "ocean" }), { postMessage() {} });
+  assert.equal(frame.root.attrs["data-theme"], "light", "another frame or a popup cannot restyle the page");
+
+  stop();
+  assert.equal(frame.listening(), false, "stop() unhooks it");
+});
+
+await check("standalone, there is no host to follow", () => {
+  const frame = fakeFrame();
+  frame.win.parent = frame.win;
+  followHostTheme(frame.win);
+  assert.deepEqual([frame.posted, frame.listening()], [[], false], "the page keeps following the OS scheme");
+});
+
+/* -------------------------------------------------------------- copies */
+
+// Every starter with a View serves this file at /_a2app/update.js. This one is
+// the source; a copy that drifts is a View that updates or themes differently
+// on one stack.
+await check("every starter that ships the watcher ships this one", () => {
+  const toolkits = join(HERE, "..", "..");
+  const source = readFileSync(WATCHER);
+  for (const kit of readdirSync(toolkits)) {
+    const manifest = join(toolkits, kit, "a2app.toolkit.json");
+    if (!existsSync(manifest) || kit === "blueprint-react-node") continue;
+    const { template, adapterPaths = [] } = JSON.parse(readFileSync(manifest, "utf8"));
+    if (!adapterPaths.includes("a2app-update.js")) continue;
+    const copy = join(toolkits, kit, template, "a2app-update.js");
+    assert.ok(existsSync(copy), `${kit}: declares a2app-update.js but ships none`);
+    assert.ok(readFileSync(copy).equals(source), `${kit}: a2app-update.js differs from blueprint-react-node's — copy it again`);
+  }
 });
 
 server.close();

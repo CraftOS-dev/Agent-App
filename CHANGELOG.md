@@ -17,6 +17,12 @@
   and gate-pass records were left out of the ignore rules. Once committed, a
   `dev` or `validate` changed them, so the verified tree was never a clean
   commit.
+- **Every app ignores what a package never carries.** Every credential
+  (`.agent-token`, `.principal`, `.superuser`, `.tunnel-secret`, `.lan-secret`,
+  any `*.secret`) and `node_modules/` are in each blueprint's `.gitignore`, and
+  `scaffold`, `install`, `import`, `commit` and `validate` restore any that are
+  missing. blueprint-base listed only the first three, so an app's first
+  commit took its other secrets and its dependencies.
 
 ### Changed
 

@@ -2,6 +2,9 @@
 .agent-token
 .principal
 .superuser
+.tunnel-secret
+.lan-secret
+*.secret
 
 # The live database and adapter-owned state (the toolkit's lifecycle dataDir).
 data/
@@ -12,3 +15,6 @@ data/
 .a2app/*
 !.a2app/toolkit.json
 !.a2app/system-hashes.json
+
+# Dependencies the pipeline reinstalls: never shipped or committed.
+node_modules/

@@ -2,6 +2,9 @@
 .agent-token
 .principal
 .superuser
+.tunnel-secret
+.lan-secret
+*.secret
 
 # Adapter-owned state and the adopted app's own {dataDir} (the toolkit's
 # lifecycle dataDir).

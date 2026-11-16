@@ -2,6 +2,9 @@
 .agent-token
 .principal
 .superuser
+.tunnel-secret
+.lan-secret
+*.secret
 
 # The live database and adapter-owned state (the toolkit's lifecycle dataDir).
 pb/pb_data/

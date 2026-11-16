@@ -65,8 +65,10 @@ verified. Keep it the way an engineer does:
 - **Commit before every verification.** walk-verify verifies a commit;
   uncommitted work is a walk that no later re-verify can start from.
   `validate` says when work is still uncommitted.
-- The ignore rules keep credentials, the database, runtime state and build
-  output out of every commit; `commit` restores any that are missing. The gate
+- The ignore rules keep credentials (any `*.secret` included), the database,
+  runtime state and `node_modules/` out of every commit; `commit` and
+  `validate` restore any that are missing. Other build output is your stack's:
+  add it to `.gitignore` before the first commit that would take it. The gate
   fails an app that is not in a repository, and `commit` creates one.
 
 ## The spec comes first

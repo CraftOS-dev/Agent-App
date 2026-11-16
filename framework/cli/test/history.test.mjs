@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { codeFingerprint, readGatePass } from "../dist/lib/lifecycle.js";
 import { ensureIgnoreRules } from "../dist/lib/scaffoldFiles.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -105,6 +106,28 @@ try {
   const started = await cli([app, "commit", "--message", "Start the history"]);
   check("commit creates its repository and commits the app", [started.code, started.result?.created, log(app)], [0, true, ["Agent App|Start the history"]]);
   check("…and the gate passes again", (await cli([app, "validate", "--no-build"])).code, 0);
+
+  /* ---------------------------------- a commit after validate keeps its pass */
+  // `.gitignore` is gated code, so validate restores a missing rule BEFORE it
+  // records the pass: the commit that follows has nothing left to restore.
+  const ignoreFile = join(app, ".gitignore");
+  const hasRule = (rule) => readFileSync(ignoreFile, "utf8").split(/\r?\n/).includes(rule);
+  writeFileSync(ignoreFile, readFileSync(ignoreFile, "utf8").replace(/^\*\.secret\r?\n/m, ""));
+  check("(the rule is gone)", hasRule("*.secret"), false);
+  check("validate passes", (await cli([app, "validate", "--no-build"])).code, 0);
+  check("…having restored the rule", hasRule("*.secret"), true);
+  await cli([app, "commit", "--message", "Restore the ignore rules"]);
+  check("…so the commit after it leaves the pass valid", readGatePass(app)?.fingerprint, codeFingerprint(app));
+
+  /* ------------------------- what a package never carries is never committed */
+  const board = join(base, "board");
+  check("blueprint-base scaffolds", (await cli([board, "scaffold", "--blueprint", "blueprint-base", "--name", "Board"])).code, 0);
+  for (const rel of ["keys/api.secret", ".tunnel-secret", ".lan-secret", ".agent-token", "node_modules/left-pad/index.js", "server.js"]) {
+    mkdirSync(dirname(join(board, rel)), { recursive: true });
+    writeFileSync(join(board, rel), "x\n");
+  }
+  const swept = await cli([board, "commit", "--message", "Add the server"]);
+  check("a commit takes no credential and no dependency", [swept.code, swept.result?.files], [0, ["server.js"]]);
 
   /* ------------------------------------ an app inside another repository */
   const mono = join(base, "mono");

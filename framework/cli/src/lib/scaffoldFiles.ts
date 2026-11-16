@@ -6,7 +6,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CARRIED_FRAMEWORK_FILES } from "./package.js";
+import { CARRIED_FRAMEWORK_FILES, CREDENTIAL_NAMES, NEVER_CARRIED_DIRS, SECRET_SUFFIX } from "./package.js";
 
 /**
  * Harness-facing pointer files: `AGENTS.md` (the common convention) and a
@@ -112,21 +112,32 @@ export function writeHarnessGuides(dir: string, name: string): void {
 const FRAMEWORK_STATE = [".a2app/*", ...[...CARRIED_FRAMEWORK_FILES].map((name) => `!.a2app/${name}`)];
 
 /**
+ * What a package never carries (packaging §1) is never committed either: every
+ * credential wherever it sits, `*.secret` included, and the dependency trees
+ * the pipeline reinstalls. `.git/` is git's own.
+ */
+const NEVER_COMMITTED = [
+  ...CREDENTIAL_NAMES,
+  `*${SECRET_SUFFIX}`,
+  ...[...NEVER_CARRIED_DIRS].filter((name) => name !== ".git").map((name) => `${name}/`),
+];
+
+/**
  * Guarantee the ignore rules that keep runtime artifacts out of a repository.
  *
  * Blueprints ship their own `.gitignore` (packed as `_gitignore`, since npm
  * strips the real name from a tarball), but an imported or adopted app may carry
  * none, and an older one may lack a rule added since. Without these the next
- * `git add -A` publishes the agent token, the principal password and the live
- * database, so the rules the framework depends on are written here, from the
- * CLI, on every path.
+ * `git add -A` publishes the agent token, the principal password, every other
+ * secret and the live database, so the rules the framework depends on are
+ * written here, from the CLI, on every path.
  *
  * Existing lines are kept and only missing ones appended: a blueprint's own
- * rules (node_modules, the PocketBase binary, __pycache__) are none of the
+ * rules (the PocketBase binary, __pycache__, build output) are none of the
  * framework's business, and re-running must not churn the file.
  */
 export function ensureIgnoreRules(dir: string, dataDir?: string): void {
-  const rules = [".agent-token", ".principal", ".superuser"];
+  const rules = [...NEVER_COMMITTED];
   // The database lives wherever the toolkit says it does, so the rule follows
   // the declaration rather than assuming "data/".
   if (dataDir !== undefined && dataDir.trim() !== "") {
@@ -141,8 +152,8 @@ export function ensureIgnoreRules(dir: string, dataDir?: string): void {
   if (!FRAMEWORK_STATE.every((rule) => present.has(rule))) missing.push(...FRAMEWORK_STATE);
   if (missing.length === 0) return;
   const header = [
-    "# Written by agent-app: credentials, framework state and the live database",
-    "# are runtime artifacts and must never be committed.",
+    "# Written by agent-app: credentials, dependencies, framework state and the",
+    "# live database are runtime artifacts and must never be committed.",
   ];
   const prefix = existing.trim() === "" ? "" : existing.replace(/\s*$/, "") + "\n\n";
   writeFileSync(file, prefix + [...header, ...missing, ""].join("\n"));

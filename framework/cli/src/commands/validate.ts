@@ -8,6 +8,8 @@ import { readDevRecord } from "../lib/instance.js";
 import { clearGatePass, writeGatePass } from "../lib/lifecycle.js";
 import { loadProject, type Project } from "../lib/project.js";
 import { uncommitted } from "../lib/repo.js";
+import { ensureIgnoreRules } from "../lib/scaffoldFiles.js";
+import { projectToolkit } from "../lib/toolkit.js";
 import { log } from "../lib/log.js";
 
 export interface ValidateOutcome {
@@ -33,6 +35,9 @@ export interface ValidateOptions {
  * one of its steps and still own its output.
  */
 export async function validateApp(project: Project, opts: ValidateOptions = {}): Promise<ValidateOutcome> {
+  // The ignore rules first. `commit` restores any that are missing, and
+  // `.gitignore` is gated code: restored after the pass, it would void it.
+  ensureIgnoreRules(project.dir, projectToolkit(project.dir)?.manifest.lifecycle?.dataDir);
   const errors = runGate(project.dir, project.manifest, {
     ...(opts.skipBuild === true ? { skipBuild: true } : {}),
     ...(opts.skipInstall === true ? { skipInstall: true } : {}),

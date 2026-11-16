@@ -20,8 +20,8 @@ import { templateIgnoreFile, type ResolvedToolkit } from "./toolkit.js";
 export const NEVER_CARRIED_DIRS = new Set(["node_modules", ".git"]);
 
 /** Credential files, by name, wherever they sit — plus anything named `*.secret`. */
-const CREDENTIAL_NAMES = new Set([".agent-token", ".superuser", ".principal", ".tunnel-secret", ".lan-secret"]);
-const SECRET_SUFFIX = ".secret";
+export const CREDENTIAL_NAMES = new Set([".agent-token", ".superuser", ".principal", ".tunnel-secret", ".lan-secret"]);
+export const SECRET_SUFFIX = ".secret";
 
 /** The only `.a2app/` files a package carries. Everything else there is runtime state (serve, dev, bridge, backups, …). */
 export const CARRIED_FRAMEWORK_FILES = new Set(["toolkit.json", "system-hashes.json"]);

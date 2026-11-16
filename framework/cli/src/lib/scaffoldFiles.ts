@@ -6,6 +6,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { CARRIED_FRAMEWORK_FILES } from "./package.js";
 
 /**
  * Harness-facing pointer files: `AGENTS.md` (the common convention) and a
@@ -71,6 +72,7 @@ export function writeHarnessGuides(dir: string, name: string): void {
         "```bash",
         "agent-app . dev          # boot the candidate on a hidden port, fresh migration-replayed DB (--install the first time)",
         "agent-app . validate     # the gate — must pass; measures the dev instance, records the pass",
+        'agent-app . commit --message "<what and why>"   # walk-verify verifies a commit',
         "# walk-verify: a verifier agent that is NOT the builder loads the walk-verify",
         "# skill and drives every reference/requirements.md Feature against the dev URL.",
         "agent-app . stop         # promote refuses while the live app is serving",
@@ -80,6 +82,10 @@ export function writeHarnessGuides(dir: string, name: string): void {
         "",
         "While the dev instance is up, every `a2app` operate command targets IT — test",
         "data lands in its disposable database, never in live data.",
+        "",
+        "The app is its own git repository. Commit each coherent change — a feature, a",
+        "fix, a refactor — with a message saying what and why, and always before a",
+        "verification: the history is how a change is reviewed, rolled back and verified.",
         "",
         "Never build against the live app, never edit an applied migration, never drop a",
         "collection holding user data, and never write a system-owned file listed in",
@@ -97,6 +103,15 @@ export function writeHarnessGuides(dir: string, name: string): void {
 }
 
 /**
+ * The framework's state in `.a2app/`: all of it is runtime (serve and dev
+ * records, logs, the gate pass, caches, backups) except the files a package
+ * carries, which are part of the app. Ignoring it as a whole is what keeps a
+ * `dev` or a `validate` from leaving the tree dirty, so the commit walk-verify
+ * verifies is the tree that ran.
+ */
+const FRAMEWORK_STATE = [".a2app/*", ...[...CARRIED_FRAMEWORK_FILES].map((name) => `!.a2app/${name}`)];
+
+/**
  * Guarantee the ignore rules that keep runtime artifacts out of a repository.
  *
  * Blueprints ship their own `.gitignore` (packed as `_gitignore`, since npm
@@ -111,15 +126,7 @@ export function writeHarnessGuides(dir: string, name: string): void {
  * framework's business, and re-running must not churn the file.
  */
 export function ensureIgnoreRules(dir: string, dataDir?: string): void {
-  const rules = [
-    ".agent-token",
-    ".principal",
-    ".superuser",
-    ".a2app/serve.json",
-    ".a2app/serve.log",
-    ".a2app/dev/",
-    ".a2app/backups/",
-  ];
+  const rules = [".agent-token", ".principal", ".superuser"];
   // The database lives wherever the toolkit says it does, so the rule follows
   // the declaration rather than assuming "data/".
   if (dataDir !== undefined && dataDir.trim() !== "") {
@@ -129,6 +136,9 @@ export function ensureIgnoreRules(dir: string, dataDir?: string): void {
   const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
   const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
   const missing = rules.filter((rule) => !present.has(rule));
+  // A negation only re-includes what a rule ABOVE it ignored, so the framework
+  // state goes in as one block, in order, whenever any line of it is missing.
+  if (!FRAMEWORK_STATE.every((rule) => present.has(rule))) missing.push(...FRAMEWORK_STATE);
   if (missing.length === 0) return;
   const header = [
     "# Written by agent-app: credentials, framework state and the live database",

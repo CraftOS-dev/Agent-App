@@ -2,7 +2,8 @@
  * agent-app <dir> scaffold --blueprint <id|path> [--name "..."] [--port N] [--auth-mode none|multi-user]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
- * versions, write the ownership canon, and provision the agent credential.
+ * versions, write the ownership canon, provision the agent credential, and
+ * start the app's git repository with the scaffold as its first commit.
  * Credentials are runtime artifacts — never copied from a blueprint.
  *
  * `<dir>` is the app being created, so it is the target here rather than an
@@ -18,6 +19,7 @@ import { writeFileAtomic } from "../lib/home.js";
 import { linkLocalPackages } from "../lib/localPackages.js";
 import { AGENT_APP_VERSION } from "../lib/manifest.js";
 import { UsageError } from "../lib/project.js";
+import { startHistory } from "../lib/repo.js";
 import { ensureIgnoreRules, writeHarnessGuides } from "../lib/scaffoldFiles.js";
 import {
   adapterVersionOf,
@@ -167,8 +169,12 @@ export async function run(args: string[], app: string): Promise<number> {
 
     writeSystemHashes(dir, systemPaths);
 
+    // The history starts with the app: the scaffold is the first commit, so
+    // the builder's first change is already a diff (Quality Standard Q18).
+    const commit = startHistory(dir, `Scaffold ${name} on ${tk.manifest.id}`);
+
     log.ok(`Created Agent App "${name}" (id ${manifest.id as string}) at ${dir}`);
-    log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, port: assigned, adapterVersion }, null, 2));
+    log.raw(JSON.stringify({ ok: true, id: manifest.id, dir, port: assigned, adapterVersion, commit }, null, 2));
     return 0;
   } catch (err) {
     // Roll back the port/registry claim, and remove the directory only if this

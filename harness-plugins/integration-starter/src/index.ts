@@ -87,7 +87,7 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
  *  command modules. `login` and `logout` belong to `a2app` (they ask the person
  *  to approve an agent in the app), so they are not here. */
 export const FRAMEWORK_VERBS = new Set([
-  "scaffold", "import", "export", "validate", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
+  "scaffold", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
   "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
   "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 ]);

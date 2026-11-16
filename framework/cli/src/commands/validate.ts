@@ -7,6 +7,7 @@ import { runAccessGate, runBudgetGate, runGate, type GateError, type GateUncheck
 import { readDevRecord } from "../lib/instance.js";
 import { clearGatePass, writeGatePass } from "../lib/lifecycle.js";
 import { loadProject, type Project } from "../lib/project.js";
+import { uncommitted } from "../lib/repo.js";
 import { log } from "../lib/log.js";
 
 export interface ValidateOutcome {
@@ -89,5 +90,18 @@ export async function run(args: string[], app: string): Promise<number> {
       : "gate pass recorded, but NOT yet promotable: the running-app checks must run on the " +
           "candidate — boot it with `agent-app <dir> dev`, then validate again",
   );
+  // walk-verify verifies a commit, so say so while there is still work to commit.
+  // Only advice: the pass is recorded, and nothing here may undo that.
+  try {
+    const pending = uncommitted(project.dir);
+    if (pending !== null && pending.length > 0) {
+      log.info(
+        `${pending.length} uncommitted change(s) — commit before verification, walk-verify verifies a commit: ` +
+          '`agent-app <dir> commit --message "<what and why>"`',
+      );
+    }
+  } catch {
+    /* no git to ask: the gate has already said so */
+  }
   return 0;
 }

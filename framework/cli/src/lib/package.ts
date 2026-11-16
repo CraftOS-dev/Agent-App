@@ -24,7 +24,7 @@ const CREDENTIAL_NAMES = new Set([".agent-token", ".superuser", ".principal", ".
 const SECRET_SUFFIX = ".secret";
 
 /** The only `.a2app/` files a package carries. Everything else there is runtime state (serve, dev, bridge, backups, …). */
-const CARRIED_FRAMEWORK_FILES = new Set(["toolkit.json", "system-hashes.json"]);
+export const CARRIED_FRAMEWORK_FILES = new Set(["toolkit.json", "system-hashes.json"]);
 
 export interface ExclusionRules {
   /** the toolkit's data directory, root-relative and `/`-separated (`lifecycle.dataDir`) */

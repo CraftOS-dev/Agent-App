@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- **Every app keeps its history in a git repository of its own** (Quality
+  Standard Q18). `scaffold`, `install` and `import` create it, with the app as
+  it arrived as the first commit. An app inside another repository is
+  versioned there, and no repository is nested in it.
+  `agent-app <dir> commit --message "<what and why>"` commits the app's
+  changes, so an agent without a shell can keep the history too. walk-verify
+  verifies that commit, and re-verifies from it. The gate fails an app that is
+  in no repository, and `validate` says when work is still uncommitted.
+- **`.a2app/` is ignored as a whole** except `toolkit.json` and
+  `system-hashes.json`. Before, the describe cache and some blueprints' dev
+  and gate-pass records were left out of the ignore rules. Once committed, a
+  `dev` or `validate` changed them, so the verified tree was never a clean
+  commit.
+
 ### Fixed
 
 - **Any signed-in person reached every task.** The task API checked only that
@@ -22,6 +38,11 @@
 pocketbase-react apps take it with `agent-app <dir> toolkit-sync`. A View that
 follows a task with the person's own session keeps working, since a person
 reaches the tasks they asked for.
+
+An app created before this release has no repository, so its next `validate`
+fails on version control. Run `agent-app <dir> commit --message "Start the
+history"` once: it creates the repository, writes the missing ignore rules,
+and commits the app as it stands.
 
 ## 0.2.0 — protocol 0.2
 

@@ -1,9 +1,10 @@
 /**
  * The validation gate and the security gate.
  *
- * Stack-agnostic core: framework files valid → build (manifest pipeline) →
- * toolkit-defined steps (migrations, footguns, ops resolution) → ownership canon
- * (validation-gate item AND the one v1-required security-gate check).
+ * Stack-agnostic core: framework files valid → ownership canon (validation-gate
+ * item AND the one v1-required security-gate check) → version control → build
+ * (manifest pipeline) → toolkit-defined steps (migrations, footguns, ops
+ * resolution).
  *
  * Every failure is machine-readable — `{ step, message }` — so an agent fixes it
  * without human interpretation.
@@ -16,6 +17,7 @@ import { DESCRIBE_BUDGET_CHARS } from "@a2app/rules";
 import { A2AppClient, fetchEntityIndex } from "@a2app/sdk";
 import { describeOverruns, walkDescribeBudget } from "./budget.js";
 import { clientFor, type Manifest, type Project } from "./project.js";
+import { gitAvailable, workTree } from "./repo.js";
 import { runShell } from "./shell.js";
 import { projectToolkit } from "./toolkit.js";
 import { log } from "./log.js";
@@ -97,6 +99,22 @@ export function runGate(projectDir: string, manifest: Manifest, opts: GateOption
       );
     }
   });
+
+  // The app keeps its history (Quality Standard Q18): every change committed,
+  // and the commit is what walk-verify verifies. Without git the history can
+  // be neither kept nor checked, which is said rather than passed over.
+  if (gitAvailable()) {
+    runStep(errors, "version control (the app is in a git repository)", () => {
+      if (workTree(projectDir) === null) {
+        throw new Error(
+          'not in a git repository — run `agent-app <dir> commit --message "<what and why>"`: it creates the ' +
+            "app's repository and commits the app as it stands",
+        );
+      }
+    });
+  } else {
+    log.warn("UNCHECKED: version control — git is not on PATH, so the app's history can be neither kept nor checked. Install git.");
+  }
 
   if (!opts.skipBuild) {
     runStep(errors, "build (manifest pipeline)", () => {

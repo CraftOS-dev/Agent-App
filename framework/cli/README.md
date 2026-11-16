@@ -44,8 +44,9 @@ Reserved protocol segments (never module names): `data`, `identity`, `whoami`, `
 
 | Command | Purpose |
 |---|---|
-| `agent-app <dir> scaffold [--blueprint <id>]` | Framework files + ownership canon, written deterministically |
+| `agent-app <dir> scaffold [--blueprint <id>]` | Framework files + ownership canon, written deterministically, and the app's git repository with the scaffold as its first commit |
 | `agent-app <dir> validate` | The validation gate + security gate |
+| `agent-app <dir> commit --message "<what and why>"` | Commit the app's changes to its own repository (created if missing) — the history walk-verify verifies, and re-verifies from |
 | `agent-app <dir> toolkit-sync` / `adapter-sync` | Re-vendor system files / deliver the adapter, re-record hashes |
 | `agent-app <dir> serve` / `stop` | Launch via the manifest pipeline as a health-polled background process, and stop it |
 | `agent-app <dir> dev` / `promote` / `backup` / `restore` | Safe-evolve: boot the candidate on a hidden port with a fresh migration-replayed DB → gate + verify → promote with a pre-promote backup |

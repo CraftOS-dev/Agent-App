@@ -7,14 +7,12 @@
 # lifecycle dataDir).
 data/
 
-# Framework runtime state: serve records, logs, the dev instance, the gate
-# pass, and backups.
-.a2app/serve.json
-.a2app/serve.log
-.a2app/dev.json
-.a2app/dev/
-.a2app/gate-pass.json
-.a2app/backups/
+# Framework runtime state: everything in .a2app/ (serve and dev records, logs,
+# the gate pass, caches, backups) except the toolkit record and the ownership
+# canon, which are part of the app.
+.a2app/*
+!.a2app/toolkit.json
+!.a2app/system-hashes.json
 
 # The sidecar runtime, and any dependencies the adopted app installs — the
 # pipeline recreates both.

@@ -23,6 +23,7 @@
 import { createConnection } from "node:net";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { checkpointSummary, type CheckpointSummary } from "./checkpoint.js";
 import { homePath, REGISTRY_FILE, writeFileAtomic } from "./home.js";
 import { readDevRecord } from "./instance.js";
 import { appPort } from "./net.js";
@@ -80,6 +81,12 @@ export interface AppView extends RegistryEntry {
    * each one, and a bridge someone started weeks ago is invisible.
    */
   bridge: { pid: number; harness: string; mode: string } | null;
+  /**
+   * The build checkpoint opened last (`agent-app <dir> checkpoint`), whatever
+   * its status. A harness's build panel polls this list anyway, so a pending
+   * checkpoint is found here without a call of its own.
+   */
+  checkpoint: CheckpointSummary | null;
 }
 
 export function registryPath(): string {
@@ -327,7 +334,7 @@ async function devView(dir: string, appId: string): Promise<AppView["dev"]> {
 export async function view(entry: RegistryEntry): Promise<AppView> {
   const dir = resolve(entry.path);
   if (!existsSync(join(dir, "manifest.json"))) {
-    return { ...entry, status: "missing", url: null, pid: null, dev: null, bridge: null };
+    return { ...entry, status: "missing", url: null, pid: null, dev: null, bridge: null, checkpoint: null };
   }
   const manifest = manifestOf(dir);
   // The port `serve` binds (see `appPort`), so `list` probes where the app is.
@@ -341,13 +348,14 @@ export async function view(entry: RegistryEntry): Promise<AppView> {
   };
   const dev = await devView(dir, fresh.id);
   const bridge = bridgeRecord(dir);
+  const checkpoint = checkpointSummary(dir);
   if (port === undefined || !(await portInUse(port))) {
-    return { ...fresh, status: "stopped", url: null, pid: null, dev, bridge };
+    return { ...fresh, status: "stopped", url: null, pid: null, dev, bridge, checkpoint };
   }
   // Something holds the port — is it this app, or a stranger?
   const servingId = await identify(port);
   if (servingId === null || servingId !== fresh.id) {
-    return { ...fresh, status: "unreachable", url: null, pid: null, dev, bridge };
+    return { ...fresh, status: "unreachable", url: null, pid: null, dev, bridge, checkpoint };
   }
   return {
     ...fresh,
@@ -356,6 +364,7 @@ export async function view(entry: RegistryEntry): Promise<AppView> {
     pid: serveRecord(dir)?.pid ?? null,
     dev,
     bridge,
+    checkpoint,
   };
 }
 

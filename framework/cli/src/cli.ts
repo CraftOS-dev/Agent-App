@@ -56,7 +56,7 @@ const COMMANDS: Record<string, CommandMeta> = {
     summary: "Scaffold a new Agent App on a blueprint (`agent-app blueprints` lists them): framework files + ownership canon",
     surface: "agent-app",
     scope: "app",
-    args: "--blueprint <id> [--name <name>] [--port <n>] [--auth-mode none|multi-user]",
+    args: "--blueprint <id> [--name <name>] [--port <n>] [--auth-mode none|multi-user] [--checkpoints ui|chat]",
   },
   import: {
     summary: "Install this folder in place through the install pipeline (untrusted): credentials, data and runtime state dropped, system files re-vendored from a local toolkit, fresh identity + port",
@@ -71,6 +71,16 @@ const COMMANDS: Record<string, CommandMeta> = {
     surface: "agent-app",
     scope: "app",
     args: '--message "<what changed and why>"',
+  },
+  checkpoint: {
+    summary:
+      "Stop a build for the person: ask the builder's questions, or open Part A of the requirements for review; then record their answer or approval (a harness's build panel shows it, or the builder relays it in chat)",
+    surface: "agent-app",
+    scope: "app",
+    args:
+      "ask (--file <questions.json> | --json '<questions>') | review | show | " +
+      'answer (--file <answers.json> | --json \'<answers>\' | --text "<reply>" | --changes "<request>" [--part-a <file>]) | ' +
+      "approve [--part-a <file>] [--by <where>] | cancel",
   },
   "toolkit-sync": { summary: "Re-vendor system files and re-record the ownership canon", surface: "agent-app", scope: "app" },
   "adapter-sync": { summary: "Deliver/update the A2App adapter (no rebuild)", surface: "agent-app", scope: "app" },

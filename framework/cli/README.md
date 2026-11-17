@@ -44,7 +44,8 @@ Reserved protocol segments (never module names): `data`, `identity`, `whoami`, `
 
 | Command | Purpose |
 |---|---|
-| `agent-app <dir> scaffold [--blueprint <id>]` | Framework files + ownership canon, written deterministically, and the app's git repository with the scaffold as its first commit |
+| `agent-app <dir> scaffold [--blueprint <id>] [--checkpoints ui]` | Framework files + ownership canon, written deterministically, and the app's git repository with the scaffold as its first commit. `--checkpoints ui` when a harness's build panel will show the build's checkpoints |
+| `agent-app <dir> checkpoint ask\|review\|show\|answer\|approve\|cancel` | Stop a build for the person: the builder's questions, then the review of Part A — shown in a harness's build panel or relayed in chat — see [Checkpoints](#checkpoints-the-person-in-a-build) |
 | `agent-app <dir> validate` | The validation gate + security gate |
 | `agent-app <dir> commit --message "<what and why>"` | Commit the app's changes to its own repository (created if missing) — the history walk-verify verifies, and re-verifies from |
 | `agent-app <dir> toolkit-sync` / `adapter-sync` | Re-vendor system files / deliver the adapter, re-record hashes |
@@ -172,6 +173,24 @@ A `gateway` route needs `health` as well as `start`: without it there is no way 
 - **The payload is data.** It is fenced with a per-delivery nonce (so a payload cannot close its own fence), labelled as data rather than instructions, capped with a pointer to `tasks get <id>` for the rest, and the harness is spawned with **no shell** and an argument array — a record titled `"; rm -rf ~` arrives as a title.
 - **Nothing starts on its own.** A bridge is per-app and explicitly started. `--dry-run` shows the exact prompts a run would produce and claims nothing.
 - **It is quiet enough to leave running.** A bridge writes to `.a2app/bridge.log`, which nothing rotates, so repetition is the enemy: a task filtered out by `--capability` is announced once rather than every poll, and an app that goes down is complained about once (with one line when it comes back) rather than every few seconds. `agent-app list` marks apps with a live bridge as `bridge:<harness>/<route>`, so "which of my apps can start agent runs?" is answerable without visiting each one.
+
+* * *
+
+## Checkpoints: the person in a build
+
+A creation stops for the person twice: once for the builder's clarifying questions, and once to approve **Part A** of `reference/requirements.md` before anything is built. Both are `agent-app <dir> checkpoint` (state in `.a2app/checkpoint.json`, never committed; [schema](https://github.com/CraftOS-dev/Agent-App/blob/main/spec/v0_2/schema/checkpoint.schema.json)).
+
+The builder opens one and ends its turn; the person's reply arrives as their next message:
+
+- `checkpoint ask --file <questions.json>` — `{"intro"?, "questions": [{"id"?, "question", "why"?, "options": […], "multiSelect"?}]}`, 1–10 questions. One batch, and at most one follow-up: a third is refused, and the builder decides the rest as assumptions.
+- `checkpoint review` — opens only on a complete Part A (its sections, no placeholders, features, Out of Scope), which is checked on its own, before Part B exists.
+
+Where the person sees it is the harness's, decided at scaffold: `--checkpoints ui` (or `AGENT_APP_CHECKPOINTS=ui`) means a build panel shows it.
+
+- **A build panel** finds an open checkpoint on the app's row in `agent-app list --json` (`checkpoint`), reads it with `checkpoint show` (the questions, or Part A as text), and records the person's reply: `checkpoint answer --file <answers.json>` (`{"answers": [{"id", "choices": […], "other"?}]}`), `checkpoint answer --changes "<request>"`, or `checkpoint approve --by <harness>`. Either may carry the person's own edit of Part A (`--part-a <file>`), which replaces Part A and never touches Part B. Each prints `message`: the text to post into the build's session as the person's message.
+- **Chat** — `ask` and `review` print `message`, which the builder sends; it records the reply itself (`answer --text`, `answer --changes`, or `approve --by chat` on an explicit yes).
+
+Approval is always written by `approve`: the dated line in `### Approval`, naming where it was given. Replies are idempotent — recording one twice changes nothing.
 
 * * *
 

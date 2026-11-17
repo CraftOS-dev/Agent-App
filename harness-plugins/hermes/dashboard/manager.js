@@ -32,6 +32,12 @@
  * becomes the app. Where the host's frame policy does not allow embedding the
  * app, the tab says what to change and links to the approval page instead.
  *
+ * A build from the form stops for the person twice, in the app's tab rather
+ * than in chat: the builder's questions (option chips and their own words),
+ * then Part A of the requirements to read, edit, ask changes to, or approve.
+ * Their reply goes to the agent as their next message in the app's session,
+ * and the build carries on.
+ *
  * An app runs on the Hermes machine's loopback interface, so it is embedded
  * only when the page itself is open over http on loopback; anywhere else the
  * frame would point at the viewer's own machine (or be blocked as mixed
@@ -65,7 +71,13 @@
     var status = e && typeof e.status === "number" ? e.status : legacy ? Number(legacy[1]) : 0;
     try {
       var j = JSON.parse(raw);
-      if (j && typeof j === "object" && (j.message || j.detail)) return { ok: false, message: j.message || j.detail, status: status };
+      if (j && typeof j === "object" && (j.message || j.detail)) {
+        var out = { ok: false, message: j.message || j.detail, status: status };
+        // A refused checkpoint reply also says why, and what is wrong with an edited Part A.
+        if (typeof j.reason === "string") out.reason = j.reason;
+        if (Array.isArray(j.problems)) out.problems = j.problems;
+        return out;
+      }
     } catch (_) { /* not JSON */ }
     return { ok: false, message: text, status: status };
   }
@@ -114,7 +126,12 @@
       job: null,
       // Connect: the address typed, and the sign-in in progress (a job on the server).
       conn: { url: "", data: null, error: null, code: "", confirming: false, starting: false },
+      // The build checkpoint the active tab shows: what it asks, and the person's reply so far.
+      cp: emptyCheckpoint(null),
     };
+    function emptyCheckpoint(id) {
+      return { id: id, data: null, error: null, answers: {}, editing: false, draft: null, changes: "", problems: [], sending: false, failed: "" };
+    }
     var timers = [];
     var disposers = [];
     function on(target, type, fn, opts) {
@@ -196,6 +213,7 @@
     /** An app that can be shown: a local one running here, a connected one answering. */
     function live(r) { return r.remote ? r.status === "online" : r.status === "running"; }
     function dotClass(r) {
+      if (waiting(r)) return "warn";
       if (r.building) return "busy";
       if (live(r)) return "ok";
       if (r.status === "unreachable" || r.status === "expired") return "warn";
@@ -320,7 +338,8 @@
     var viewKey = "";
     function renderView() {
       var r = activeRow();
-      var showFrame = !!(r && live(r) && r.url && embeddable(r));
+      var asking = !!(r && waiting(r));
+      var showFrame = !!(r && live(r) && r.url && embeddable(r)) && !asking;
       frames.forEach(function (f, path) {
         var row = S.rows.find(function (x) { return x.path === path; });
         if (!row || !live(row) || !embeddable(row)) { f.remove(); frames.delete(path); }
@@ -337,6 +356,14 @@
       var notice = S.notice && r && S.notice.path === r.path ? S.notice.text : "";
       var connecting = S.active !== null && S.active === connectKey();
       var isNew = !connecting && (S.active === "new" || !r);
+      // A checkpoint's key carries S.cp.id as well as the row's: the key is
+      // taken before checkpointPanel moves S.cp to a newly opened checkpoint,
+      // so without it a next checkpoint that arrives with no reply from this
+      // page (answered elsewhere, or a reply refused as moved past) would key
+      // the same as the last one once its data came, and stay on the spinner.
+      // It leaves out a refused reply's problems: the reply rebuilds the panel
+      // anyway (sending flips back), and the editor clears them in place, so
+      // the panel is never rebuilt under the person's typing.
       var key = showFrame
         ? "frame:" + r.path
         : connecting
@@ -345,13 +372,15 @@
           ? "apierror:" + S.apiError
           : isNew
             ? "new:" + S.newMode + (S.job ? ":job" : "") + (S.conn.starting ? ":starting" : "") + (S.conn.error && !S.conn.data ? ":err" : "")
-            : ["app", r.path, r.status, r.building, r.buildEnded, S.acting.has(r.path), S.side, notice, r.embedHint || ""].join("|");
+            : asking
+              ? ["checkpoint", r.path, r.checkpoint.id, S.cp.id, !!S.cp.data, !!S.cp.error, S.cp.editing, S.cp.sending].join("|")
+              : ["app", r.path, r.status, r.building, r.buildEnded, S.acting.has(r.path), S.side, notice, r.embedHint || ""].join("|");
       if (key === viewKey) return;
       viewKey = key;
       if (showFrame) return;
       panel.replaceChildren();
       connTab = null;
-      panel.classList.toggle("aa-top", isNew && !(S.apiError && !S.rows.length));
+      panel.classList.toggle("aa-top", (isNew || asking) && !(S.apiError && !S.rows.length));
       panel.classList.toggle("aa-fill", connecting);
       if (connecting) { panel.appendChild(connectTabView()); return; }
       if (S.apiError && !S.rows.length) { panel.appendChild(apiErrorPanel()); return; }
@@ -379,6 +408,7 @@
     }
     function appPanel(r, notice) {
       if (r.remote) return remotePanel(r, notice);
+      if (waiting(r)) return checkpointPanel(r);
       var c = el("div", "aa-card");
       var acting = S.acting.has(r.path);
       if (r.building) {
@@ -464,6 +494,213 @@
       row.appendChild(sess);
       c.appendChild(row);
       return c;
+    }
+
+    /* ── Build checkpoints ── */
+    // A build stops for the person twice: the builder's questions, then Part A of
+    // the requirements to read, edit and approve. Their reply goes to the agent
+    // as their next message in the app's session, and the build carries on.
+    function waiting(r) {
+      return !r.remote && !!r.checkpoint && r.checkpoint.status === "pending" && r.checkpoint.shown === "ui";
+    }
+    function checkpointPanel(r) {
+      var cp = r.checkpoint;
+      if (S.cp.id !== cp.id) {
+        S.cp = emptyCheckpoint(cp.id);
+        api("/checkpoint?app=" + encodeURIComponent(r.path)).then(function (out) {
+          if (S.cp.id !== cp.id) return;
+          if (!out.ok) {
+            S.cp.error = out.message || "Could not read this step.";
+          } else if (!out.checkpoint || out.checkpoint.id !== cp.id || out.checkpoint.status !== "pending") {
+            // The row was read before the build moved on: show where it is now.
+            S.cp = emptyCheckpoint(null);
+            refresh();
+            return;
+          } else {
+            S.cp.data = out;
+            if (out.partA != null) S.cp.draft = out.partA;
+          }
+          render();
+        });
+      }
+      var c = el("div", "aa-card wide aa-cp");
+      if (S.cp.error) { c.appendChild(errorBox(S.cp.error, function () { S.cp = emptyCheckpoint(null); render(); })); return c; }
+      if (!S.cp.data) { c.appendChild(el("div", "aa-spinner")); return c; }
+      return cp.kind === "questions" ? questionsView(r, c) : reviewView(r, c);
+    }
+    function questionsView(r, c) {
+      var data = S.cp.data.checkpoint;
+      var qs = data.questions || [];
+      c.appendChild(el("h2", null, data.round > 1 ? "A follow-up before the agent writes the requirements" : "A few questions before the agent writes the requirements"));
+      c.appendChild(el("p", "aa-sub", data.intro || "Answer what you can. Anything you leave blank, the agent decides."));
+      qs.forEach(function (q) {
+        var a = S.cp.answers[q.id] || (S.cp.answers[q.id] = { choices: [], other: "" });
+        var options = q.options || [];
+        var box = el("div", "aa-q");
+        box.appendChild(el("p", "aa-qtext", q.question));
+        if (q.why) box.appendChild(el("p", "aa-why", q.why));
+        if (options.length) {
+          var chips = el("div", "aa-chips");
+          var paint = function () {
+            Array.prototype.forEach.call(chips.children, function (b) { b.classList.toggle("on", a.choices.indexOf(b.dataset.v) >= 0); });
+          };
+          options.forEach(function (o) {
+            var b = el("button", "aa-chip", o);
+            b.type = "button";
+            b.dataset.v = o;
+            b.onclick = function () {
+              var on = a.choices.indexOf(o) >= 0;
+              a.choices = q.multiSelect ? (on ? a.choices.filter(function (x) { return x !== o; }) : a.choices.concat(o)) : (on ? [] : [o]);
+              paint();
+            };
+            chips.appendChild(b);
+          });
+          paint();
+          box.appendChild(chips);
+        }
+        var other = el("input", "aa-input");
+        other.placeholder = options.length ? "Or in your own words…" : "Your answer…";
+        other.value = a.other;
+        other.oninput = function () { a.other = other.value; };
+        box.appendChild(other);
+        c.appendChild(box);
+      });
+      if (S.cp.failed) c.appendChild(el("div", "aa-err", S.cp.failed));
+      var actions = el("div", "aa-cp-actions");
+      var go = el("button", "aa-btn primary", S.cp.sending ? "Sending…" : "Send answers");
+      go.disabled = S.cp.sending;
+      go.onclick = function () {
+        var answers = qs.map(function (q) {
+          var a = S.cp.answers[q.id];
+          return Object.assign({ id: q.id, choices: a.choices }, a.other.trim() ? { other: a.other.trim() } : {});
+        });
+        replyToCheckpoint(r, "/checkpoint/answer", { answers: answers });
+      };
+      actions.appendChild(go);
+      c.appendChild(actions);
+      return c;
+    }
+    function reviewView(r, c) {
+      var round = S.cp.data.checkpoint.round;
+      c.appendChild(el("h2", null, round > 1 ? "Review the revised requirements" : "Review the requirements"));
+      c.appendChild(el("p", "aa-sub", "This is what the agent will build. Edit it yourself, ask for changes, or approve it to start the build."));
+      var head = el("div", "aa-doc-head");
+      head.appendChild(el("span", null, S.cp.editing ? "Editing Part A" : "Part A — what the app must do"));
+      var toggle = el("button", "aa-btn small", S.cp.editing ? "Preview" : "Edit");
+      toggle.onclick = function () { S.cp.editing = !S.cp.editing; render(); };
+      head.appendChild(toggle);
+      c.appendChild(head);
+      if (S.cp.editing) {
+        var ta = el("textarea", "aa-input aa-mono");
+        ta.value = S.cp.draft || "";
+        ta.spellcheck = false;
+        ta.oninput = function () {
+          S.cp.draft = ta.value;
+          // What was wrong with the last attempt no longer describes the text.
+          if (S.cp.problems.length || S.cp.failed) {
+            S.cp.problems = [];
+            S.cp.failed = "";
+            Array.prototype.forEach.call(c.querySelectorAll(".aa-problems, .aa-err"), function (n) { n.remove(); });
+          }
+        };
+        c.appendChild(ta);
+      } else {
+        c.appendChild(markdown(forReader(S.cp.draft)));
+      }
+      if (S.cp.problems.length) c.appendChild(list(S.cp.problems, "aa-problems"));
+      c.appendChild(el("label", null, "What should change?"));
+      var changes = el("textarea", "aa-input aa-changes");
+      changes.placeholder = "Optional — tell the agent what to add, drop or do differently.";
+      changes.value = S.cp.changes;
+      c.appendChild(changes);
+      if (S.cp.failed) c.appendChild(el("div", "aa-err", S.cp.failed));
+      var actions = el("div", "aa-cp-actions");
+      function edited() { return S.cp.draft !== S.cp.data.partA ? { partA: S.cp.draft } : {}; }
+      var ask = el("button", "aa-btn", "Ask for changes");
+      ask.disabled = S.cp.sending || !S.cp.changes.trim();
+      ask.onclick = function () { replyToCheckpoint(r, "/checkpoint/answer", Object.assign({ changes: S.cp.changes.trim() }, edited())); };
+      changes.oninput = function () { S.cp.changes = changes.value; ask.disabled = S.cp.sending || !S.cp.changes.trim(); };
+      var ok = el("button", "aa-btn primary", S.cp.sending ? "Sending…" : "Approve and build");
+      ok.disabled = S.cp.sending;
+      ok.onclick = function () { replyToCheckpoint(r, "/checkpoint/approve", edited()); };
+      actions.append(ask, ok);
+      c.appendChild(actions);
+      return c;
+    }
+    function replyToCheckpoint(r, path, body) {
+      var cp = S.cp;
+      cp.sending = true;
+      cp.failed = "";
+      cp.problems = [];
+      render();
+      return api(path, Object.assign({ app: r.path, name: r.name, id: cp.id }, body)).then(function (out) {
+        if (S.cp !== cp) return;
+        cp.sending = false;
+        if (out.ok) {
+          // The build carries on; the tab shows it building until the next step.
+          r.checkpoint = Object.assign({}, r.checkpoint, { status: "answered" });
+          S.cp = emptyCheckpoint(null);
+          return refresh().then(function () { if (!S.side) toggleSide(true); });
+        }
+        cp.failed = out.message || "That did not go through.";
+        cp.problems = out.problems || [];
+        if (cp.problems.length) cp.editing = true;
+        render();
+        // Refused because the build moved on: show what is waiting now.
+        if (out.status === 409) return refresh();
+      });
+    }
+    /** Part A as the person reads it: without the template's marker line, or the Approval section that approving writes. */
+    function forReader(text) {
+      var approval = false;
+      return (text || "").split("\n").filter(function (line) {
+        if (/^PART A\b/.test(line)) return false;
+        if (/^#{1,6}\s/.test(line)) approval = /^#{1,6}\s+Approval\b/i.test(line);
+        return !approval;
+      }).join("\n");
+    }
+    /** Markdown to DOM, for the spec: headings, lists, paragraphs, bold and code. Text only, never innerHTML. */
+    function inlineMd(parent, text) {
+      var re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+      var last = 0;
+      var m;
+      while ((m = re.exec(text))) {
+        if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+        parent.appendChild(m[0].charAt(0) === "*" ? el("strong", null, m[0].slice(2, -2)) : el("code", null, m[0].slice(1, -1)));
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+    function markdown(src) {
+      var box = el("div", "aa-doc");
+      var ul = null;
+      var para = null;
+      src.split("\n").forEach(function (raw) {
+        var line = raw.replace(/\s+$/, "");
+        var m;
+        if (!line) { ul = null; para = null; return; }
+        if ((m = /^(#{1,4})\s+(.*)/.exec(line))) {
+          ul = null; para = null;
+          var h = el("h" + (m[1].length + 2));
+          inlineMd(h, m[2]);
+          box.appendChild(h);
+        } else if ((m = /^\s*([-*]|\d+\.)\s+(.*)/.exec(line))) {
+          para = null;
+          if (!ul) { ul = el(/\d/.test(m[1]) ? "ol" : "ul"); box.appendChild(ul); }
+          var li = el("li");
+          inlineMd(li, m[2]);
+          ul.appendChild(li);
+        } else if (ul && /^\s{2,}\S/.test(raw)) {
+          // A list item's continuation line.
+          ul.lastChild.appendChild(document.createTextNode(" "));
+          inlineMd(ul.lastChild, line.trim());
+        } else {
+          ul = null;
+          if (!para) { para = el("p"); box.appendChild(para); } else para.appendChild(document.createTextNode(" "));
+          inlineMd(para, line.trim());
+        }
+      });
+      return box;
     }
 
     /* ── New-app form ── */

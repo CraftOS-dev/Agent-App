@@ -1,6 +1,7 @@
 /**
  * The app registry as a manager reads it: `agent-app list --json`.
  */
+import { parseCheckpoint, type CheckpointSummary } from "./checkpoint.js";
 import { runA2App, type CliResult } from "./cli.js";
 
 /** One row of `agent-app list --json` — an app the user can evolve or operate. */
@@ -11,6 +12,8 @@ export interface KnownApp {
   port?: number;
   status?: string;
   url?: string | null;
+  /** the build checkpoint opened last, when its build opened any */
+  checkpoint?: CheckpointSummary | null;
 }
 
 /** Parse the `apps` array out of an `agent-app list --json` result. Tolerant: a
@@ -25,6 +28,7 @@ export function parseKnownApps(result: CliResult): KnownApp[] {
     const app: KnownApp = { id: a.id, name: typeof a.name === "string" ? a.name : a.id, path: a.path, url: typeof a.url === "string" ? a.url : null };
     if (typeof a.port === "number") app.port = a.port;
     if (typeof a.status === "string") app.status = a.status;
+    app.checkpoint = parseCheckpoint(a.checkpoint);
     return [app];
   });
 }

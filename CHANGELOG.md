@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.2.2 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.2. The protocol and the other
+packages are unchanged.
+
+### Added
+
+- **A build stops for the person twice, as checkpoints**: the builder's
+  clarifying questions, then the review of Part A of `reference/requirements.md`
+  before anything is built. `agent-app <dir> checkpoint ask` (one batch of
+  1–10 questions with options, and at most one follow-up batch) and
+  `checkpoint review` open one, and the builder ends its turn; the person's
+  reply arrives as their next message. `checkpoint show`, `answer` and
+  `approve` let a harness render it and record the reply, and `answer` and
+  `approve` print the text to post as the person's message. The state is
+  `.a2app/checkpoint.json` (runtime, never committed or exported; schema in
+  `spec/v0_2/schema/checkpoint.schema.json`), and `agent-app list --json`
+  carries the open checkpoint on each app's row.
+- **A harness with a build panel shows the checkpoints there.**
+  `scaffold --checkpoints ui` (or `AGENT_APP_CHECKPOINTS=ui`) records it; any
+  other build gets each checkpoint as a chat message the builder sends, and the
+  builder records the reply. The OpenClaw, Hermes and dsh managers show the
+  questions and the requirements (to read, edit, send back with changes, or
+  approve) in the app's tab, through the integration starter's new
+  `CheckpointApi`; their Build form tells the builder so.
+- **Part A is checked on its own.** `checkpoint review` opens only on a
+  complete Part A — its sections, no placeholders, at least one feature, no
+  duplicate Feature IDs, a bounded Out of Scope — so the person never reviews
+  a template. The person's own edit of Part A is checked the same way, and
+  never touches Part B.
+
+### Changed
+
+- **Approval is written by the framework.** `checkpoint approve` writes the
+  dated line in `### Approval`, naming where it was given; the creator skill no
+  longer has the builder write it. The gate's check is unchanged, so existing
+  apps keep passing.
+- **The creator skill writes Part B after Part A is approved**, and reads the
+  Quality Standard before Part B rather than before the questions, so the
+  questions and the review reach the person sooner. A blueprint's starter spec
+  (one that ships filled in, like the react-node to-do app) is never taken as
+  the person's: its Part A is replaced by theirs.
+
+### Upgrading an existing app
+
+Nothing to do. Checkpoints apply to new builds; an app already built keeps its
+approved spec.
+
 ## 0.2.1 — protocol 0.2
 
 `agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and

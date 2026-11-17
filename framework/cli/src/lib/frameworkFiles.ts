@@ -185,7 +185,7 @@ const AGENT_APP_SECTIONS = ["Plan", "Modules", "Entities", "Operations", "Conven
  *  Part B (Technical Specification — how it is built, with the Quality
  *  Conformance decision record). `## Changes` is the only section absent here:
  *  the first modification creates it. */
-const REQUIREMENTS_SECTIONS = [
+const PART_A_SECTIONS = [
   "Introduction",
   "Approval",
   "Product Description",
@@ -195,6 +195,9 @@ const REQUIREMENTS_SECTIONS = [
   "External Interfaces",
   "Out of Scope",
   "Quality of Life",
+];
+const REQUIREMENTS_SECTIONS = [
+  ...PART_A_SECTIONS,
   "System Overview",
   "UI Design",
   "Quality Conformance",
@@ -348,13 +351,102 @@ export function validateRequirementsDoc(projectDir: string): FrameworkFileProble
 export function requirementsFeatures(projectDir: string): string[] {
   const path = join(projectDir, "reference", "requirements.md");
   if (!existsSync(path)) return [];
-  const src = readFileSync(path, "utf8");
+  return featureItems(readFileSync(path, "utf8"));
+}
+
+function featureItems(src: string): string[] {
   const out: string[] = [];
   for (const line of sectionBody(src, "Features")) {
     const m = line.match(LIST_ITEM);
     if (m) out.push(m[1]!);
   }
   return out;
+}
+
+/** The spec's path inside an app, `/`-separated. */
+export const REQUIREMENTS_DOC = "reference/requirements.md";
+
+/**
+ * The spec split where Part B begins: the template's plain `PART B —` line,
+ * else the first Part B heading. Part A is everything before it — what the
+ * person reviews and approves before anything is built.
+ */
+export function splitRequirements(src: string): { partA: string; partB: string } {
+  const lines = src.replace(/\r\n/g, "\n").split("\n");
+  let at = lines.findIndex((l) => /^PART B\b/.test(l));
+  if (at < 0) at = lines.findIndex((l) => /^#{1,3}\s+System Overview/i.test(l));
+  if (at < 0) at = lines.length;
+  return { partA: lines.slice(0, at).join("\n"), partB: lines.slice(at).join("\n") };
+}
+
+/**
+ * Part A checked on its own, so it can be reviewed before Part B exists: its
+ * sections, no placeholders (the approval line excepted — writing it is what
+ * approval does), at least one feature, no duplicate Feature IDs, and a
+ * bounded Out of Scope. The gate re-checks all of it, with Part B.
+ */
+export function partAProblems(src: string): string[] {
+  const { partA } = splitRequirements(src);
+  const headings = partA
+    .split("\n")
+    .filter((l) => /^#{1,3}\s+/.test(l))
+    .map((l) => l.replace(/^#{1,3}\s+/, "").trim().toLowerCase());
+  const missing = PART_A_SECTIONS.filter((s) => !headings.some((h) => h.startsWith(s.toLowerCase())));
+  if (missing.length > 0) return missing.map((s) => `Part A is missing the section "${s}"`);
+
+  const markers = withApproval(partA, "").split("\n").filter((l) => TEMPLATE_MARKER.test(l)).length;
+  if (markers > 0) return [`${markers} template placeholder(s) <REPLACE: …> remain in Part A — write it in full before the review`];
+
+  const problems: string[] = [];
+  const features = featureItems(partA);
+  if (features.length === 0) problems.push('"## Features" has no items — each feature is one checkable statement');
+  const ids = features.flatMap((f) => f.match(/\bF-[A-Z0-9]+-\d+\b/g) ?? []);
+  const dupes = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  if (dupes.length > 0) problems.push(`duplicate Feature ID(s): ${dupes.join(", ")}`);
+  if (!sectionBody(partA, "Out of Scope").some((l) => LIST_ITEM.test(l))) {
+    problems.push('"## Out of Scope" has no items — list the exclusions, or "- None declared."');
+  }
+  return problems;
+}
+
+/** What a person reads to decide on Part A in chat: purpose, goals, the
+ *  features by module, and what is out. The rest is in the file. */
+export function partASummary(src: string): string {
+  const { partA } = splitRequirements(src);
+  const block = (section: string): string => sectionBody(partA, section).join("\n").trim();
+  // sectionBody drops subheadings, and the features read by module.
+  const features: string[] = [];
+  let inFeatures = false;
+  for (const line of partA.split("\n")) {
+    const h = line.match(/^(#{1,3})\s+(.*)/);
+    if (h) {
+      if (h[1]!.length <= 2) inFeatures = /^features/i.test(h[2]!.trim());
+      else if (inFeatures) features.push(`*${h[2]!.trim()}*`);
+      continue;
+    }
+    if (inFeatures && line.trim() !== "") features.push(line.trimEnd());
+  }
+  return [
+    block("Purpose") !== "" ? `**Purpose:** ${block("Purpose")}` : "",
+    block("Scope"),
+    ["**Features**", ...features].join("\n"),
+    block("Out of Scope") !== "" ? `**Out of scope**\n${block("Out of Scope")}` : "",
+  ].filter((part) => part !== "").join("\n\n");
+}
+
+/** The spec with its `### Approval` body replaced by `line`. */
+export function withApproval(src: string, line: string): string {
+  const lines = src.replace(/\r\n/g, "\n").split("\n");
+  const at = lines.findIndex((l) => /^#{1,3}\s+Approval\b/i.test(l));
+  if (at < 0) throw new Error('the spec has no "### Approval" section');
+  const level = lines[at]!.match(/^#+/)![0].length;
+  let end = at + 1;
+  while (end < lines.length) {
+    const h = lines[end]!.match(/^(#{1,3})\s+/);
+    if ((h && h[1]!.length <= level) || /^PART B\b/.test(lines[end]!)) break;
+    end += 1;
+  }
+  return [...lines.slice(0, at + 1), ...(line === "" ? [] : [line]), "", ...lines.slice(end)].join("\n");
 }
 
 /** The build ledger's path inside an app, `/`-separated. */

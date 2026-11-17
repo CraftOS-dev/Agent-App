@@ -6,7 +6,7 @@
     {
       "name": "creator",
       "activity": "creator",
-      "description": "Build a new Agent App from a requirements spec: scaffold, build feature by feature under the ownership boundary, gate, launch, walk-verify.",
+      "description": "Build a new Agent App: scaffold, ask the person what it must do and have Part A of the spec approved (checkpoints, in a build panel or in chat), then build feature by feature under the ownership boundary, gate, launch, walk-verify.",
       "path": "creator/SKILL.md"
     },
     {

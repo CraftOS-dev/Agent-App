@@ -25,6 +25,15 @@ The Marketplace and Import panels, over the same CLI the tools use:
                                     a source that is not a package, handed to the
                                     importer skill in a new app's session
 
+A build from the form stops for the person in its app's tab, twice: the
+builder's questions, then Part A of the requirements to edit and approve.
+The engine's `CheckpointApi` records the reply, which is then posted into the
+app's session as the person's message, and the build carries on:
+
+  GET  /checkpoint?app=<path>       what is waiting: the questions, or Part A as text
+  POST /checkpoint/answer  {app, name, id, answers | changes, partA?}
+  POST /checkpoint/approve {app, name, id, partA?}
+
 Each app has its own Hermes session, with a deterministic id. A turn is one
 `hermes --cli chat -Q --resume <id> --query-file -` subprocess run in the
 app's directory, the same way Hermes runs its own background workers (the
@@ -424,6 +433,7 @@ class Manager:
         self.seeded: set[str] = set()
         self.jobs = engine.InstallJobs()
         self.connects = engine.ConnectJobs()
+        self.checkpoints = engine.CheckpointApi("Hermes")
         # Whether this page may embed a connected app's origin: None when it may,
         # else what to change so it can. The dashboard frames anything; the
         # hermes-webui backend installs its own CSP's answer (webui_backend).
@@ -494,7 +504,7 @@ class Manager:
         if kick["kind"] == "error":
             return 400, {"ok": False, "message": kick["message"]}
         sid = session_id_for(directory)
-        entry = {"name": name, "dir": directory, "ended": False, "started": time.time()}
+        entry = {"name": name, "dir": directory, "ended": False, "started": time.time(), "turn": 0}
         # Checked and claimed in one step: two quick submits of one name must
         # not both start a build of the same directory.
         with self._lock:
@@ -513,19 +523,33 @@ class Manager:
                 self.seeded.discard(sid)
             raise
         prompt = f"{kick['prompt']}\n\nCreate the app at `{directory}`: pass that directory to every agent-app command."
+        self.runner.submit(sid, prompt, str(engine.apps_dir()), on_done=self._track(directory, name))
+        return 200, {"ok": True, "path": directory}
+
+    def _track(self, path: str, name: str) -> Callable[[bool], None]:
+        """Show a build as building until the turn about to be submitted ends,
+        and return that turn's `on_done`. A build stops at each checkpoint (its
+        turn ends there), so the person's reply arms it again, and an earlier
+        turn ending does not end it."""
+        with self._lock:
+            entry = self.builds.get(path)
+            if entry is None:
+                entry = self.builds[path] = {"name": name, "dir": path, "turn": 0}
+            entry["turn"] = turn = entry["turn"] + 1
+            entry.update({"ended": False, "started": time.time()})
 
         def done(_ok: bool) -> None:
             with self._lock:
-                entry["ended"] = True
+                if entry["turn"] == turn:
+                    entry["ended"] = True
 
-        self.runner.submit(sid, prompt, str(engine.apps_dir()), on_done=done)
-        return 200, {"ok": True, "path": directory}
+        return done
 
     def start_build(self, body: dict) -> tuple[int, dict]:
         kick = engine.build_kickoff_prompt({
             "action": "build", "name": body.get("name"), "requirement": body.get("requirement"),
             "blueprint": body.get("blueprint"), "port": body.get("port"),
-        })
+        }, checkpoints="ui")
         return self._start_agent_run(str(body.get("name") or ""), kick)
 
     def start_import(self, body: dict) -> tuple[int, dict]:
@@ -645,8 +669,27 @@ class Manager:
             return 400, {"ok": False, "message": "no app selected"}
         if not text:
             return 400, {"ok": False, "message": "empty message"}
-        sid = session_id_for(path)
         name = str(body.get("name") or os.path.basename(path))
+        with self._lock:
+            building = path in self.builds
+        # A reply to a build that stopped for the person carries it on.
+        self._deliver(path, name, text, self._track(path, name) if building else None)
+        return 200, {"ok": True}
+
+    def checkpoint_reply(self, step: str, body: dict) -> tuple[int, dict]:
+        """Record the person's reply to a build's checkpoint (`answer` or
+        `approve`), then post the CLI's text for it into the app's session as
+        their message, which carries the build on."""
+        status, payload = self.checkpoints.answer(body) if step == "answer" else self.checkpoints.approve(body)
+        if status == 200 and isinstance(payload.get("message"), str):
+            path = str(body.get("app"))
+            name = str(body.get("name") or os.path.basename(path))
+            self._deliver(path, name, payload["message"], self._track(path, name))
+        return status, payload
+
+    def _deliver(self, path: str, name: str, text: str, on_done: Callable[[bool], None] | None = None) -> None:
+        """Post the person's message into an app's session, which runs the agent on it."""
+        sid = session_id_for(path)
         with self._lock:
             seeded = sid in self.seeded
         if not seeded and not self.sessions.messages(sid):
@@ -655,8 +698,7 @@ class Manager:
         with self._lock:
             self.seeded.add(sid)
         # Before a build's scaffold step the app directory may not exist yet.
-        self.runner.submit(sid, text, path if os.path.isdir(path) else str(engine.apps_dir()))
-        return 200, {"ok": True}
+        self.runner.submit(sid, text, path if os.path.isdir(path) else str(engine.apps_dir()), on_done=on_done)
 
     def transcript(self, path: str) -> dict:
         sid = session_id_for(path)
@@ -770,6 +812,18 @@ def build_router(manager: Manager) -> APIRouter:
     def send(body: dict | None = Body(default=None)) -> Any:
         return _reply(*manager.send(body or {}))
 
+    @r.get("/checkpoint")
+    @_guarded
+    def checkpoint(app: str = "") -> Any:
+        return _reply(*manager.checkpoints.show(app))
+
+    @r.post("/checkpoint/{step}")
+    @_guarded
+    def checkpoint_reply(step: str, body: dict | None = Body(default=None)) -> Any:
+        if step not in ("answer", "approve"):
+            return _reply(404, {"ok": False, "message": "unknown endpoint"})
+        return _reply(*manager.checkpoint_reply(step, body or {}))
+
     @r.post("/app/{verb}")
     @_guarded
     def app_action(verb: str, body: dict | None = Body(default=None)) -> Any:
@@ -863,6 +917,8 @@ def dispatch(manager: Manager, method: str, path: str, query: str = "", body: An
             return manager.install_job((params.get("job") or [""])[0])
         if method == "GET" and path == "/connect":
             return manager.connect_job((params.get("job") or [""])[0])
+        if method == "GET" and path == "/checkpoint":
+            return manager.checkpoints.show((params.get("app") or [""])[0])
         if method == "POST" and path == "/connect":
             return manager.connect(body)
         if method == "POST" and path == "/connect/confirm":
@@ -879,6 +935,8 @@ def dispatch(manager: Manager, method: str, path: str, query: str = "", body: An
             return manager.start_build(body)
         if method == "POST" and path == "/session/send":
             return manager.send(body)
+        if method == "POST" and path in ("/checkpoint/answer", "/checkpoint/approve"):
+            return manager.checkpoint_reply(path[len("/checkpoint/"):], body)
         if method == "POST" and path.startswith("/app/"):
             verb = path[len("/app/"):]
             if verb == "disconnect":

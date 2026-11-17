@@ -395,8 +395,10 @@ someone leave the screen and come back.
    (`agent-app <dir> commit --message "<what and why>"`) — the commit is what
    the verifier verifies. From the second verification on, give the verifier
    the last report and the commit it verified: it re-verifies what changed
-   since, not the whole app. Record each verdict and its verified commit in
-   the ledger, and commit that too.
+   since and what that report did not reach, not the whole app. Never ask it
+   for a full walk or for more than that — its rules set the scope, and a
+   wider request only repeats checks that already passed. Record each verdict
+   and its verified commit in the ledger, and commit that too.
 5. **Promote and put it in front of the user.**
    `agent-app <dir> promote` requires the gate pass from step 1 (edited since
    validating? validate again first — except the ledger, `reference/tasks.md`,

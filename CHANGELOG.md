@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.3 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.3 with changed skills. The protocol
+and the other packages are unchanged.
+
+### Changed
+
+- **A walk that does not finish is never walked again.** Every walk-verify
+  report ends with `Not reached:` — `none`, or the checks in scope it did not
+  get to. A re-verify checks the last report's defects, what it did not
+  reach, and what changed since its commit; everything else that walk passed
+  stays passed. A walk that runs out of budget with nothing failing is
+  `incomplete`, and the next one re-verifies from it. Before, a walk cut
+  short left no record of what it had covered, so every round after it was a
+  full walk that again ran short.
+- **A re-verify's scope comes from its rules, not the request.** A builder's
+  request for a full walk or more coverage no longer widens it, and the
+  creator and modify skills tell the builder never to ask.
+- **A shared change re-checks what it can affect.** A design-token or style
+  change re-checks the quality items it sets (contrast, spacing, sizing,
+  states, motion) on the screens using it, and a data, API or migration
+  change the features that use it — not every check of every screen.
+
 ## 0.2.2 — protocol 0.2
 
 `agent-app-framework` is released at 0.2.2. The protocol and the other

@@ -119,8 +119,9 @@ and the first `commit` creates it.
 
 **Verify only what changed.** Commit the change before verifying, and give
 the verifier the app's last verification report and the commit it verified:
-it re-verifies what changed since, not the whole app. Record the verdict and
-its verified commit in the ledger, and commit that too.
+it re-verifies what changed since and what that report did not reach, not the
+whole app. Never ask it for a full walk or for more than that. Record the
+verdict and its verified commit in the ledger, and commit that too.
 
 **How the dev environment works — read this once, it removes all guesswork:**
 

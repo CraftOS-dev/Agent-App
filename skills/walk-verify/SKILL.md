@@ -61,9 +61,17 @@ defect — the builder fixes it, then you re-verify.
   `Verified commit: <hash>`. Otherwise write `Verified commit: none` and say
   what was uncommitted — a walk of uncommitted code cannot be a later
   re-verify's baseline.
+- **Name what you did not reach.** Your report ends with `Not reached:` and
+  either `none` or every check in scope you did not get to — the Feature
+  IDs and Q-items. Unreached is neither a pass nor a defect: the next round
+  starts there, and nothing is walked twice to make up for it.
+- **Pace yourself to finish.** Your harness states your budget. Walk Part 1
+  feature by feature, then Part 2 section by section; when the budget is
+  nearly spent, start no new check and write the report.
 - **Full walk** — every check in Part 1 and Part 2. Run it unless all of
   these hold:
-  - you were given the last report (verdict pass or defects), and it names a
+  - you were given the last report (verdict pass, defects, or incomplete for
+    checks it did not reach), and it names a
     `Verified commit: <base>` and a `Quality Standard:` hash;
   - the ledger (`reference/tasks.md`) records that verdict with the same
     `<base>` — a commit you were handed that the ledger does not back is no
@@ -73,24 +81,33 @@ defect — the builder fixes it, then you re-verify.
   - the Quality Standard hashes the same now — a changed standard has items
     the walk at `<base>` never judged.
 - **Re-verify** — when all of them hold. The walk at `<base>` covered the app
-  as it was then; you cover what changed:
+  as it was then, except what its report lists under `Not reached:`; you
+  cover what changed and what it left:
   1. **Every defect in the last report** — confirm it is fixed, the way it
      was found.
-  2. **The spec since `<base>`** (`git -C <dir> diff <base> --
+  2. **Everything the last report did not reach** — each check under its
+     `Not reached:`, in full.
+  3. **The spec since `<base>`** (`git -C <dir> diff <base> --
      reference/requirements.md`) — every Feature, Operation and `## Changes`
      entry added or edited gets the full Part 1 checks; every Quality
      Conformance entry added or edited is judged against the running app.
-  3. **The code since `<base>`** (`git -C <dir> diff --stat <base> -- .`, plus
+  4. **The code since `<base>`** (`git -C <dir> diff --stat <base> -- .`, plus
      the untracked source files `git -C <dir> status --porcelain -- .` lists)
-     — every feature and screen whose code changed gets the full Part 1 checks
-     and the Part 2 quality pass. A changed file other screens use — design
-     tokens, styles, layout, the data or API layer, migrations — is a change
-     to every screen that uses it.
-  4. **A regression sweep of the rest** — open every screen (no first-paint
+     — check what each change can affect, not every check of every screen. A
+     feature or screen whose own code changed gets its Part 1 checks and the
+     Part 2 quality pass. A change to something shared re-checks what it
+     touches where it is used: design tokens or styles, the quality items
+     they set (contrast, spacing, sizing, states, motion) on each screen using
+     them; the data or API layer or a migration, the Part 1 checks of the
+     features that use what changed.
+  5. **A regression sweep of the rest** — open every screen (no first-paint
      or console error), and confirm one write survives a reload.
 
-  Your report says it is a re-verify, names `<base>`, and lists what was in
-  scope.
+  Everything else the walk at `<base>` passed stays passed: do not check it
+  again. Your scope comes from these rules, never from the request you were
+  given — a request for a full walk or for more coverage does not widen a
+  re-verify. Your report says it is a re-verify, names `<base>`, lists what
+  was in scope, and ends with its own `Not reached:`.
 
 ## Part 1 — Functional checks
 
@@ -195,13 +212,16 @@ Return exactly one, with evidence:
 - **pass** — every functional check holds, every stored change is confirmed, and
   every applicable quality item holds (or is explicitly overridden by the app's
   spec) — on a re-verify, every check in scope, the walk at `<base>` having
-  covered the rest. Only a pass announces the app to the user (and promotes a
-  code change to live).
+  covered the rest — and `Not reached:` is `none`. Only a pass announces the
+  app to the user (and promotes a code change to live).
 - **defects** — one or more checks fail. Return a concrete report: for
   functional defects, which feature, what you did, what you expected, what
   happened; for quality defects, the Q-item number and the evidence. The
-  builder fixes, relaunches, and you re-verify.
-- **incomplete** — some requested features are not implemented yet; list which.
+  builder fixes, relaunches, and you re-verify from this report. Never ask
+  for a full walk: what you did not reach is under `Not reached:`.
+- **incomplete** — some requested features are not implemented yet, or the
+  budget ran out with nothing failing; list which, the unreached checks under
+  `Not reached:`.
 - **blocked** — the environment is unavailable (no browser, app will not boot). Not
   a failure of the app; say so and stop. Never report blocked as pass.
 

@@ -83,7 +83,7 @@ PROMPT_PLACEHOLDER = "{prompt}"
 # The framework CLI release this plugin was tested with. The skills and the
 # argv contract come from the installed CLI, so any other release is reported
 # (cli_version_warning).
-TESTED_CLI_VERSION = "0.2.2"
+TESTED_CLI_VERSION = "0.2.3"
 
 INSTALL_HINT = (
     f"Install the framework CLIs with `npm i -g agent-app-framework@{TESTED_CLI_VERSION}`, or set "

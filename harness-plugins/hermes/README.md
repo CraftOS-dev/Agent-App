@@ -65,7 +65,7 @@ A web UI started by a supervisor may not have your shell's `PATH`, so give the p
 
 ## Build and install
 
-Requires the framework CLIs on `PATH`, release 0.2.0, the one this plugin was tested with (`npm i -g agent-app-framework@0.2.0`; from a cloned repo, `pnpm -r build` then `npm link` in `framework/cli`). The skills and the tools' arguments come from that CLI, so with any other release the first tool call in a session says which one is installed, and the plugin logs it. The Hermes home is `$HERMES_HOME`, default `~/.hermes` (`%LOCALAPPDATA%\hermes` on native Windows).
+Requires the framework CLIs on `PATH`, release 0.2.2, the one this plugin was tested with (`npm i -g agent-app-framework@0.2.2`; from a cloned repo, `pnpm -r build` then `npm link` in `framework/cli`). The skills and the tools' arguments come from that CLI, so with any other release the first tool call in a session says which one is installed, and the plugin logs it. The Hermes home is `$HERMES_HOME`, default `~/.hermes` (`%LOCALAPPDATA%\hermes` on native Windows).
 
 From the Hermes plugin catalog:
 

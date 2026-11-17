@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.4 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.4 with a changed walk-verify skill.
+The protocol and the other packages are unchanged.
+
+### Changed
+
+- **A walk finishes every check in scope before it reports.** Finding a
+  defect no longer ends a walk early: every defect goes in one report, so the
+  builder fixes them all before the next round. Before, a walk could stop
+  with most of its budget left and defer the costly checks (measured
+  contrast, other widths, the engineering items), so each round found a few
+  more defects and a build ran round after round.
+- **`Not reached:` lists only what the budget ran out before.** A check
+  skipped with budget left, or one an earlier round passed, never goes there.
+
 ## 0.2.3 — protocol 0.2
 
 `agent-app-framework` is released at 0.2.3 with changed skills. The protocol

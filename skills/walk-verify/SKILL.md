@@ -61,13 +61,18 @@ defect — the builder fixes it, then you re-verify.
   `Verified commit: <hash>`. Otherwise write `Verified commit: none` and say
   what was uncommitted — a walk of uncommitted code cannot be a later
   re-verify's baseline.
+- **Finish every check in scope.** Your harness states your budget. Walk
+  Part 1 feature by feature, then Part 2 section by section, and report when
+  every check in scope is done. A defect is no reason to stop: every defect
+  goes in this one report, so the builder fixes them all before the next
+  round. Only when the budget is nearly spent do you start no new check and
+  write the report.
 - **Name what you did not reach.** Your report ends with `Not reached:` and
-  either `none` or every check in scope you did not get to — the Feature
-  IDs and Q-items. Unreached is neither a pass nor a defect: the next round
-  starts there, and nothing is walked twice to make up for it.
-- **Pace yourself to finish.** Your harness states your budget. Walk Part 1
-  feature by feature, then Part 2 section by section; when the budget is
-  nearly spent, start no new check and write the report.
+  either `none` or the checks in this round's scope the budget ran out
+  before — the Feature IDs and Q-items. A check you skipped with budget
+  left, or one an earlier round passed, never goes there. Unreached is
+  neither a pass nor a defect: the next round starts there, and nothing is
+  walked twice to make up for it.
 - **Full walk** — every check in Part 1 and Part 2. Run it unless all of
   these hold:
   - you were given the last report (verdict pass, defects, or incomplete for

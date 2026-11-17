@@ -1,6 +1,6 @@
 {
   "name": "agent-app-framework",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "The Agent App Framework CLI — `agent-app` builds and evolves Agent Apps; `a2app` operates them over the A2App protocol",
   "license": "MIT",
   "repository": {

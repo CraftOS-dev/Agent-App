@@ -44,7 +44,7 @@ const BIN = %(bin)s;
 const argv = process.argv.slice(2);
 // `secret` is what a provider key in the host's environment would reach.
 if (process.env.AGENT_APP_FAKE_CALLS) fs.appendFileSync(process.env.AGENT_APP_FAKE_CALLS, JSON.stringify({ bin: BIN, argv, cwd: process.cwd(), secret: process.env.OPENAI_API_KEY ?? null }) + "\\n");
-if (argv[0] === "--version") { console.log(JSON.stringify({ [BIN]: process.env.AGENT_APP_FAKE_VERSION || "0.2.3", protocol: "0.1" })); process.exit(0); }
+if (argv[0] === "--version") { console.log(JSON.stringify({ [BIN]: process.env.AGENT_APP_FAKE_VERSION || "0.2.4", protocol: "0.1" })); process.exit(0); }
 const flag = (name) => { const at = argv.indexOf("--" + name); return at < 0 ? undefined : argv[at + 1]; };
 const STEPS = ["acquire", "inspect", "sanitize", "revendor", "customize", "place", "register", "dependencies", "gate", "serve", "open"];
 // install: one step line per step ($AGENT_APP_FAKE_STEP_MS apart) with --events, then the

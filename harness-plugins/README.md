@@ -124,7 +124,7 @@ exactly that. What the plugins here register:
 
 | Plugin | Profile | Route |
 |---|---|---|
-| [claude-code/](claude-code/) | none: the framework's built-in `claude` | `claude --allowedTools "Bash(a2app:*)" --disallowedTools Edit Write NotebookEdit -p {prompt}`. Registering one under the same id would replace the built-in for good |
+| [claude-code/](claude-code/) | none: the framework's built-in `claude` | `claude --allowedTools "Bash(a2app:*)" -p {prompt}`. Registering one under the same id would replace the built-in for good |
 | [openclaw/](openclaw/) | `openclaw` | `openclaw agent exec {prompt}`: one embedded turn in the app's directory, alongside a running gateway |
 | [dsh/](dsh/) | `dsh` | `dsh --profile headless {prompt}` |
 | [hermes/](hermes/) | `hermes` | `hermes --cli chat -Q --query-file -`, the prompt on stdin: one single-query turn in the app's directory |

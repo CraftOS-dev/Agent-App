@@ -1,20 +1,10 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- **The built-in Claude Code route no longer denies file edits.** A task the
-  bridge hands to `claude` ran with `--disallowedTools Edit Write NotebookEdit`.
-  The route now only grants the `a2app` CLI the prompt names (print mode cannot
-  ask for it); every other tool follows the user's own Claude Code permissions,
-  as with every other harness. A `claude` profile in `harnesses.json` still
-  replaces the built-in.
-
 ## 0.2.4 — protocol 0.2
 
-`agent-app-framework` is released at 0.2.4 with a changed walk-verify skill.
-The protocol and the other packages are unchanged.
+`agent-app-framework` is released at 0.2.4 with a changed walk-verify skill
+and a changed built-in Claude Code route. The protocol and the other packages
+are unchanged.
 
 ### Changed
 
@@ -26,6 +16,12 @@ The protocol and the other packages are unchanged.
   more defects and a build ran round after round.
 - **`Not reached:` lists only what the budget ran out before.** A check
   skipped with budget left, or one an earlier round passed, never goes there.
+- **The built-in Claude Code route no longer denies file edits.** A task the
+  bridge hands to `claude` ran with `--disallowedTools Edit Write NotebookEdit`.
+  The route now only grants the `a2app` CLI the prompt names (print mode cannot
+  ask for it); every other tool follows the user's own Claude Code permissions,
+  as with every other harness. A `claude` profile in `harnesses.json` still
+  replaces the built-in.
 
 ## 0.2.3 — protocol 0.2
 

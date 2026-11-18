@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.5 with the changes listed under
+0.2.4 and nothing else. The 0.2.4 package was published with its `@a2app/sdk`
+and `@a2app/rules` dependencies left as `workspace:*`, so npm could not
+install it; it is deprecated. 0.2.5 depends on both at 0.2.1, as 0.2.3 did.
+
 ## 0.2.4 — protocol 0.2
 
 `agent-app-framework` is released at 0.2.4 with a changed walk-verify skill

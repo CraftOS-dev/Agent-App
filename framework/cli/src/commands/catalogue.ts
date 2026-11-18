@@ -9,11 +9,11 @@
  * Each app is marked `compatible` from what its entry lists, without
  * downloading it: true when every listed requirement is met here, false with
  * the `reason` when one is not, null when the entry lists none. `--search`
- * keeps the apps whose id, name, description or tags contain every word.
+ * keeps the apps whose id, name, description, publisher or tags contain every word.
  */
 import { parseFlags } from "../lib/args.js";
 import { log } from "../lib/log.js";
-import { compatibility, loadCatalogue, matchesSearch, previewOf } from "../lib/marketplace.js";
+import { cataloguePublishers, compatibility, loadCatalogue, matchesSearch, previewOf } from "../lib/marketplace.js";
 import { UsageError } from "../lib/project.js";
 
 export async function run(args: string[]): Promise<number> {
@@ -28,7 +28,8 @@ export async function run(args: string[]): Promise<number> {
   for (const warning of loaded.warnings) log.warn(warning);
 
   const words = (flags.values.get("search") ?? "").split(/\s+/).filter((w) => w !== "");
-  const apps = loaded.catalogue.apps
+  const entries = await cataloguePublishers(loaded.catalogue.apps);
+  const apps = entries
     .filter((entry) => matchesSearch(entry, words))
     .map((entry) => {
       const preview = previewOf(entry, loaded.marketplace);

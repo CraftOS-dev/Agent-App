@@ -25,6 +25,8 @@
         "version": { "type": "string" },
         "sha256": { "type": "string" },
         "commit": { "type": "string" },
+        "repository": { "type": "string" },
+        "path": { "type": "string" },
         "name": { "type": "string" }
       }
     },

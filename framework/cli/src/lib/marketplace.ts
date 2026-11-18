@@ -2,10 +2,9 @@
  * The marketplace (framework packaging §2): where the catalogue comes from,
  * what an entry may say, and whether this machine can run what it lists.
  *
- * A marketplace is a GitHub repository holding `catalogue.json` and one folder
- * per app — or, for offline use and tests, a local directory laid out the same
- * way. The catalogue is read from the raw file; an app is taken out of the
- * branch archive (see sources.ts), so both always come from the same ref.
+ * A marketplace holds `catalogue.json`. Each entry names either a folder in
+ * that marketplace or an external GitHub repository at an approved commit.
+ * Local marketplace directories remain supported for offline use and tests.
  */
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -45,12 +44,12 @@ export function marketplaceLocation(m: Marketplace): string {
 /**
  * Where GitHub is.
  *
- * TEST ONLY: `A2APP_TEST_GITHUB_BASE` serves both the raw files and the branch
- * archives from one origin, with GitHub's own paths below it — so the test
+ * TEST ONLY: `A2APP_TEST_GITHUB_BASE` serves raw files, archives, and public
+ * profiles from one origin, with GitHub's own paths below it — so the test
  * suite can stand up a fake GitHub with no network. It must be a loopback
  * http:// origin: it can never point an install at another real host.
  */
-function githubBases(): { raw: string; web: string } {
+function githubBases(): { raw: string; web: string; api: string } {
   const test = process.env["A2APP_TEST_GITHUB_BASE"];
   if (test !== undefined && test !== "") {
     let url: URL;
@@ -63,9 +62,9 @@ function githubBases(): { raw: string; web: string } {
       throw new UsageError("A2APP_TEST_GITHUB_BASE is for tests only and must be a loopback http:// origin");
     }
     const base = test.replace(/\/+$/, "");
-    return { raw: base, web: base };
+    return { raw: base, web: base, api: base };
   }
-  return { raw: "https://raw.githubusercontent.com", web: "https://github.com" };
+  return { raw: "https://raw.githubusercontent.com", web: "https://github.com", api: "https://api.github.com" };
 }
 
 const encodePath = (path: string): string => path.split("/").map(encodeURIComponent).join("/");
@@ -78,6 +77,12 @@ export function rawUrl(repo: GithubRepo, path: string): string {
 /** The branch archive (§2). */
 export function archiveUrl(repo: GithubRepo): string {
   return `${githubBases().web}/${encodePath(repo.owner)}/${encodePath(repo.repo)}/archive/refs/heads/${encodePath(repo.ref)}.zip`;
+}
+
+/** An approved external revision: never a branch archive or a default ref. */
+export function commitArchiveUrl(source: CatalogueGithubSource): string {
+  const repo = catalogueRepository(source);
+  return `${githubBases().web}/${encodePath(repo.owner)}/${encodePath(repo.repo)}/archive/${repo.ref}.zip`;
 }
 
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
@@ -182,12 +187,54 @@ export interface CustomField {
   placeholder?: string;
 }
 
+export interface CatalogueGithubSource {
+  type: "github";
+  url: string;
+  commit: string;
+  path?: string;
+  /** Maintainer information only; never used to download an app. */
+  branch?: string;
+}
+
+/** Parse only the fields needed to select an approved repository snapshot. */
+function catalogueSource(value: unknown): CatalogueGithubSource {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new UsageError("source must be an object");
+  const source = value as Record<string, unknown>;
+  if (source.type !== "github") throw new UsageError('source.type must be "github"');
+  if (typeof source.url !== "string") throw new UsageError("source.url must be a GitHub repository URL");
+  let url: URL;
+  try { url = new URL(source.url); } catch { throw new UsageError("source.url must be a GitHub repository URL"); }
+  const parts = url.pathname.replace(/\/$/, "").slice(1).split("/");
+  const owner = parts[0] ?? "";
+  const repo = (parts[1] ?? "").replace(/\.git$/, "");
+  if (url.protocol !== "https:" || !["github.com", "www.github.com"].includes(url.hostname)
+      || url.port || url.username || url.password || url.search || url.hash
+      || parts.length !== 2 || !OWNER.test(owner) || !REPO.test(repo) || repo === "." || repo === "..") {
+    throw new UsageError("source.url must name an https://github.com/<owner>/<repo> repository");
+  }
+  if (typeof source.commit !== "string" || !/^[0-9a-fA-F]{40}$/.test(source.commit)) {
+    throw new UsageError("source.commit must be a full 40-character commit SHA (not a branch or tag)");
+  }
+  const path = source.path === undefined ? "." : source.path;
+  if (typeof path !== "string" || (path !== "." && !validRepoPath(path.replace(/\/+$/, "").split("/")))) {
+    throw new UsageError('source.path must be "." or a path inside the repository');
+  }
+  if (source.branch !== undefined && typeof source.branch !== "string") throw new UsageError("source.branch must be a string");
+  return { ...source, type: "github", url: `https://github.com/${owner}/${repo}`, commit: source.commit.toLowerCase(), path: path.replace(/\/+$/, "") };
+}
+
+export function catalogueRepository(source: CatalogueGithubSource): GithubRepo {
+  const [owner, repo] = new URL(source.url).pathname.slice(1).split("/");
+  return { owner: owner!, repo: repo!, ref: source.commit };
+}
+
 /** One app a catalogue lists (schema `catalogue.schema.json`). Unknown keys are carried through untouched. */
-export interface CatalogueEntry {
+interface CatalogueMetadata {
   id: string;
   name: string;
-  folder: string;
   description?: string;
+  /** Resolved for catalogue output; a listed publisher never overrides the source owner. */
+  publisher?: string;
   tags?: string[];
   version?: string;
   preview?: string;
@@ -197,6 +244,11 @@ export interface CatalogueEntry {
   toolkit?: string;
   [key: string]: unknown;
 }
+
+export type CatalogueEntry = CatalogueMetadata & (
+  | { folder: string; source?: never }
+  | { folder?: never; source: CatalogueGithubSource }
+);
 
 export interface Catalogue {
   version?: string;
@@ -211,7 +263,10 @@ function entryProblem(e: Record<string, unknown>): string | null {
   if (typeof e["id"] !== "string" || e["id"] === "") return "has no id";
   if (typeof e["name"] !== "string") return "has no name";
   const folder = e["folder"];
-  if (typeof folder !== "string" || folder === "" || folder.startsWith("/") || !validRepoPath(folder.replace(/\/+$/, "").split("/"))) {
+  if (e["source"] !== undefined) {
+    if (folder !== undefined) return "must name either folder or source, not both";
+    try { catalogueSource(e["source"]); } catch (err) { return (err as Error).message; }
+  } else if (typeof folder !== "string" || folder === "" || folder.startsWith("/") || !validRepoPath(folder.replace(/\/+$/, "").split("/"))) {
     return "has no usable folder (a path inside the repository)";
   }
   for (const k of ["description", "version", "preview", "toolkit"]) if (!optionalString(k)) return `has a ${k} that is not a string`;
@@ -266,7 +321,9 @@ export function validateCatalogue(raw: unknown): { catalogue: Catalogue; warning
       return;
     }
     ids.add(id);
-    apps.push({ ...(entry as CatalogueEntry), folder: (entry["folder"] as string).replace(/\/+$/, "") });
+    apps.push(entry["source"] !== undefined
+      ? { ...(entry as CatalogueMetadata), source: catalogueSource(entry["source"]) }
+      : { ...(entry as CatalogueMetadata), folder: (entry["folder"] as string).replace(/\/+$/, "") });
   });
   return { catalogue: { ...(typeof source.version === "string" ? { version: source.version } : {}), apps }, warnings };
 }
@@ -316,9 +373,45 @@ export async function loadCatalogue(explicit?: string): Promise<LoadedCatalogue>
   throw new Error("no marketplace to read");
 }
 
+/**
+ * Display metadata only: external apps use the source owner's public GitHub
+ * profile name; apps held in the marketplace use CraftOS. Resolve once per
+ * owner per listing, before search, and never as part of inspect/install.
+ * A missing name or unavailable API falls back to the URL's owner username.
+ */
+export async function cataloguePublishers(entries: CatalogueEntry[]): Promise<CatalogueEntry[]> {
+  const owners = new Map<string, Promise<string | undefined>>();
+  const profileName = async (owner: string): Promise<string | undefined> => {
+    try {
+      const bytes = await downloadBytes(`${githubBases().api}/users/${encodeURIComponent(owner)}`, {
+        maxBytes: 64 * 1024,
+        timeoutMs: 2_000,
+      });
+      const profile: unknown = JSON.parse(bytes.toString("utf8"));
+      const name = (profile as { name?: unknown } | null)?.name;
+      return typeof name === "string" && name.trim() !== "" ? name.trim() : undefined;
+    } catch {
+      // Attribution must not prevent browsing or installing approved apps.
+      return undefined;
+    }
+  };
+  return Promise.all(entries.map(async (entry) => {
+    if (entry.source === undefined) return { ...entry, publisher: "CraftOS" };
+    const { owner } = catalogueRepository(entry.source);
+    const key = owner.toLowerCase();
+    if (!owners.has(key)) owners.set(key, profileName(owner));
+    return { ...entry, publisher: (await owners.get(key)) ?? owner };
+  }));
+}
+
 /** An entry's preview image: as listed, else `<folder>/thumbnail.png` on the same ref (§2). */
 export function previewOf(entry: CatalogueEntry, m: Marketplace): string | undefined {
   if (entry.preview !== undefined) return entry.preview;
+  if (entry.source !== undefined) {
+    const folder = entry.source.path ?? ".";
+    const path = folder === "." ? "" : `${folder}/`;
+    return rawUrl(catalogueRepository(entry.source), `${path}thumbnail.png`);
+  }
   if (m.kind === "github") return rawUrl(m, `${entry.folder}/thumbnail.png`);
   const file = join(m.dir, ...entry.folder.split("/"), "thumbnail.png");
   return existsSync(file) && statSync(file).isFile() ? pathToFileURL(file).href : undefined;
@@ -363,8 +456,8 @@ export function compatibility(entry: CatalogueEntry): { compatible: boolean | nu
   return unmet.length > 0 ? { compatible: false, reason: unmet.join("; ") } : { compatible: true };
 }
 
-/** Whether every word occurs, case-insensitively, in the entry's id, name, description or tags. */
+/** Whether every word occurs, case-insensitively, in the entry's id, name, description, publisher or tags. */
 export function matchesSearch(entry: CatalogueEntry, words: string[]): boolean {
-  const text = [entry.id, entry.name, entry.description ?? "", ...(entry.tags ?? [])].join("\n").toLowerCase();
+  const text = [entry.id, entry.name, entry.description ?? "", entry.publisher ?? "", ...(entry.tags ?? [])].join("\n").toLowerCase();
   return words.every((w) => text.includes(w.toLowerCase()));
 }

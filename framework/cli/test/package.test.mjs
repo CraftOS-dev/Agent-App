@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { isIgnored, parseIgnore } from "../dist/lib/ignore.js";
 import { classify, exclusionRules, findPlaceholders, slugify, strippable, substitutePlaceholders } from "../dist/lib/package.js";
-import { compatibility, matchesSearch, parseGithubShorthand, validateCatalogue } from "../dist/lib/marketplace.js";
+import { cataloguePublishers, compatibility, matchesSearch, parseGithubShorthand, validateCatalogue } from "../dist/lib/marketplace.js";
 import { parseFrom } from "../dist/lib/sources.js";
 import { downloadBytes, downloadToFile, USER_AGENT } from "../dist/lib/download.js";
 import { PackageRefusedError, SourceNotFoundError, SourceUnreachableError } from "../dist/lib/packageErrors.js";
@@ -269,6 +269,82 @@ test("app folder names", () => {
 });
 
 /* --------------------------------------------------------------- catalogue */
+
+test("external catalogue entries require an exact commit and preserve folder entries", () => {
+  const source = { type: "github", url: "https://www.github.com/author/studio.git/", commit: "ABCDEF0123".repeat(4) };
+  const bad = [
+    null, [], {}, { ...source, type: "git" },
+    ...[undefined, "main", "v1.0.0", "abcdef0", "g".repeat(40), 123].map(commit => ({ ...source, commit })),
+    ...["http://github.com/a/b", "https://example.com/a/b", "https://github.com/a/b/tree/main", "https://github.com/a/b#main"].map(url => ({ ...source, url })),
+    ...[null, "", "../app", "/app", "apps/../app", "apps\\app", "apps//app"].map(path => ({ ...source, path })),
+  ];
+  const { catalogue, warnings } = validateCatalogue({ apps: [
+    { id: "old", name: "Old", folder: "old/" },
+    { id: "external", name: "External", source },
+    { id: "nested", name: "Nested", source: { ...source, path: "apps/studio/", branch: "main" } },
+    ...bad.map((source, i) => ({ id: `bad-${i}`, name: "Bad", source })),
+    { id: "ambiguous", name: "Ambiguous", folder: "old", source },
+  ] });
+  assert.deepEqual(catalogue.apps.map(a => a.id), ["old", "external", "nested"]);
+  assert.equal(catalogue.apps[0].folder, "old");
+  assert.deepEqual(catalogue.apps[1].source, { type: "github", url: "https://github.com/author/studio", commit: source.commit.toLowerCase(), path: "." });
+  assert.equal(catalogue.apps[2].source.path, "apps/studio");
+  assert.equal(catalogue.apps[2].source.branch, "main");
+  assert.equal(warnings.length, bad.length + 1);
+});
+
+test("publishers come from GitHub profiles, with CraftOS for folder apps and username fallback", async () => {
+  const requests = [];
+  const profiles = {
+    author: { name: "  はる  ", type: "User" },
+    organization: { name: "Example Organization", type: "Organization" },
+    blank: { name: "  " },
+    unnamed: { name: null },
+    malformed: { name: 42 },
+  };
+  const server = createServer((req, res) => {
+    requests.push(req.url);
+    assert.equal(req.headers.authorization, undefined, "public names need no credentials");
+    const owner = req.url.split("/").at(-1).toLowerCase();
+    if (owner === "slow") return; // The listing must still finish when GitHub stalls.
+    if (owner === "limited") {
+      res.writeHead(403);
+      return res.end();
+    }
+    if (owner === "invalid-json") return res.end("not JSON");
+    if (!profiles[owner]) {
+      res.writeHead(404);
+      return res.end();
+    }
+    res.end(JSON.stringify(profiles[owner]));
+  });
+  await new Promise(r => server.listen(0, "127.0.0.1", r));
+  const previous = process.env.A2APP_TEST_GITHUB_BASE;
+  process.env.A2APP_TEST_GITHUB_BASE = `http://127.0.0.1:${server.address().port}`;
+  const entries = [
+    { id: "local", name: "Local", folder: "local", publisher: "Wrong publisher" },
+    ...["author", "AUTHOR", "organization", "blank", "unnamed", "malformed", "missing", "limited", "invalid-json", "slow"].map(owner => ({
+      id: owner, name: "External", publisher: "Wrong publisher",
+      source: { type: "github", url: `https://github.com/${owner}/app`, commit: "a".repeat(40), branch: "main" },
+    })),
+  ];
+  try {
+    const before = structuredClone(entries);
+    const listed = await cataloguePublishers(entries);
+    assert.deepEqual(listed.map(e => e.publisher), ["CraftOS", "はる", "はる", "Example Organization", "blank", "unnamed", "malformed", "missing", "limited", "invalid-json", "slow"]);
+    assert.equal(requests.filter(url => url.toLowerCase() === "/users/author").length, 1, "one lookup per owner, including case variants");
+    assert.equal(requests.length, 9, "folder apps never request a profile");
+    assert.deepEqual(entries, before, "display enrichment never mutates the approved source");
+    assert.deepEqual(listed.map(e => e.source), entries.map(e => e.source));
+    assert.deepEqual(listed.filter(e => matchesSearch(e, ["はる"])).map(e => e.id), ["author", "AUTHOR"]);
+    assert.deepEqual(listed.filter(e => matchesSearch(e, ["craftos"])).map(e => e.id), ["local"]);
+  } finally {
+    if (previous === undefined) delete process.env.A2APP_TEST_GITHUB_BASE;
+    else process.env.A2APP_TEST_GITHUB_BASE = previous;
+    server.closeAllConnections();
+    await new Promise(r => server.close(r));
+  }
+});
 
 test("a catalogue is validated per entry; a bad entry is dropped, not the catalogue", () => {
   const { catalogue, warnings } = validateCatalogue({

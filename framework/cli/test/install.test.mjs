@@ -227,9 +227,34 @@ cpSync(pkgTree, join(market, "unsafe-title"), { recursive: true });
 put(market, "unsafe-title/src/title.js", "export const title = '{{APP_TITLE}}';\n");
 
 // Fake GitHub: what each owner/repo@ref serves.
+const approvedCommit = "a".repeat(40);
+const nextCommit = "b".repeat(40);
+const externalEntry = {
+  id: "external-studio", name: "External Studio", version: "1.0.0",
+  source: { type: "github", url: "https://github.com/author/studio", commit: approvedCommit, branch: "main" },
+};
+const externalMarket = join(base, "external-market");
+const externalCatalogue = { apps: [catalogue.apps[0], externalEntry] };
+put(externalMarket, "catalogue.json", JSON.stringify(externalCatalogue));
+cpSync(join(market, "round-trip"), join(externalMarket, "round-trip"), { recursive: true });
+const studio = join(base, "studio");
+cpSync(pkgTree, studio, { recursive: true });
+put(studio, "reference/revision.txt", "approved A");
+const approvedArchive = await zipTree(studio, `studio-${approvedCommit}`, join(base, "studio-a.zip"));
+const nestedArchive = await zipTree(studio, `monorepo-${approvedCommit}/apps/studio`, join(base, "nested.zip"));
+put(studio, "reference/revision.txt", "approved B");
+const nextArchive = await zipTree(studio, `studio-${nextCommit}`, join(base, "studio-b.zip"));
+put(studio, "reference/revision.txt", "unapproved branch contents");
+const branchArchive = await zipTree(studio, "studio-main", join(base, "studio-main.zip"));
+const externalMarketArchive = await zipTree(externalMarket, "catalogue-main", join(base, "external-market.zip"));
 const marketArchive = await zipTree(market, "living-ui-marketplace-main", join(base, "market-archive.zip"));
 const devArchive = await zipTree(market, "market-dev", join(base, "dev-archive.zip"));
 const repos = {
+  "curated/catalogue@main": { catalogue: readFileSync(join(externalMarket, "catalogue.json")), archive: externalMarketArchive },
+  [`author/studio@${approvedCommit}`]: { archive: approvedArchive },
+  [`author/studio@${nextCommit}`]: { archive: nextArchive },
+  [`author/monorepo@${approvedCommit}`]: { archive: nestedArchive },
+  "author/studio@main": { archive: branchArchive },
   "CraftOS-dev/living-ui-marketplace@main": { catalogue: readFileSync(join(market, "catalogue.json")), archive: marketArchive },
   "acme/market@dev": { catalogue: readFileSync(join(market, "catalogue.json")), archive: devArchive },
   "huge/market@main": { catalogue: Buffer.from(JSON.stringify({ apps: [{ id: "big", name: "Big", folder: "big" }] })), archive: "declared-huge" },
@@ -238,6 +263,10 @@ const requests = [];
 const github = createServer((req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   requests.push(url.pathname);
+  if (url.pathname === "/users/author") {
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ login: "author", name: "はる" }));
+  }
   const parts = url.pathname.split("/").filter((p) => p !== "").map(decodeURIComponent);
   const notFound = () => {
     res.writeHead(404, { "content-type": "text/plain" });
@@ -245,8 +274,8 @@ const github = createServer((req, res) => {
   };
   if (parts.length < 4) return notFound();
   const [owner, repo] = parts;
-  if (parts[2] === "archive" && parts[3] === "refs" && parts[4] === "heads") {
-    const ref = parts.slice(5).join("/").replace(/\.zip$/, "");
+  if (parts[2] === "archive" && ((parts[3] === "refs" && parts[4] === "heads") || parts.length === 4)) {
+    const ref = parts.slice(parts.length === 4 ? 3 : 5).join("/").replace(/\.zip$/, "");
     const served = repos[`${owner}/${repo}@${ref}`];
     if (!served) return notFound();
     if (served.archive === "declared-huge") {
@@ -449,6 +478,102 @@ test("inspect: a toolkit not installed here makes a package uninstallable, and s
   assert.equal(report.installable, false);
   assert.match(report.reason, /blueprint-nope/);
   assert.deepEqual(report.toolkit, { id: "blueprint-nope", installed: false, adapterVersion: { package: "0.1.0", current: null } });
+});
+
+test("external catalogue previews and inspection use the approved commit", async () => {
+  requests.length = 0;
+  const listing = json(await run(["catalogue", "--source", "github:curated/catalogue"]));
+  assert.deepEqual(listing.apps.map(a => a.id), ["round-trip", "external-studio"]);
+  assert.deepEqual(listing.apps.map(a => a.publisher), ["CraftOS", "はる"]);
+  assert.equal(listing.apps[1].source.commit, approvedCommit);
+  assert.equal(listing.apps[1].preview, `${githubBase}/author/studio/${approvedCommit}/thumbnail.png`);
+  assert.ok(!requests.some(p => p.includes("/archive/")));
+  const matching = json(await run(["catalogue", "--source", "github:curated/catalogue", "--search", "はる"]));
+  assert.deepEqual(matching.apps.map(a => a.id), ["external-studio"], "CLI searches the resolved profile name");
+  const profileReads = requests.filter(p => p.startsWith("/users/")).length;
+  const inspection = json(await run(["inspect", "external-studio", "--source", "github:curated/catalogue"]));
+  assert.equal(inspection.installable, true);
+  assert.equal(inspection.source.commit, approvedCommit);
+  assert.equal(inspection.source.repository, externalEntry.source.url);
+  assert.equal(inspection.source.path, ".");
+  assert.deepEqual(requests.filter(p => p.includes("/archive/")), [`/author/studio/archive/${approvedCommit}.zip`]);
+  assert.equal(requests.filter(p => p.startsWith("/users/")).length, profileReads, "inspection does not look up profiles");
+});
+
+test("external install ignores branch changes and preserves catalogue identity", async () => {
+  for (const source of [externalMarket, "github:curated/catalogue"]) {
+    requests.length = 0;
+    const result = json(await run(["install", "external-studio", "--source", source, "--no-start"]));
+    assert.equal(result.ok, true);
+    assert.equal(result.trust, "catalogued");
+    assert.equal(result.gate.ok, true);
+    assert.equal(read(result.dir, "reference/revision.txt"), "approved A");
+    assert.equal(result.source.kind, "marketplace");
+    assert.equal(result.source.catalogueId, "external-studio");
+    assert.equal(result.source.location, source === externalMarket ? externalMarket : "github:curated/catalogue");
+    assert.equal(result.source.repository, externalEntry.source.url);
+    assert.equal(result.source.commit, approvedCommit);
+    assert.equal(result.source.path, ".");
+    assert.deepEqual(JSON.parse(read(result.dir, "manifest.json")).source, result.source);
+    assert.deepEqual(requests.filter(p => p.includes("/archive/")), [`/author/studio/archive/${approvedCommit}.zip`]);
+  }
+});
+
+test("external install supports a subfolder and an explicit repository root", async () => {
+  const isolated = join(base, "nested-catalogue");
+  for (const path of ["apps/studio", "."]) {
+    const source = { ...externalEntry.source, url: path === "." ? externalEntry.source.url : "https://github.com/author/monorepo", path };
+    put(isolated, "catalogue.json", JSON.stringify({ apps: [{ ...externalEntry, source }] }));
+    const result = json(await run(["install", "external-studio", "--source", isolated, "--no-start"]));
+    assert.equal(result.ok, true);
+    assert.equal(result.source.path, path);
+    assert.equal(read(result.dir, "reference/revision.txt"), "approved A");
+    assert.equal(existsSync(join(result.dir, "apps")), false);
+  }
+});
+
+test("external install changes revision only when the catalogue approves it", async () => {
+  const isolated = join(base, "updated-catalogue");
+  put(isolated, "catalogue.json", JSON.stringify({ apps: [{ ...externalEntry, source: { ...externalEntry.source, commit: nextCommit } }] }));
+  requests.length = 0;
+  const result = json(await run(["install", "external-studio", "--source", isolated, "--no-start"]));
+  assert.equal(result.source.commit, nextCommit);
+  assert.equal(read(result.dir, "reference/revision.txt"), "approved B");
+  assert.deepEqual(requests, [`/author/studio/archive/${nextCommit}.zip`]);
+});
+
+test("an unavailable approved commit fails without falling back or registering an app", async () => {
+  const isolated = join(base, "missing-commit-catalogue");
+  const commit = "c".repeat(40);
+  put(isolated, "catalogue.json", JSON.stringify({ apps: [{ ...externalEntry, source: { ...externalEntry.source, commit } }] }));
+  requests.length = 0;
+  const before = snapshot();
+  const result = json(await run(["install", "external-studio", "--source", isolated, "--no-start"], 1));
+  assert.equal(result.step, "acquire");
+  assert.match(result.error, /404/);
+  assert.deepEqual(requests, [`/author/studio/archive/${commit}.zip`]);
+  assertNothingLeft(before, "unavailable approved commit");
+});
+
+test("an external branch or missing commit cannot become an install source", async () => {
+  const isolated = join(base, "invalid-source-catalogue");
+  for (const commit of [undefined, "main", "v1.0.0", "abcdef0"]) {
+    put(isolated, "catalogue.json", JSON.stringify({ apps: [{ ...externalEntry, source: { ...externalEntry.source, commit } }] }));
+    requests.length = 0;
+    const before = snapshot();
+    const result = json(await run(["install", "external-studio", "--source", isolated, "--no-start"], 1));
+    assert.equal(result.step, "acquire");
+    assert.deepEqual(requests, []);
+    assertNothingLeft(before, "invalid external source");
+  }
+});
+
+test("folder installs still work in a mixed catalogue", async () => {
+  const result = json(await run(["install", "round-trip", "--source", "github:curated/catalogue", "--no-start"]));
+  assert.equal(result.ok, true);
+  assert.equal(result.source.catalogueId, "round-trip");
+  assert.equal(result.source.repository, undefined);
+  assert.equal(result.source.commit, undefined);
 });
 
 test("install from the marketplace: events, provenance, placeholders, catalogued trust", async () => {

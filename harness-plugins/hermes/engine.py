@@ -5,8 +5,8 @@ plugin inlines. Hermes plugins are Python and load in-process, so the engine
 cannot be imported from Node; this module carries the same contract instead:
 the build, operate and package tools, verb routing between the two binaries,
 the kickoff prompts the manager sends, `install --events` for the manager's
-progress view, the app registry read, and the harness-profile writer for
-`agent-app <dir> bridge`. It imports nothing from
+progress view, a build's checkpoints for its tab, the app registry read, and
+the harness-profile writer for `agent-app <dir> bridge`. It imports nothing from
 Hermes, so `__init__.py` (the agent side) and `dashboard/plugin_api.py` (the
 dashboard side) both load it, and the tests run it without a Hermes install.
 
@@ -45,7 +45,7 @@ FRAMEWORK_SKILLS = ("creator", "modify", "importer", "operator", "walk-verify", 
 # own command table; the parity test here holds this one to that. `login` and
 # `logout` are `a2app` commands.
 FRAMEWORK_VERBS = frozenset({
-    "scaffold", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
+    "scaffold", "checkpoint", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
     "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
     "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 })
@@ -83,7 +83,7 @@ PROMPT_PLACEHOLDER = "{prompt}"
 # The framework CLI release this plugin was tested with. The skills and the
 # argv contract come from the installed CLI, so any other release is reported
 # (cli_version_warning).
-TESTED_CLI_VERSION = "0.2.0"
+TESTED_CLI_VERSION = "0.2.4"
 
 INSTALL_HINT = (
     f"Install the framework CLIs with `npm i -g agent-app-framework@{TESTED_CLI_VERSION}`, or set "
@@ -931,6 +931,139 @@ def disconnect(origin: str) -> CliResult:
     return run_operate([origin, "logout"])
 
 
+# ── Build checkpoints: the person in a build ─────────────────────────────────
+#
+# A build the manager starts scaffolds with `--checkpoints ui` (its kickoff
+# prompt says so), so the builder opens each checkpoint for the tab and ends its
+# turn: its clarifying questions, then the review of Part A of the
+# requirements. The tab finds it on the app's row (`checkpoint`, from
+# `agent-app list --json`), reads it, and records the person's reply through the
+# CLI, which returns the text to post into the build's session as the person's
+# message. The same contract as the TypeScript engine's `CheckpointApi`.
+
+_CHECKPOINT_KINDS = ("questions", "review")
+_CHECKPOINT_STATUSES = ("pending", "answered", "approved", "changes", "cancelled")
+
+# What the kickoff prompt of a manager-started build adds: where the person answers.
+BUILD_PANEL_NOTE = (
+    "This harness's build panel shows the build's checkpoints: scaffold with `--checkpoints ui`. The person answers your "
+    "questions and approves the requirements there, and their reply comes back to you as their next message."
+)
+
+
+def parse_checkpoint(raw: Any) -> dict | None:
+    """A row's `checkpoint` (`{id, kind, round, status, shown, createdAt}`), or
+    None when it has none, or an unreadable one."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) \
+            or raw.get("kind") not in _CHECKPOINT_KINDS or raw.get("status") not in _CHECKPOINT_STATUSES:
+        return None
+    rnd = raw.get("round")
+    return {
+        "id": raw["id"],
+        "kind": raw["kind"],
+        "round": rnd if isinstance(rnd, (int, float)) and not isinstance(rnd, bool) else 1,
+        "status": raw["status"],
+        "shown": "ui" if raw.get("shown") == "ui" else "chat",
+        "createdAt": raw["createdAt"] if isinstance(raw.get("createdAt"), str) else "",
+    }
+
+
+class CheckpointApi:
+    """The checkpoint routes of the manager tab. Each method takes what its
+    route received and returns `(status, payload)`:
+
+      GET  /checkpoint?app=<path>                                  what is open: the questions, or Part A as text
+      POST /checkpoint/answer  {app, id, answers | changes, partA?}    records answers or a change request: {message}
+      POST /checkpoint/approve {app, id, partA?}                        approves Part A: {message}
+
+    `id` is the checkpoint the person was shown; a reply to one the build has
+    moved past is refused (409) rather than recorded against the wrong one.
+    `by` is where an approval was given, as the spec's `### Approval` line
+    names it: the harness's name."""
+
+    def __init__(self, by: str) -> None:
+        self.by = by
+
+    def show(self, app: Any) -> tuple[int, dict]:
+        path = self._local(app)
+        if path is None:
+            return _not_an_app()
+        result = run_framework([path, "checkpoint", "show"])
+        if not result.ok:
+            return _checkpoint_failed(result)
+        doc = result.json
+        return 200, {**(doc if isinstance(doc, dict) else {}), "ok": True}
+
+    def answer(self, body: dict) -> tuple[int, dict]:
+        """The person's answers to the questions (`answers`: `[{id, choices, other?}]`), or a change request on Part A."""
+
+        def argv(path: str, part_a: list[str]) -> list[str] | None:
+            changes = body.get("changes")
+            if isinstance(changes, str) and changes.strip():
+                return [path, "checkpoint", "answer", "--changes", changes.strip(), *part_a]
+            if isinstance(body.get("answers"), list):
+                return [path, "checkpoint", "answer", "--json", _json({"answers": body["answers"]})]
+            return None
+
+        return self._record(body, argv)
+
+    def approve(self, body: dict) -> tuple[int, dict]:
+        return self._record(body, lambda path, part_a: [path, "checkpoint", "approve", "--by", self.by, *part_a])
+
+    def _record(self, body: dict, argv_for: Callable[[str, list[str]], list[str] | None]) -> tuple[int, dict]:
+        path = self._local(body.get("app"))
+        if path is None:
+            return _not_an_app()
+        shown = run_framework([path, "checkpoint", "show"]).json
+        current = parse_checkpoint(shown.get("checkpoint") if isinstance(shown, dict) else None)
+        if current is None or current["id"] != body.get("id") or current["status"] != "pending":
+            return 409, {"ok": False, "message": "The build has moved past this step. It will show what is waiting now."}
+        # Part A travels as a file: it can be longer than a command line may be.
+        part_a = body.get("partA")
+        directory = tempfile.mkdtemp(prefix="a2app-part-a-") if isinstance(part_a, str) and part_a.strip() else None
+        try:
+            flags: list[str] = []
+            if directory is not None:
+                file = os.path.join(directory, "part-a.md")
+                with open(file, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(part_a)
+                flags = ["--part-a", file]
+            argv = argv_for(path, flags)
+            if argv is None:
+                return 400, {"ok": False, "message": "Answer the questions, or say what to change."}
+            result = run_framework(argv)
+            if not result.ok:
+                return _checkpoint_failed(result)
+            doc = result.json if isinstance(result.json, dict) else {}
+            return 200, {"ok": True, "message": doc.get("message"), "checkpoint": doc.get("checkpoint")}
+        finally:
+            if directory is not None:
+                shutil.rmtree(directory, ignore_errors=True)
+
+    @staticmethod
+    def _local(app: Any) -> str | None:
+        """Only an app on this machine has a build to answer."""
+        if not isinstance(app, str) or not app:
+            return None
+        return app if any(known["path"] == app for known in list_known_apps()) else None
+
+
+def _not_an_app() -> tuple[int, dict]:
+    return 404, {"ok": False, "message": "not an app on this machine"}
+
+
+def _checkpoint_failed(result: CliResult) -> tuple[int, dict]:
+    """A refusal keeps the CLI's reason and what is wrong, so the tab can say
+    which part of Part A to fix."""
+    doc = result.json if isinstance(result.json, dict) else {}
+    payload = {"ok": False, "message": failure_of(result, doc)}
+    if isinstance(doc.get("problems"), list):
+        payload["problems"] = doc["problems"]
+    if isinstance(doc.get("reason"), str):
+        payload["reason"] = doc["reason"]
+    return (400 if result.code == 2 else 422 if result.code == 1 else 500), payload
+
+
 # ── Uploads ──────────────────────────────────────────────────────────────────
 
 # The most an uploaded package may be: the most `install` reads (packaging §2).
@@ -1020,6 +1153,8 @@ def parse_known_apps(result: CliResult) -> list[dict]:
             app["port"] = row["port"]
         if isinstance(row.get("status"), str):
             app["status"] = row["status"]
+        # The build checkpoint opened last, when its build opened any.
+        app["checkpoint"] = parse_checkpoint(row.get("checkpoint"))
         out.append(app)
     return out
 
@@ -1062,11 +1197,12 @@ def _str(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def build_kickoff_prompt(body: dict) -> dict:
+def build_kickoff_prompt(body: dict, *, checkpoints: str | None = None) -> dict:
     """The prompt that hands a manager-form submission to the agent, routed to
     the skill owning the activity: `build` (creator), `modify`, `operate`
     (operator), and `install`, `import` and `adopt` (importer). Same wording as
-    the TypeScript engine."""
+    the TypeScript engine. `checkpoints="ui"` is a build the manager shows in
+    its tab: the builder's questions and the requirements review go there."""
     action = _str(body.get("action"))
     requirement = _str(body.get("requirement"))
     if action == "build":
@@ -1079,10 +1215,13 @@ def build_kickoff_prompt(body: dict) -> dict:
             f'Build a new Agent App named "{name}".\n\n'
             f"Requirements:\n{requirement}\n\n"
             f"Scaffold from blueprint `{blueprint}`{f' on port {port}' if port else ''}. "
-            "Load the **creator** skill and follow it end to end: scaffold, build feature by feature under "
-            "the ownership boundary, run `agent-app validate`, launch, and have a separate agent walk-verify "
-            "before announcing. Do not build from general knowledge outside the skill."
+            "Load the **creator** skill and follow it end to end: scaffold, ask the person what you cannot decide "
+            "and have the requirements approved, build feature by feature under the ownership boundary, "
+            "run `agent-app validate`, launch, and have a separate agent walk-verify before announcing. "
+            "Do not build from general knowledge outside the skill."
         )
+        if checkpoints == "ui":
+            prompt += f"\n\n{BUILD_PANEL_NOTE}"
         return {"kind": "kickoff", "activity": "creator", "prompt": prompt}
     if action in ("modify", "operate"):
         directory = _str(body.get("dir"))

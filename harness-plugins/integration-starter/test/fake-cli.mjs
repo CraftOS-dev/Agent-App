@@ -16,9 +16,11 @@
  *                        and --confirm GOOD-CODE finishes it; an address naming "stranger"
  *                        is not an Agent App (exit 3, no JSON)
  *   <url> logout         logs out
+ *   <dir> checkpoint …   show the checkpoint in `$FAKE_CHECKPOINT`; answer/approve a pending one,
+ *                        refusing a --part-a that still holds a placeholder (exit 1, with problems)
  *   anything else        `{ ok, bin, argv }`, and exit 1 when an argument is "BAD"
  */
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 
 const BIN = basename(process.argv[1]).replace(/\.mjs$/, "");
@@ -122,8 +124,33 @@ function login() {
   emit(waits ? signedIn : { event: "result", ok: true, pending: true, ...app });
 }
 
+function checkpoint() {
+  const file = process.env.FAKE_CHECKPOINT;
+  const current = file && existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+  const sub = argv[2];
+  if (sub === "show") {
+    out({ ok: true, mode: "ui", checkpoint: current, ...(current?.kind === "review" ? { partA: "# Requirements\n\n## Features\n- F-A-1: x\n", problems: [] } : {}) });
+    return;
+  }
+  if (current === null || current.status !== "pending") {
+    out({ ok: false, reason: "nothing_open", error: "nothing is waiting" });
+    process.exit(1);
+  }
+  const partA = flag("part-a") === undefined ? undefined : readFileSync(flag("part-a"), "utf8");
+  if (partA?.includes("<REPLACE:")) {
+    out({ ok: false, reason: "part_a_incomplete", error: "The edited Part A is not complete.", problems: ["1 template placeholder(s) <REPLACE: …> remain in Part A"] });
+    process.exit(1);
+  }
+  const status = sub === "approve" ? "approved" : flag("changes") !== undefined ? "changes" : "answered";
+  const next = { ...current, status };
+  writeFileSync(file, JSON.stringify(next));
+  out({ ok: true, checkpoint: next, message: `${sub}: ${flag("changes") ?? flag("json") ?? flag("by")}${partA !== undefined ? ` (edited: ${partA})` : ""}` });
+}
+
 if (BIN === "a2app" && argv[1] === "login") {
   login();
+} else if (BIN === "agent-app" && argv[1] === "checkpoint") {
+  checkpoint();
 } else if (BIN === "a2app" && argv[1] === "logout") {
   process.stderr.write("✓ logged out of Team CRM\n");
 } else if (BIN === "agent-app" && argv[0] === "list") {

@@ -55,6 +55,8 @@ const entry = (await import(pathToFileURL(bundle).href)).default;
 const routes = new Map();
 const hooks = new Map();
 const runs = [];
+/** How each run ends, by id: a build's run ends when the agent stops at a checkpoint. */
+const waits = new Map();
 entry.register({
   logger: { info() {}, warn() {} },
   on: (hook, fn) => hooks.set(hook, fn),
@@ -68,7 +70,7 @@ entry.register({
         runs.push(p);
         return { runId: `run-${runs.length}` };
       },
-      waitForRun: () => new Promise(() => {}), // the agent is still working
+      waitForRun: (p) => new Promise((done) => waits.set(p.runId, done)), // the agent works until the test ends the run
       getSessionMessages: async () => ({ messages: [] }),
       deleteSession: async () => {},
     },
@@ -192,10 +194,47 @@ try {
   assert.ok(crmRun.message.endsWith("How many open deals?"));
   assert.equal((await api("/app/disconnect", { method: "POST", body: { path: "https://other.example.com" } })).status, 404);
   assert.equal((await api("/app/disconnect", { method: "POST", body: { path: CRM } })).status, 200);
+
+  // A build from the form stops for the person in its tab: questions, then the requirements.
+  for (const part of ["/checkpoint?app=", "/checkpoint/answer", "/checkpoint/approve", "Approve and build", "Send answers"]) {
+    assert.ok(script.includes(part), `the page has ${part}`);
+  }
+  r = await api("/build", { method: "POST", body: { name: "Ledger", requirement: "Track spend." } });
+  assert.equal(r.status, 200, r.text);
+  const ledger = r.json.path;
+  await new Promise((d) => setTimeout(d, 600));
+  const buildRun = runs.at(-1);
+  const buildRunId = `run-${runs.length}`;
+  assert.match(buildRun.message, /scaffold with `--checkpoints ui`/, "the builder is told its questions go to the panel");
+  process.env.FAKE_CHECKPOINT = join(base, "checkpoint.json");
+  const asked = { id: "c-0000000a", kind: "questions", round: 1, status: "pending", shown: "ui", createdAt: "2026-11-17T00:00:00.000Z" };
+  writeFileSync(process.env.FAKE_CHECKPOINT, JSON.stringify(asked));
+  writeFileSync(process.env.FAKE_REGISTRY, JSON.stringify({ ok: true, apps: [{ id: "led", name: "Ledger", path: ledger, status: "stopped", checkpoint: asked }], connected: [] }));
+  waits.get(buildRunId)();
+  await new Promise((d) => setTimeout(d, 50));
+  let row = (await api("/apps")).json.rows.find((x) => x.path === ledger);
+  assert.deepEqual([row.building, row.buildEnded, row.checkpoint.status], [false, true, "pending"], "the run ended at the checkpoint, which the tab shows");
+  r = await api(`/checkpoint?app=${encodeURIComponent(ledger)}`);
+  assert.deepEqual([r.status, r.json.checkpoint.id], [200, "c-0000000a"]);
+  const before = runs.length;
+  r = await api("/checkpoint/answer", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-stale", answers: [] } });
+  assert.equal(r.status, 409, "a reply to a step the build moved past");
+  r = await api("/checkpoint/answer", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-0000000a", answers: [{ id: "who", choices: ["Just me"] }] } });
+  assert.equal(r.status, 200, r.text);
+  await new Promise((d) => setTimeout(d, 600));
+  assert.equal(runs.length, before + 1, "one message, for the one reply");
+  assert.equal(runs.at(-1).sessionKey, "subagent:agent-app:ledger");
+  assert.equal(runs.at(-1).message, r.json.message, "the person's message, as the CLI wrote it");
+  row = (await api("/apps")).json.rows.find((x) => x.path === ledger);
+  assert.deepEqual([row.building, row.buildEnded], [true, false], "and the build carries on");
+  waits.get(buildRunId)();
+  await new Promise((d) => setTimeout(d, 50));
+  row = (await api("/apps")).json.rows.find((x) => x.path === ledger);
+  assert.equal(row.building, true, "an earlier run ending does not end the build");
 } finally {
   rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-console.log("✓ openclaw: the page's panels parse; catalogue, inspect, upload and install jobs over the CLI; convert and adopt hand off to the importer skill; connect, a connected app's tab and session, disconnect");
+console.log("✓ openclaw: the page's panels parse; catalogue, inspect, upload and install jobs over the CLI; convert and adopt hand off to the importer skill; connect, a connected app's tab and session, disconnect; build checkpoints in the tab, and the build carrying on");
 // The plugin's run queue keeps an interval for the gateway's lifetime.
 process.exit(0);

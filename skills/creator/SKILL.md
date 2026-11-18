@@ -35,6 +35,9 @@ says "per your stack", `reference/blueprint.md` is the answer.
    later means deciding whose every existing record is. A multi-user app gets
    sign-in, invites and *Connected agents* from the adapter — write no auth code
    of your own. `agent-app <dir> owner` prints the first owner's setup link.
+   When your harness says its build panel shows checkpoints, add
+   `--checkpoints ui`: your questions and the requirements review then appear
+   there instead of in chat.
 
 ## The ownership rule (the gate enforces this)
 
@@ -78,23 +81,44 @@ verified. Keep it the way an engineer does:
 **Part B (Technical Specification)** — how it is built. The gate checks its
 structure; walk-verify checks the running app against it.
 
+The person is in this twice — your questions, then their approval of Part A —
+and both are **checkpoints**: `agent-app <dir> checkpoint` opens one, its
+`next` says what to do, and you END YOUR TURN. Where the person sees it is the
+harness's (a build panel, or your chat message), so follow `next` rather than
+deciding. Their reply arrives as their next message:
+
+- A reply that says **"already recorded"** came from the build panel: the
+  framework has it; record nothing and continue.
+- Any other reply to an open checkpoint, record before you continue:
+  `checkpoint answer --text "<their reply>"` for questions,
+  `checkpoint approve --by chat` for an explicit approval,
+  `checkpoint answer --changes "<their reply>"` for anything else.
+
 1. **Read `reference/blueprint.md` (your stack's map), `AGENT_APP.md`, and
-   `reference/requirements.md`.** If the spec is
-   already filled (the requirement was interviewed and synthesized upstream),
-   it is binding: implement it exactly, skip to step 5. If it holds only the
-   scaffold skeleton, YOU author it — steps 2–4.
-2. **Gather before writing.** Ask the user ONE batch of clarifying questions —
-   only what you genuinely cannot decide (audience, must-have features, data
-   that must survive, what is explicitly out). Read the user's cross-app
-   conventions (`agent-app global`): design preferences, their own
-   always-rules, and ticked optional rules (ticked = requirement, unticked =
-   not). Read the Agent App Quality Standard (`../QUALITY.md`, in the
-   directory this skill was installed from) — reading it before writing
-   Part B is MANDATORY: it is the bar the verifier judges every app against,
-   and building to it the first time is the only path that does not loop.
-3. **Author the spec — replace every `<REPLACE: …>` marker.** Each marker's
-   text is its fill instruction; the gate refuses a spec that still carries
-   one, so template text can never reach verification.
+   `reference/requirements.md`.** If your instructions say the spec was
+   supplied (interviewed and written upstream) and the file holds it, it is
+   binding: implement it exactly, and go to step 4 to have Part A approved.
+   Otherwise YOU author it, from step 2. A blueprint's own starter spec — one
+   that ships filled in, approval line and all — is never the person's: its
+   Part A is replaced by theirs.
+2. **Ask before writing.** First read the user's cross-app conventions
+   (`agent-app global`) — design preferences, their own always-rules, and
+   ticked optional rules (ticked = requirement, unticked = not) — so you never
+   ask what they already decide. Then ask ONE batch: only what you genuinely
+   cannot decide (audience, must-have features, data that must survive, what
+   is explicitly out), as few as will do. Give each question 2–5 concrete
+   options (`multiSelect` where several apply) and, when it helps, a one-line
+   `why`; the person can always answer in their own words. Write them as JSON
+   and open the checkpoint:
+   `agent-app <dir> checkpoint ask --file <dir>/.a2app/questions.json` with
+   `{"questions": [{"id": "audience", "question": "Who will use it?",
+   "options": ["Just me", "My team"], "multiSelect": false}]}` (`.a2app/` is
+   never committed). An answer left blank is yours to decide. Ask a follow-up
+   batch only when an answer opens a decision you cannot make — a third is
+   refused; decide the rest and record each under `### Assumptions`.
+3. **Write Part A — replace every `<REPLACE: …>` marker in it** (the
+   `### Approval` line excepted: approval writes it). Each marker's text is
+   its fill instruction.
    - **Part A** from the user's answers. Features are the contract: grouped
      under `### Module: <name>`, stable IDs (`F-<MOD>-n`, never renumbered,
      never reused), every statement binary and observable by a stranger
@@ -108,6 +132,24 @@ structure; walk-verify checks the running app against it.
      would otherwise add, because scope nobody bounded is scope you will
      invent. Non-Functional Requirements carry only this app's measurable
      bars — quality decisions belong in Quality Conformance.
+   - **Write it in parts, one section per write.** Every reply has an
+     output limit, and a reply cut off at it is lost whole; a full spec in
+     one write is long enough to hit it. The same goes for any large file —
+     code included.
+4. **Have Part A approved before anything else.** `agent-app <dir> checkpoint
+   review` opens the review — it refuses a Part A that is not complete and
+   says what is missing — then END YOUR TURN. A change request: revise Part A
+   (keep any edits the person made themselves) and open the review again.
+   Approval: the framework has written the dated line in `### Approval`;
+   never write it yourself. Re-read Part A, since the person may have edited
+   it. From that moment it is frozen — changes go through `## Changes` — and
+   Part B may add to it, never silently contradict it.
+5. **Write Part B — replace every marker left.** The gate refuses a spec that
+   still carries one, so template text can never reach verification. Read
+   the Agent App Quality Standard (`../QUALITY.md`, in the directory this
+   skill was installed from) first — MANDATORY: it is the bar the verifier
+   judges every app against, and building to it the first time is the only
+   path that does not loop.
    - **Part B** from the Quality Standard and the global conventions. UI
      Design: adopt the blueprint's design system and extend its tokens
      (never fork a second one); one Screen entry PER SCREEN — primary
@@ -122,25 +164,16 @@ structure; walk-verify checks the running app against it.
      (number + factual reason + revisit condition) go in `### Conventions
      and overrides` — the ONE location the verifier reads. Process Flows
      only where a lifecycle exists; Operations Design must match
-     `operations.json` exactly.
-   - **Write it in parts, one section per write.** Every reply has an
-     output limit, and a reply cut off at it is lost whole; a full spec in
-     one write is long enough to hit it. The same goes for any large file —
-     code included.
-4. **Get the user's approval on Part A before building.** Present a short
-   summary — the goals, the Features list, and Out of Scope — and ask once.
-   Corrections go into the spec first. On approval, record the date in
-   `### Approval`; Part A is frozen from that moment (changes go through
-   `## Changes`), while Part B keeps evolving with the build — additions
-   yes, silent contradictions of Part A never.
-5. **Derive `reference/tasks.md` from the approved spec.** One task per
+     `operations.json` exactly. One section per write, as for Part A. Part B
+     keeps evolving with the build.
+6. **Derive `reference/tasks.md` from the approved spec.** One task per
    feature (or coherent feature group), and quality work as tasks of its own
    — motion, focus flow, narrow-width behavior, resilience — each citing the
    Feature ID or Q-entry it implements (`- [ ] T-1 (F-COR-1): …`), ending
    with the Verification tasks. Tick tasks as you complete them, never in a
    batch at the end; never delete a completed task — the ledger is the build
    record, and evolution appends to it.
-6. **Any feature need data from outside the app? Check, then research.** FIRST
+7. **Any feature need data from outside the app? Check, then research.** FIRST
    check whether a connected integration already covers the feature — if so, use
    it; nothing to research. Only for THIRD-PARTY public APIs: research like an
    engineer — endpoint, auth, response shape, limits — before writing a line;
@@ -362,8 +395,10 @@ someone leave the screen and come back.
    (`agent-app <dir> commit --message "<what and why>"`) — the commit is what
    the verifier verifies. From the second verification on, give the verifier
    the last report and the commit it verified: it re-verifies what changed
-   since, not the whole app. Record each verdict and its verified commit in
-   the ledger, and commit that too.
+   since and what that report did not reach, not the whole app. Never ask it
+   for a full walk or for more than that — its rules set the scope, and a
+   wider request only repeats checks that already passed. Record each verdict
+   and its verified commit in the ledger, and commit that too.
 5. **Promote and put it in front of the user.**
    `agent-app <dir> promote` requires the gate pass from step 1 (edited since
    validating? validate again first — except the ledger, `reference/tasks.md`,

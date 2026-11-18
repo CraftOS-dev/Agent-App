@@ -21,6 +21,12 @@
  * And a Connect panel, for an app on another machine: the shared engine's
  * `ConnectApi` (`/connect`, `/connect/confirm`, `/app/disconnect`) signs the
  * agent in, and the app opens in a tab of its own, on its approval page.
+ *
+ * A build from the form shows its checkpoints in the app's tab: the builder's
+ * questions, then Part A of the requirements to edit and approve. The shared
+ * engine's `CheckpointApi` (`/checkpoint`, `/checkpoint/answer`,
+ * `/checkpoint/approve`) records the person's reply, which is then posted into
+ * the app's session as their message, and the build carries on.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { randomBytes } from "node:crypto";
@@ -39,6 +45,7 @@ import {
   connectAgentName,
   connectedSessionPreamble,
   ConnectApi,
+  CheckpointApi,
   type RemoteRow,
   registerHarnessProfile,
   FRAMEWORK_BLUEPRINTS,
@@ -105,6 +112,8 @@ interface BuildEntry {
   name: string;
   dir: string;
   ended: boolean;
+  /** the run being waited on; an older run ending does not end the build */
+  runId?: string;
 }
 
 /** One row of the manager UI: a registered app, or a build not yet registered. */
@@ -139,6 +148,7 @@ export default definePluginEntry({
     const builds = new Map<string, BuildEntry>();
     const packages = new PackageApi(FRAMEWORK_CLI);
     const connect = new ConnectApi(CLI, FRAMEWORK_CLI, { agentName: connectAgentName("OpenClaw") });
+    const checkpoints = new CheckpointApi(FRAMEWORK_CLI, "OpenClaw");
 
     // subagent.run needs operator.write, which OpenClaw grants only to calls made
     // outside a request scope (a request client carries no operator scopes). Runs
@@ -287,17 +297,37 @@ export default definePluginEntry({
       const prompt = `${kick.prompt}\n\nCreate the app at \`${dir}\` — pass that directory to every agent-app command.`;
       const run = await detached(() => subagent.run({ sessionKey: sessionKeyFor(dir), message: prompt, deliver: false, lane: `agent-app:${slug}`, cwd: APPS_DIR }));
       seeded.add(sessionKeyFor(dir));
-      const entry: BuildEntry = { name: label, dir, ended: false };
-      builds.set(dir, entry);
-      void detached(() => subagent.waitForRun({ runId: run.runId, timeoutMs: BUILD_WAIT_MS })).then(
-        () => { entry.ended = true; },
-        () => { entry.ended = true; },
-      );
+      track(dir, label, run.runId);
       return { status: 200, out: { ok: true, path: dir } };
     }
 
+    /**
+     * Show a build as building while `runId` runs. A build stops at each
+     * checkpoint (its run ends there), so the person's reply arms it again.
+     */
+    function track(dir: string, name: string, runId: string): void {
+      const entry = builds.get(dir) ?? { name, dir, ended: false };
+      entry.ended = false;
+      entry.runId = runId;
+      builds.set(dir, entry);
+      const ended = (): void => { if (entry.runId === runId) entry.ended = true; };
+      void detached(() => subagent.waitForRun({ runId, timeoutMs: BUILD_WAIT_MS })).then(ended, ended);
+    }
+
+    /** Post the person's message into an app's session, which runs the agent on it. */
+    async function deliver(path: string, name: string, text: string): Promise<string> {
+      const sessionKey = sessionKeyFor(path);
+      // A connected app (its path is its URL) is another machine's: operated, never modified.
+      const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
+      const message = seeded.has(sessionKey) ? text : `${preamble}\n\n${text}`;
+      // cwd must exist; before a build's scaffold step the app dir may not.
+      const run = await detached(() => subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${appSessionName(path)}`, cwd: existsSync(path) ? path : APPS_DIR }));
+      seeded.add(sessionKey);
+      return run.runId;
+    }
+
     function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
-      const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
+      const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port }, { checkpoints: "ui" });
       return startAgentRun(String(body.name ?? ""), kick);
     }
 
@@ -380,6 +410,7 @@ export default definePluginEntry({
           if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
           if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
           if (method === "GET" && sub === "/connect") { reply(connect.job(url.searchParams.get("job"))); return; }
+          if (method === "GET" && sub === "/checkpoint") { reply(await checkpoints.show(url.searchParams.get("app"))); return; }
 
           if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
           if (sub === "/upload") {
@@ -410,15 +441,22 @@ export default definePluginEntry({
             const path = String(body.path ?? "");
             const text = String(body.text ?? "").trim();
             if (!text) { send(400, { ok: false, message: "empty message" }); return; }
-            const sessionKey = sessionKeyFor(path);
             const name = String(body.name ?? basename(path));
-            // A connected app (its path is its URL) is another machine's: operated, never modified.
-            const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
-            const message = seeded.has(sessionKey) ? text : `${preamble}\n\n${text}`;
-            // cwd must exist; before a build's scaffold step the app dir may not.
-            await detached(() => subagent.run({ sessionKey, message, deliver: false, lane: `agent-app:${appSessionName(path)}`, cwd: existsSync(path) ? path : APPS_DIR }));
-            seeded.add(sessionKey);
+            const runId = await deliver(path, name, text);
+            // A reply to a build that stopped for the person carries it on.
+            if (builds.has(path)) track(path, name, runId);
             send(200, { ok: true });
+            return;
+          }
+
+          if (sub === "/checkpoint/answer" || sub === "/checkpoint/approve") {
+            const r = sub === "/checkpoint/answer" ? await checkpoints.answer(body) : await checkpoints.approve(body);
+            if (r.status === 200 && typeof r.body.message === "string") {
+              const path = String(body.app);
+              const name = String(body.name ?? basename(path));
+              track(path, name, await deliver(path, name, r.body.message));
+            }
+            reply(r);
             return;
           }
 

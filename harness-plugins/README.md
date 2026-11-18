@@ -4,10 +4,10 @@ Per-harness **plugins**: each exposes the framework in the harness's own plugin 
 
 | Directory | Harness | Language / API | What it registers |
 |---|---|---|---|
-| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 22 build, operate and package tools, skills, display, `runA2App`, `registerHarnessProfile`, and the manager routes for the marketplace, import and connect (`PackageApi`, install jobs from `--events`, `ConnectApi`); every plugin below uses it |
-| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel; a New + tab with a build form, a **Marketplace**, an **Import** and a **Connect** panel) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
-| [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)`; `scripts/build.py` stages a self-contained `dist/` | The 22 tools via `ctx.register_tool(...)` (a Python port of the engine), the six skills, `/agent-app` + `hermes agent-app`, and an "Agent Apps" **dashboard tab** like OpenClaw's (also in hermes-webui) |
-| [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 19 tools via `ctx.tools.register(defineTool(...))`, each run by the engine's tool of the same name; an "Agent Apps" manager like OpenClaw's in a sidebar panel |
+| [integration-starter/](integration-starter/) | — (shared engine + template) | TypeScript | The 22 build, operate and package tools, skills, display, `runA2App`, `registerHarnessProfile`, and the manager routes for the marketplace, import, connect and a build's checkpoints (`PackageApi`, install jobs from `--events`, `ConnectApi`, `CheckpointApi`); every plugin below uses it |
+| [openclaw/](openclaw/) | [OpenClaw](https://docs.openclaw.ai) | TypeScript, `definePluginEntry`; `pnpm build` stages a self-contained installable `dist/` | An "Agent Apps" **manager tab** (browser-style tabs per app: embedded app view, launch/pause/delete, a per-app session side panel; a New + tab with a build form whose questions and requirements review show in the app's tab, a **Marketplace**, an **Import** and a **Connect** panel) + `/agent-app` chat command + `agent-app` CLI + the six skills; no agent tools (skills + CLIs are the agent surface); ships `openclaw.plugin.json` |
+| [hermes/](hermes/) | [Hermes](https://github.com/NousResearch/hermes-agent) | **Python**, `plugin.yaml` + `register(ctx)`; `scripts/build.py` stages a self-contained `dist/` | The 22 tools via `ctx.register_tool(...)` (a Python port of the engine), the six skills, `/agent-app` + `hermes agent-app`, and an "Agent Apps" **dashboard tab** like OpenClaw's, build checkpoints included (also in hermes-webui) |
+| [dsh/](dsh/) | deepseek-harness | TypeScript Cordis (peer deps `cordis`, `@deepseek-ai/dsh-tools`) | 19 tools via `ctx.tools.register(defineTool(...))`, each run by the engine's tool of the same name; an "Agent Apps" manager like OpenClaw's in a sidebar panel, build checkpoints included |
 | [craftbot/](craftbot/) | [CraftBot](https://github.com/CraftOS-dev/CraftBot) | **Python**, `@action` decorator (`agent_core`) | 15 actions in the `agent_app` action set, the marketplace and import ones under CraftBot's own names |
 | [claude-code/](claude-code/) | Claude Code | **MCP** (stdio JSON-RPC 2.0) | The 22 tools via a real MCP server; register with `claude mcp add` |
 | [../.claude-plugin/](../.claude-plugin/) | Claude Code | Plugin marketplace manifest (no code) | The `/agent-app` launcher command ([../commands/](../commands/)) + the six [../skills/](../skills/), installable with `/plugin`. No build step, so it works from a clean checkout; add the MCP server above for the tool surface |
@@ -29,6 +29,26 @@ Every surface installs through the same CLI, so an app arrives in the same state
 ## Connecting to an app on another machine
 
 An Agent App someone else runs (a team's CRM on a public domain) is used by its address, never installed: `a2app <url> login` signs the agent in as the person who approves it in the app, and every `a2app <url> …` call then acts as them ([auth spec](../spec/v0_2/auth.md), [connect skill](../skills/connect/SKILL.md)). The manager tabs of Hermes, OpenClaw and dsh have a **Connect** panel for it: the app opens at once in a tab of its own on its approval page, the person signs in there and approves, the page hands the confirmation code back, and the tab becomes the app, signed in, which the agent then uses too. Where the tab cannot embed the app it says why, and links to the approval page in the browser instead. The routes are the shared engine's `ConnectApi` (in Hermes, its Python port), and `agent-app list` shows connected apps beside this machine's.
+
+## Stopping a build for the person
+
+A build stops for the person twice: for the builder's questions, and for their approval of Part A of
+`reference/requirements.md` before anything is built. Both are checkpoints the builder opens with
+`agent-app <dir> checkpoint ask|review`, then it ends its turn; the person's reply arrives as their next message.
+Where the person sees a checkpoint is the harness's, decided once, at scaffold:
+
+- **A build panel** — a build started from a manager's form scaffolds with `--checkpoints ui` (its kickoff
+  prompt says so: `buildKickoffPrompt(body, { checkpoints: "ui" })`). The manager finds an open checkpoint on
+  the app's row (`checkpoint`, from `agent-app list --json`) and shows it in the app's tab, ahead of the
+  building spinner: the questions with their options, or Part A to read, edit, send back with changes, or
+  approve. [`CheckpointApi`](integration-starter/src/checkpoint.ts) records the reply through the CLI
+  (`GET /checkpoint`, `POST /checkpoint/answer`, `POST /checkpoint/approve`) and returns the text to post
+  into the app's session as the person's message; the plugin posts it and shows the build as building
+  again. A reply to a checkpoint the build has moved past is refused (409), never recorded against it.
+- **Chat** — anything else. The CLI hands the builder each checkpoint as a message to send, and the
+  builder records the reply itself. Harnesses with no plugin need nothing for this.
+
+Approval is written by the CLI, not the agent: the dated line in `### Approval`, naming where it was given.
 
 ## Showing a launched app
 
@@ -104,7 +124,7 @@ exactly that. What the plugins here register:
 
 | Plugin | Profile | Route |
 |---|---|---|
-| [claude-code/](claude-code/) | none: the framework's built-in `claude` | `claude --allowedTools "Bash(a2app:*)" --disallowedTools Edit Write NotebookEdit -p {prompt}`. Registering one under the same id would replace the built-in for good |
+| [claude-code/](claude-code/) | none: the framework's built-in `claude` | `claude --allowedTools "Bash(a2app:*)" -p {prompt}`. Registering one under the same id would replace the built-in for good |
 | [openclaw/](openclaw/) | `openclaw` | `openclaw agent exec {prompt}`: one embedded turn in the app's directory, alongside a running gateway |
 | [dsh/](dsh/) | `dsh` | `dsh --profile headless {prompt}` |
 | [hermes/](hermes/) | `hermes` | `hermes --cli chat -Q --query-file -`, the prompt on stdin: one single-query turn in the app's directory |

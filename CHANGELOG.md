@@ -2,6 +2,110 @@
 
 ## Unreleased
 
+### Changed
+
+- **The built-in Claude Code route no longer denies file edits.** A task the
+  bridge hands to `claude` ran with `--disallowedTools Edit Write NotebookEdit`.
+  The route now only grants the `a2app` CLI the prompt names (print mode cannot
+  ask for it); every other tool follows the user's own Claude Code permissions,
+  as with every other harness. A `claude` profile in `harnesses.json` still
+  replaces the built-in.
+
+## 0.2.4 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.4 with a changed walk-verify skill.
+The protocol and the other packages are unchanged.
+
+### Changed
+
+- **A walk finishes every check in scope before it reports.** Finding a
+  defect no longer ends a walk early: every defect goes in one report, so the
+  builder fixes them all before the next round. Before, a walk could stop
+  with most of its budget left and defer the costly checks (measured
+  contrast, other widths, the engineering items), so each round found a few
+  more defects and a build ran round after round.
+- **`Not reached:` lists only what the budget ran out before.** A check
+  skipped with budget left, or one an earlier round passed, never goes there.
+
+## 0.2.3 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.3 with changed skills. The protocol
+and the other packages are unchanged.
+
+### Changed
+
+- **A walk that does not finish is never walked again.** Every walk-verify
+  report ends with `Not reached:` — `none`, or the checks in scope it did not
+  get to. A re-verify checks the last report's defects, what it did not
+  reach, and what changed since its commit; everything else that walk passed
+  stays passed. A walk that runs out of budget with nothing failing is
+  `incomplete`, and the next one re-verifies from it. Before, a walk cut
+  short left no record of what it had covered, so every round after it was a
+  full walk that again ran short.
+- **A re-verify's scope comes from its rules, not the request.** A builder's
+  request for a full walk or more coverage no longer widens it, and the
+  creator and modify skills tell the builder never to ask.
+- **A shared change re-checks what it can affect.** A design-token or style
+  change re-checks the quality items it sets (contrast, spacing, sizing,
+  states, motion) on the screens using it, and a data, API or migration
+  change the features that use it — not every check of every screen.
+
+## 0.2.2 — protocol 0.2
+
+`agent-app-framework` is released at 0.2.2. The protocol and the other
+packages are unchanged.
+
+### Added
+
+- **A build stops for the person twice, as checkpoints**: the builder's
+  clarifying questions, then the review of Part A of `reference/requirements.md`
+  before anything is built. `agent-app <dir> checkpoint ask` (one batch of
+  1–10 questions with options, and at most one follow-up batch) and
+  `checkpoint review` open one, and the builder ends its turn; the person's
+  reply arrives as their next message. `checkpoint show`, `answer` and
+  `approve` let a harness render it and record the reply, and `answer` and
+  `approve` print the text to post as the person's message. The state is
+  `.a2app/checkpoint.json` (runtime, never committed or exported; schema in
+  `spec/v0_2/schema/checkpoint.schema.json`), and `agent-app list --json`
+  carries the open checkpoint on each app's row.
+- **A harness with a build panel shows the checkpoints there.**
+  `scaffold --checkpoints ui` (or `AGENT_APP_CHECKPOINTS=ui`) records it; any
+  other build gets each checkpoint as a chat message the builder sends, and the
+  builder records the reply. The OpenClaw, Hermes and dsh managers show the
+  questions and the requirements (to read, edit, send back with changes, or
+  approve) in the app's tab, through the integration starter's new
+  `CheckpointApi`; their Build form tells the builder so.
+- **Part A is checked on its own.** `checkpoint review` opens only on a
+  complete Part A — its sections, no placeholders, at least one feature, no
+  duplicate Feature IDs, a bounded Out of Scope — so the person never reviews
+  a template. The person's own edit of Part A is checked the same way, and
+  never touches Part B.
+
+### Changed
+
+- **Approval is written by the framework.** `checkpoint approve` writes the
+  dated line in `### Approval`, naming where it was given; the creator skill no
+  longer has the builder write it. The gate's check is unchanged, so existing
+  apps keep passing.
+- **The creator skill writes Part B after Part A is approved**, and reads the
+  Quality Standard before Part B rather than before the questions, so the
+  questions and the review reach the person sooner. A blueprint's starter spec
+  (one that ships filled in, like the react-node to-do app) is never taken as
+  the person's: its Part A is replaced by theirs.
+
+### Upgrading an existing app
+
+Nothing to do. Checkpoints apply to new builds; an app already built keeps its
+approved spec.
+
+## 0.2.1 — protocol 0.2
+
+`agent-app-framework`, `@a2app/rules`, `@a2app/sdk`, `@a2app/adapter-core` and
+`@a2app/reverse-proxy` are released together at 0.2.1. They pin each other
+exactly, so `@a2app/reverse-proxy` is released to carry the fixed
+`@a2app/adapter-core`; the react-node and sidecar blueprints now depend on
+`^0.2.1`, so a new app never resolves the adapter before the fix.
+
 ### Added
 
 - **Every app keeps its history in a git repository of its own** (Quality

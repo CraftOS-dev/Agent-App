@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentapp/checkpoint.json",
+  "title": "Build checkpoints",
+  "description": "An app's build checkpoints, in .a2app/checkpoint.json: the moments a creation stops for the person — the builder's clarifying questions, and the review of Part A of reference/requirements.md before anything is built. Runtime state, written only by `agent-app <dir> checkpoint` and `scaffold --checkpoints`: never committed, exported or fingerprinted. A harness's build panel reads it through `checkpoint show`, and finds an open one on the app's row in `agent-app list --json` (`checkpoint`, the fields of $defs/summary).",
+  "type": "object",
+  "required": ["version", "current", "history"],
+  "properties": {
+    "version": { "const": 1 },
+    "mode": {
+      "enum": ["ui", "chat"],
+      "description": "Where this build's checkpoints are shown, recorded at scaffold: `ui` when a harness's build panel renders them and records the reply; absent or `chat` when the builder relays them in chat. The AGENT_APP_CHECKPOINTS environment variable overrides it per process."
+    },
+    "current": {
+      "description": "The checkpoint opened last, whatever its status; null before the first.",
+      "oneOf": [{ "$ref": "#/$defs/checkpoint" }, { "type": "null" }]
+    },
+    "history": { "type": "array", "items": { "$ref": "#/$defs/checkpoint" } }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["id", "kind", "round", "status", "shown", "createdAt"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^c-[0-9a-f]{8}$" },
+        "kind": { "enum": ["questions", "review"] },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Which batch of questions (at most 2: one batch and one follow-up), or which review of Part A."
+        },
+        "status": {
+          "enum": ["pending", "answered", "approved", "changes", "cancelled"],
+          "description": "pending: waiting for the person. answered: questions answered. approved: Part A approved, and the dated line written in ### Approval. changes: the person asked for Part A to be revised. cancelled: withdrawn by the builder."
+        },
+        "shown": { "enum": ["ui", "chat"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "question": {
+      "type": "object",
+      "required": ["id", "question", "options", "multiSelect"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$", "maxLength": 40 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "why": { "type": "string", "maxLength": 300, "description": "Why the answer matters, shown under the question." },
+        "options": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "description": "Choices the person can pick; none for a free-text question. The person may always answer in their own words."
+        },
+        "multiSelect": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "required": ["id", "choices"],
+      "properties": {
+        "id": { "type": "string" },
+        "choices": { "type": "array", "items": { "type": "string" }, "description": "Among the question's options; at most one unless multiSelect." },
+        "other": { "type": "string", "maxLength": 2000, "description": "The person's own words." }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "allOf": [{ "$ref": "#/$defs/summary" }],
+      "type": "object",
+      "properties": {
+        "intro": { "type": "string", "maxLength": 600 },
+        "questions": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "$ref": "#/$defs/question" } },
+        "answeredAt": { "type": "string", "format": "date-time" },
+        "answers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/answer" },
+          "description": "From a panel's form: one per question, in order; an empty answer leaves the decision to the builder."
+        },
+        "text": { "type": "string", "description": "The person's reply in their own words: a chat reply to questions, or a change request on a review." },
+        "edited": { "type": "boolean", "description": "The person edited Part A themselves." },
+        "by": { "type": "string", "description": "Where the approval was given: a harness's name, or chat." }
+      }
+    }
+  }
+}

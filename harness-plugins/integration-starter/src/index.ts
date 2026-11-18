@@ -16,6 +16,7 @@
  */
 import { runA2App, type CliResult } from "./cli.js";
 import { catalogueArgv, inspectArgv, installArgv } from "./packages.js";
+import { BUILD_PANEL_NOTE } from "./checkpoint.js";
 
 export { runA2App, type CliResult, type RunOptions } from "./cli.js";
 export {
@@ -72,6 +73,13 @@ export {
   type InboundRoute,
   type SubscribeRoute,
 } from "./harness.js";
+export {
+  BUILD_PANEL_NOTE,
+  CheckpointApi,
+  checkpointWaiting,
+  parseCheckpoint,
+  type CheckpointSummary,
+} from "./checkpoint.js";
 
 export const INTEGRATION_STARTER_VERSION = "0.1.0";
 
@@ -87,7 +95,7 @@ export const FRAMEWORK_SKILLS = ["creator", "modify", "importer", "operator", "w
  *  command modules. `login` and `logout` belong to `a2app` (they ask the person
  *  to approve an agent in the app), so they are not here. */
 export const FRAMEWORK_VERBS = new Set([
-  "scaffold", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
+  "scaffold", "checkpoint", "import", "export", "validate", "commit", "toolkit-sync", "adapter-sync", "serve", "stop", "open",
   "bridge", "dev", "promote", "backup", "restore", "owner", "invite", "credential", "forget", "remove",
   "list", "blueprints", "global", "skills", "catalogue", "inspect", "install",
 ]);
@@ -571,8 +579,9 @@ function str(v: unknown): string {
  *  the skill that owns the activity: `build` (creator), `modify`, `operate`
  *  (operator), and `install`, `import` and `adopt` (importer). The wording
  *  mirrors the `/agent-app` command: name the skill, forbid building from
- *  general knowledge. */
-export function buildKickoffPrompt(body: Record<string, unknown>): FormActionResult {
+ *  general knowledge. `checkpoints: "ui"` is a build the manager shows in its
+ *  build panel: the builder's questions and the requirements review go there. */
+export function buildKickoffPrompt(body: Record<string, unknown>, opts: { checkpoints?: "ui" } = {}): FormActionResult {
   const action = str(body.action);
   const requirement = str(body.requirement);
   if (action === "build") {
@@ -584,8 +593,10 @@ export function buildKickoffPrompt(body: Record<string, unknown>): FormActionRes
       `Build a new Agent App named "${name}".\n\n` +
       `Requirements:\n${requirement}\n\n` +
       `Scaffold from blueprint \`${blueprint}\`${port ? ` on port ${port}` : ""}. Load the **creator** skill and follow it end to end: ` +
-      `scaffold, build feature by feature under the ownership boundary, run \`agent-app validate\`, launch, and have a separate agent walk-verify before announcing. ` +
-      `Do not build from general knowledge outside the skill.`;
+      `scaffold, ask the person what you cannot decide and have the requirements approved, build feature by feature under the ownership boundary, ` +
+      `run \`agent-app validate\`, launch, and have a separate agent walk-verify before announcing. ` +
+      `Do not build from general knowledge outside the skill.` +
+      (opts.checkpoints === "ui" ? `\n\n${BUILD_PANEL_NOTE}` : "");
     return { kind: "kickoff", activity: "creator", prompt, message: `Kickoff prompt for building "${name}" with the creator skill:` };
   }
   if (action === "modify" || action === "operate") {

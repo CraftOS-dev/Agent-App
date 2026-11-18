@@ -20,6 +20,12 @@
  * `agent.followup` delivers each message, and `session.deriveMessages()` reads
  * the transcript back. Lifecycle actions shell the framework CLIs
  * (`serve` / `stop` / `remove`).
+ *
+ * A build from the form shows its checkpoints in the app's tab: the builder's
+ * questions, then Part A of the requirements to edit and approve. The shared
+ * engine's `CheckpointApi` (`/checkpoint`, `/checkpoint/answer`,
+ * `/checkpoint/approve`) records the person's reply, which is then posted into
+ * the app's session as their message, and the build carries on.
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
@@ -37,6 +43,7 @@ import {
   connectAgentName,
   connectedSessionPreamble,
   ConnectApi,
+  CheckpointApi,
   type RemoteRow,
   FRAMEWORK_BLUEPRINTS,
   INSTALL_STEPS,
@@ -134,6 +141,7 @@ export function registerManager(ctx: ManagerHost): () => void {
   const handles = new Map<string, DshAgentHandle>();
   const packages = new PackageApi(FRAMEWORK_CLI);
   const connect = new ConnectApi(CLI, FRAMEWORK_CLI, { agentName: connectAgentName("dsh") });
+  const checkpoints = new CheckpointApi(FRAMEWORK_CLI, "dsh");
 
   const mintToken = (): string => {
     const now = Date.now();
@@ -224,6 +232,15 @@ export function registerManager(ctx: ManagerHost): () => void {
     handle.agent.followup(userMessage(text));
   }
 
+  /** Post the person's message into an app's session, which runs the agent on it. */
+  async function postToSession(path: string, name: string, text: string): Promise<void> {
+    const seeded = transcript(sessionIdFor(path)).length > 0;
+    // A connected app (its path is its URL) is another machine's: operated, never modified.
+    const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
+    const message = seeded ? text : `${preamble}\n\n${text}`;
+    await deliver(sessionIdFor(path), existsSync(path) ? path : APPS_DIR, message);
+  }
+
   function transcript(sessionId: string): { role: string; text: string; tools: string[] }[] {
     const session = ctx.get<DshSessions>("sessions")?.get(sessionId);
     if (!session) return [];
@@ -272,7 +289,7 @@ export function registerManager(ctx: ManagerHost): () => void {
   }
 
   function startBuild(body: Record<string, unknown>): Promise<{ status: number; out: Record<string, unknown> }> {
-    const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port });
+    const kick = buildKickoffPrompt({ action: "build", name: body.name, requirement: body.requirement, blueprint: body.blueprint, port: body.port }, { checkpoints: "ui" });
     return startAgentRun(String(body.name ?? ""), kick);
   }
 
@@ -352,6 +369,7 @@ export function registerManager(ctx: ManagerHost): () => void {
         if (method === "GET" && sub === "/catalogue") { reply(await packages.catalogue({ search: url.searchParams.get("search"), source: url.searchParams.get("source") })); return; }
         if (method === "GET" && sub === "/install") { reply(packages.job(url.searchParams.get("job"))); return; }
         if (method === "GET" && sub === "/connect") { reply(connect.job(url.searchParams.get("job"))); return; }
+        if (method === "GET" && sub === "/checkpoint") { reply(await checkpoints.show(url.searchParams.get("app"))); return; }
         if (method !== "POST") { send(405, { ok: false, message: "method not allowed" }); return; }
         if (sub === "/upload") {
           // The zip itself, not JSON: streamed to a private file, bounded as it arrives.
@@ -374,13 +392,20 @@ export function registerManager(ctx: ManagerHost): () => void {
           const path = String(body.path ?? "");
           const text = String(body.text ?? "").trim();
           if (!text) { send(400, { ok: false, message: "empty message" }); return; }
-          const seeded = transcript(sessionIdFor(path)).length > 0;
-          const name = String(body.name ?? basename(path));
-          // A connected app (its path is its URL) is another machine's: operated, never modified.
-          const preamble = appOrigin(path) === path ? connectedSessionPreamble(name, path) : sessionPreamble(name, path);
-          const message = seeded ? text : `${preamble}\n\n${text}`;
-          await deliver(sessionIdFor(path), existsSync(path) ? path : APPS_DIR, message);
+          await postToSession(path, String(body.name ?? basename(path)), text);
           send(200, { ok: true });
+          return;
+        }
+        if (sub === "/checkpoint/answer" || sub === "/checkpoint/approve") {
+          const r = sub === "/checkpoint/answer" ? await checkpoints.answer(body) : await checkpoints.approve(body);
+          if (r.status === 200 && typeof r.body.message === "string") {
+            const path = String(body.app);
+            const name = String(body.name ?? basename(path));
+            await postToSession(path, name, r.body.message);
+            // The build carries on, so its tab shows it building, even one a restart forgot.
+            if (!builds.has(path)) builds.set(path, { name, dir: path, ended: false });
+          }
+          reply(r);
           return;
         }
         if (sub === "/app/serve" || sub === "/app/stop" || sub === "/app/remove") {

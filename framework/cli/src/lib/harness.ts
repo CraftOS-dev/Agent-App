@@ -147,11 +147,10 @@ export interface HarnessConfig {
  */
 export const BUILT_IN_HARNESSES: readonly HarnessProfile[] = [
   // Headless Claude Code has nobody to approve a command, so without a grant
-  // every `a2app` call the prompt asks for is refused, and a determined agent
-  // goes looking for another way in (reading the token, editing the adapter's
-  // state file). The grant is exactly the CLI the prompt names, and file edits
-  // are denied: a delivered task is done through the app's API, not its files.
-  // The variadic tool lists come before `-p` so they cannot swallow the prompt.
+  // every `a2app` call the prompt asks for is refused. The route grants the CLI
+  // the prompt names and takes nothing away: every other tool follows the
+  // user's own Claude Code permissions, as with every other harness here.
+  // The variadic tool list comes before `-p` so it cannot swallow the prompt.
   {
     id: "claude",
     name: "Claude Code",
@@ -159,11 +158,7 @@ export const BUILT_IN_HARNESSES: readonly HarnessProfile[] = [
       {
         mode: "headless",
         command: "claude",
-        args: [
-          "--allowedTools", "Bash(a2app:*)",
-          "--disallowedTools", "Edit", "Write", "NotebookEdit",
-          "-p", PROMPT_PLACEHOLDER,
-        ],
+        args: ["--allowedTools", "Bash(a2app:*)", "-p", PROMPT_PLACEHOLDER],
       },
     ],
   },

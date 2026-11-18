@@ -12,7 +12,8 @@
  * reaches the binary that owns it, never one guessed from its argv); the
  * manager page carries its panels; the marketplace and import routes, with a
  * source that is not a package going to the importer skill in a new app's
- * session; and Connect (the sign-in, a connected app's row and session).
+ * session; Connect (the sign-in, a connected app's row and session); and a
+ * build's checkpoints, answered in its tab and posted into its session.
  */
 import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -73,7 +74,13 @@ const services = {
     },
     resume: async () => assert.fail("no session exists yet"),
   },
-  sessions: { get: () => undefined },
+  // A session's transcript is what was delivered into it; one never written to does not exist.
+  sessions: {
+    get: (sessionId) => {
+      const sent = followups.filter((f) => f.sessionId === sessionId);
+      return sent.length ? { deriveMessages: () => sent.map((f) => ({ role: "user", content: f.text })) } : undefined;
+    },
+  },
 };
 const scoped = { get: (name) => services[name], webServer: { register: (route) => (routes.push(route), () => {}) } };
 host.apply({
@@ -184,8 +191,54 @@ try {
   assert.equal(crm.sessionId, "agent-app:127.0.0.1-8191", "keyed by its host, no colon inside the last part");
   assert.match(crm.text, /^You are working with the Agent App "Team CRM" at http:\/\/127\.0\.0\.1:8191, on another machine/);
   assert.equal((await api("/app/disconnect", { method: "POST", body: { path: CRM } })).status, 200);
+
+  /* ── A build from the form stops for the person in its tab: questions, then the requirements ── */
+  for (const part of ["/checkpoint?app=", "/checkpoint/answer", "/checkpoint/approve", "Approve and build", "Send answers"]) {
+    assert.ok(script.includes(part), `the page has ${part}`);
+  }
+  // dsh never ends a build on its own, so the tab must show the checkpoint ahead of the building spinner.
+  assert.match(script, /function appPanel\(r, notice\) \{\n  if \(r\.remote\)[^\n]*\n  if \(waiting\(r\)\) return checkpointPanel\(r\);/);
+  r = await api("/build", { method: "POST", body: { name: "Ledger", requirement: "Track spend." } });
+  assert.equal(r.status, 200, r.text);
+  const ledger = r.json.path;
+  assert.equal(followups.at(-1).sessionId, "agent-app:ledger");
+  assert.match(followups.at(-1).text, /scaffold with `--checkpoints ui`/, "the builder is told its questions go to the panel");
+  process.env.FAKE_CHECKPOINT = join(base, "checkpoint.json");
+  const asked = { id: "c-0000000a", kind: "questions", round: 1, status: "pending", shown: "ui", createdAt: "2026-11-17T00:00:00.000Z" };
+  writeFileSync(process.env.FAKE_CHECKPOINT, JSON.stringify(asked));
+  writeFileSync(process.env.FAKE_REGISTRY, JSON.stringify({ ok: true, apps: [{ id: "led", name: "Ledger", path: ledger, status: "stopped", checkpoint: asked }], connected: [] }));
+  let row = (await api("/apps")).json.rows.find((x) => x.path === ledger);
+  assert.deepEqual([row.building, row.checkpoint.status, row.checkpoint.shown], [true, "pending", "ui"], "a build waiting on the person in its tab");
+  r = await api(`/checkpoint?app=${encodeURIComponent(ledger)}`);
+  assert.deepEqual([r.status, r.json.checkpoint.id], [200, "c-0000000a"]);
+  const before = followups.length;
+  r = await api("/checkpoint/answer", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-stale", answers: [] } });
+  assert.equal(r.status, 409, "a reply to a step the build moved past");
+  r = await api("/checkpoint/answer", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-0000000a", answers: [{ id: "who", choices: ["Just me"] }] } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(followups.length, before + 1, "one message, for the one reply");
+  assert.deepEqual(followups.at(-1), { sessionId: "agent-app:ledger", text: r.json.message }, "the person's message, as the CLI wrote it, in the build's session");
+
+  // The review: an incomplete edit is refused with what is wrong; an approval names dsh.
+  writeFileSync(process.env.FAKE_CHECKPOINT, JSON.stringify({ ...asked, id: "c-0000000b", kind: "review" }));
+  r = await api("/checkpoint/approve", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-0000000b", partA: "# Requirements\n<REPLACE: who>\n" } });
+  assert.deepEqual([r.status, r.json.problems.length, followups.length], [422, 1, before + 1], "refused, and nothing posted");
+  r = await api("/checkpoint/approve", { method: "POST", body: { app: ledger, name: "Ledger", id: "c-0000000b" } });
+  assert.deepEqual([r.status, r.json.message], [200, "approve: dsh"]);
+  assert.deepEqual(followups.at(-1), { sessionId: "agent-app:ledger", text: "approve: dsh" });
+
+  // A reply carries on a build this process did not start (dsh restarted mid-build): its tab shows it building.
+  const notes = join(process.env.A2APP_HOME, "apps", "notes");
+  const review = { ...asked, id: "c-0000000c", kind: "review" };
+  writeFileSync(process.env.FAKE_CHECKPOINT, JSON.stringify(review));
+  writeFileSync(process.env.FAKE_REGISTRY, JSON.stringify({ ok: true, apps: [{ id: "notes", name: "Notes", path: notes, status: "stopped", checkpoint: review }], connected: [] }));
+  assert.equal((await api("/apps")).json.rows.find((x) => x.path === notes).building, false);
+  r = await api("/checkpoint/approve", { method: "POST", body: { app: notes, name: "Notes", id: "c-0000000c" } });
+  assert.equal(r.status, 200, r.text);
+  assert.ok(followups.at(-1).text.endsWith("\n\napprove: dsh"), "after the preamble a session new to this process gets");
+  assert.equal((await api("/apps")).json.rows.find((x) => x.path === notes).building, true);
 } finally {
   rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
-console.log("✓ dsh: 19 tools, each run by the engine's own (so by the binary that owns it); the manager's panels and its marketplace, import, agent hand-off and connect routes");
+console.log("✓ dsh: 19 tools, each run by the engine's own (so by the binary that owns it); the manager's panels and its marketplace, import, agent hand-off and connect routes; build checkpoints in the tab, and the build carrying on");

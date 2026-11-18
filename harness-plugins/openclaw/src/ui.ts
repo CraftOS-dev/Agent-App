@@ -241,6 +241,25 @@ a.btn{text-decoration:none}
 .connecting iframe{flex:1;width:100%;border:none;background:#fff}
 .connecting-body{flex:1;overflow:auto;display:flex;justify-content:center;align-items:flex-start;padding:24px}
 .code-inline{font:12px var(--mono);padding:1px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text-strong)}
+/* ── Build checkpoints: the builder's questions, then the requirements ── */
+.card.wide{max-width:760px}
+.q{margin:0;padding:16px 0;border-top:1px solid var(--border)}
+.q:first-of-type{border-top:none}
+.q .qtext{margin:0;font-size:14px;font-weight:600;color:var(--text-strong)}
+.q .why{margin:2px 0 0;font-size:12px;color:var(--muted)}
+.q .chips{margin:10px 0 8px}
+.q .chip{padding:4px 12px;font-size:12.5px}
+.doc{border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);padding:4px 18px 14px;max-height:56vh;overflow:auto;font-size:13px;line-height:1.6}
+.doc h3,.doc h4,.doc h5,.doc h6{margin:14px 0 4px;color:var(--text-strong);font-weight:600}
+.doc h3{font-size:16px}.doc h4{font-size:14px}.doc h5,.doc h6{font-size:13px}
+.doc p{margin:6px 0}
+.doc ul,.doc ol{margin:4px 0;padding-left:20px}
+.doc code{font:12px var(--mono);background:var(--bg);border-radius:4px;padding:0 4px}
+textarea.input.mono{font:12px/1.55 var(--mono);min-height:56vh}
+.doc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:16px 0 8px}
+.doc-head span{font-size:12px;color:var(--muted)}
+.problems{margin:10px 0 0;padding-left:18px;color:var(--warn);font-size:12.5px;line-height:1.6}
+.cp-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:16px}
 </style></head><body>
 <header class="tabbar" id="tabbar"></header>
 <main>
@@ -274,7 +293,12 @@ const S = {
   conn: { url: "", data: null, error: null, code: "", confirming: false, starting: false },
   // What went wrong with a tab's last action, shown on its panel.
   notice: null,
+  // The build checkpoint the active tab shows: what it asks, and the person's reply so far.
+  cp: emptyCheckpoint(null),
 };
+function emptyCheckpoint(id) {
+  return { id, data: null, error: null, answers: {}, editing: false, draft: null, changes: "", problems: [], sending: false, failed: "" };
+}
 
 function api(path, body) {
   const opts = { method: body ? "POST" : "GET", headers: { "x-a2app-token": CFG.token } };
@@ -307,6 +331,7 @@ function activeRow() { return S.rows.find((r) => r.path === S.active) ?? null; }
 /** An app that can be shown: a local one running here, a connected one answering. */
 function live(r) { return r.remote ? r.status === "online" : r.status === "running"; }
 function dotClass(r) {
+  if (waiting(r)) return "warn";
   if (r.building) return "busy";
   if (live(r)) return "ok";
   if (r.status === "unreachable" || r.status === "expired") return "warn";
@@ -411,7 +436,8 @@ function renderView() {
   const panel = document.getElementById("panel");
   const framesBox = document.getElementById("frames");
   const r = activeRow();
-  const showFrame = !!(r && live(r) && r.url && embeddable(r));
+  const asking = !!(r && waiting(r));
+  const showFrame = !!(r && live(r) && r.url && embeddable(r)) && !asking;
   for (const [path, f] of frames) {
     const row = S.rows.find((x) => x.path === path);
     if (!row || !live(row) || !embeddable(row)) { f.remove(); frames.delete(path); }
@@ -434,13 +460,17 @@ function renderView() {
       ? "connecting:" + S.active + ":" + connectStage(S.conn)
       : isNew
         ? "new:" + S.newMode + (S.job ? ":job" : "") + (S.conn.starting ? ":starting" : "") + (S.conn.error && !S.conn.data ? ":err" : "")
-        : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side, notice].join("|");
+        : asking
+          // S.cp.id too: the panel resets S.cp for a new checkpoint only when it
+          // renders, so without it a new one could match the last one's key.
+          ? ["checkpoint", r.path, r.checkpoint.id, S.cp.id, !!S.cp.data, !!S.cp.error, S.cp.editing, S.cp.sending].join("|")
+          : ["app", r.path, r.status, r.building, r.buildEnded, S.busy.has(r.path), S.side, notice].join("|");
   if (key === viewKey) return;
   viewKey = key;
   if (showFrame) return;
   panel.replaceChildren();
   connTab = null;
-  panel.classList.toggle("top", isNew);
+  panel.classList.toggle("top", isNew || asking);
   panel.classList.toggle("fill", connecting);
   if (connecting) { panel.appendChild(connectTabView()); return; }
   if (isNew) { panel.appendChild(newPanel()); return; }
@@ -462,6 +492,7 @@ function noFrameReason(hint) {
 function embeddableUrl(url) { return !(location.protocol === "https:" && /^http:/.test(url)); }
 function appPanel(r, notice) {
   if (r.remote) return remotePanel(r, notice);
+  if (waiting(r)) return checkpointPanel(r);
   const c = el("div", "card");
   const busy = S.busy.has(r.path);
   if (r.building) {
@@ -540,6 +571,207 @@ function remotePanel(r, notice) {
   row.appendChild(sess);
   c.appendChild(row);
   return c;
+}
+
+/* ── Build checkpoints ─────────────────────────────────── */
+// A build stops for the person twice: the builder's questions, then Part A of
+// the requirements to read, edit and approve. Their reply goes to the agent as
+// their next message in the app's session, and the build carries on.
+function waiting(r) {
+  return !r.remote && !!r.checkpoint && r.checkpoint.status === "pending" && r.checkpoint.shown === "ui";
+}
+function checkpointPanel(r) {
+  const cp = r.checkpoint;
+  if (S.cp.id !== cp.id) {
+    S.cp = emptyCheckpoint(cp.id);
+    api("/checkpoint?app=" + encodeURIComponent(r.path)).then((out) => {
+      if (S.cp.id !== cp.id) return;
+      // A step the build left between the row and this read: show what is waiting now.
+      if (out.ok && (!out.checkpoint || out.checkpoint.id !== cp.id || out.checkpoint.status !== "pending")) { refresh(); return; }
+      if (out.ok) {
+        S.cp.data = out;
+        if (out.partA != null) S.cp.draft = out.partA;
+      } else S.cp.error = out.message || "Could not read this step.";
+      render();
+    }, () => { if (S.cp.id === cp.id) { S.cp.error = "Could not read this step."; render(); } });
+  }
+  const c = el("div", "card wide");
+  if (S.cp.error) { c.appendChild(errorBox(S.cp.error, () => { S.cp.id = null; render(); })); return c; }
+  if (!S.cp.data) { c.appendChild(el("div", "spinner")); return c; }
+  return cp.kind === "questions" ? questionsView(r, c) : reviewView(r, c);
+}
+function questionsView(r, c) {
+  const data = S.cp.data.checkpoint;
+  const qs = data.questions || [];
+  c.appendChild(el("h2", null, data.round > 1 ? "A follow-up before the agent writes the requirements" : "A few questions before the agent writes the requirements"));
+  c.appendChild(el("p", "sub", data.intro || "Answer what you can. Anything you leave blank, the agent decides."));
+  for (const q of qs) {
+    const a = S.cp.answers[q.id] || (S.cp.answers[q.id] = { choices: [], other: "" });
+    const box = el("div", "q");
+    box.appendChild(el("p", "qtext", q.question));
+    if (q.why) box.appendChild(el("p", "why", q.why));
+    if (q.options.length) {
+      const chips = el("div", "chips");
+      const paint = () => { for (const b of chips.children) b.classList.toggle("on", a.choices.includes(b.dataset.v)); };
+      for (const o of q.options) {
+        const b = el("button", "chip", o);
+        b.type = "button";
+        b.dataset.v = o;
+        b.onclick = () => {
+          const on = a.choices.includes(o);
+          a.choices = q.multiSelect ? (on ? a.choices.filter((x) => x !== o) : a.choices.concat(o)) : (on ? [] : [o]);
+          paint();
+        };
+        chips.appendChild(b);
+      }
+      paint();
+      box.appendChild(chips);
+    }
+    const other = el("input", "input");
+    other.placeholder = q.options.length ? "Or in your own words\\u2026" : "Your answer\\u2026";
+    other.value = a.other;
+    other.oninput = () => { a.other = other.value; };
+    box.appendChild(other);
+    c.appendChild(box);
+  }
+  if (S.cp.failed) c.appendChild(el("div", "err", S.cp.failed));
+  const actions = el("div", "cp-actions");
+  const go = el("button", "btn primary", S.cp.sending ? "Sending\\u2026" : "Send answers");
+  go.disabled = S.cp.sending;
+  go.onclick = () => {
+    const answers = qs.map((q) => {
+      const a = S.cp.answers[q.id];
+      return Object.assign({ id: q.id, choices: a.choices }, a.other.trim() ? { other: a.other.trim() } : {});
+    });
+    replyToCheckpoint(r, "/checkpoint/answer", { answers });
+  };
+  actions.appendChild(go);
+  c.appendChild(actions);
+  return c;
+}
+function reviewView(r, c) {
+  const round = S.cp.data.checkpoint.round;
+  c.appendChild(el("h2", null, round > 1 ? "Review the revised requirements" : "Review the requirements"));
+  c.appendChild(el("p", "sub", "This is what the agent will build. Edit it yourself, ask for changes, or approve it to start the build."));
+  const head = el("div", "doc-head");
+  head.appendChild(el("span", null, S.cp.editing ? "Editing Part A" : "Part A \\u2014 what the app must do"));
+  const toggle = el("button", "btn small", S.cp.editing ? "Preview" : "Edit");
+  toggle.onclick = () => { S.cp.editing = !S.cp.editing; render(); };
+  head.appendChild(toggle);
+  c.appendChild(head);
+  if (S.cp.editing) {
+    const ta = el("textarea", "input mono");
+    ta.value = S.cp.draft;
+    ta.spellcheck = false;
+    ta.oninput = () => {
+      S.cp.draft = ta.value;
+      // What was wrong with the last attempt no longer describes the text.
+      if (S.cp.problems.length || S.cp.failed) {
+        S.cp.problems = []; S.cp.failed = "";
+        for (const n of c.querySelectorAll(".problems, .err")) n.remove();
+      }
+    };
+    c.appendChild(ta);
+  } else {
+    c.appendChild(markdown(forReader(S.cp.draft)));
+  }
+  if (S.cp.problems.length) {
+    const ul = el("ul", "problems");
+    for (const p of S.cp.problems) ul.appendChild(el("li", null, p));
+    c.appendChild(ul);
+  }
+  c.appendChild(el("label", null, "What should change?"));
+  const changes = el("textarea", "input");
+  changes.placeholder = "Optional \\u2014 tell the agent what to add, drop or do differently.";
+  changes.style.minHeight = "72px";
+  changes.value = S.cp.changes;
+  changes.oninput = () => { S.cp.changes = changes.value; ask.disabled = S.cp.sending || !S.cp.changes.trim(); };
+  c.appendChild(changes);
+  if (S.cp.failed) c.appendChild(el("div", "err", S.cp.failed));
+  const actions = el("div", "cp-actions");
+  const edited = () => (S.cp.draft !== S.cp.data.partA ? { partA: S.cp.draft } : {});
+  const ask = el("button", "btn", "Ask for changes");
+  ask.disabled = S.cp.sending || !S.cp.changes.trim();
+  ask.onclick = () => replyToCheckpoint(r, "/checkpoint/answer", Object.assign({ changes: S.cp.changes.trim() }, edited()));
+  const ok = el("button", "btn primary", S.cp.sending ? "Sending\\u2026" : "Approve and build");
+  ok.disabled = S.cp.sending;
+  ok.onclick = () => replyToCheckpoint(r, "/checkpoint/approve", edited());
+  actions.appendChild(ask);
+  actions.appendChild(ok);
+  c.appendChild(actions);
+  return c;
+}
+async function replyToCheckpoint(r, path, body) {
+  const cp = S.cp;
+  cp.sending = true; cp.failed = ""; cp.problems = [];
+  render();
+  let out;
+  try { out = await api(path, Object.assign({ app: r.path, name: r.name, id: cp.id }, body)); }
+  catch { out = { ok: false, message: "Could not reach the plugin. Try again." }; }
+  if (S.cp !== cp) return;
+  cp.sending = false;
+  if (out.ok) {
+    // The build carries on; the tab shows it building until the next step.
+    r.checkpoint = Object.assign({}, r.checkpoint, { status: "answered" });
+    S.cp = emptyCheckpoint(null);
+    await refresh();
+    if (!S.side) toggleSide(true);
+    return;
+  }
+  cp.failed = out.message || "That did not go through.";
+  cp.problems = out.problems || [];
+  if (cp.problems.length) cp.editing = true;
+  render();
+  if (out.reason === "moved") refresh();
+}
+/** Part A as the person reads it: without the template's marker line, or the Approval section that approving writes. */
+function forReader(text) {
+  let approval = false;
+  return (text || "").split("\\n").filter((line) => {
+    if (/^PART A\\b/.test(line)) return false;
+    if (/^#{1,6}\\s/.test(line)) approval = /^#{1,6}\\s+Approval\\b/i.test(line);
+    return !approval;
+  }).join("\\n");
+}
+/** Markdown to DOM, for the spec: headings, lists, paragraphs, bold and code. Text only — never innerHTML. */
+function inlineMd(parent, text) {
+  const re = /(\\*\\*[^*]+\\*\\*|\\u0060[^\\u0060]+\\u0060)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    parent.appendChild(m[0].startsWith("**") ? el("strong", null, m[0].slice(2, -2)) : el("code", null, m[0].slice(1, -1)));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+function markdown(src) {
+  const box = el("div", "doc");
+  let list = null, para = null;
+  for (const raw of (src || "").split("\\n")) {
+    const line = raw.trimEnd();
+    let m;
+    if (!line.trim()) { list = null; para = null; continue; }
+    if ((m = line.match(/^(#{1,4})\\s+(.*)/))) {
+      list = null; para = null;
+      const h = el("h" + (m[1].length + 2));
+      inlineMd(h, m[2]);
+      box.appendChild(h);
+    } else if ((m = line.match(/^\\s*([-*]|\\d+\\.)\\s+(.*)/))) {
+      para = null;
+      if (!list) { list = el(/\\d/.test(m[1]) ? "ol" : "ul"); box.appendChild(list); }
+      const li = el("li");
+      inlineMd(li, m[2]);
+      list.appendChild(li);
+    } else if (list && /^\\s{2,}\\S/.test(raw)) {
+      list.lastChild.appendChild(document.createTextNode(" "));
+      inlineMd(list.lastChild, line.trim());
+    } else {
+      list = null;
+      if (!para) { para = el("p"); box.appendChild(para); } else para.appendChild(document.createTextNode(" "));
+      inlineMd(para, line.trim());
+    }
+  }
+  return box;
 }
 
 /* ── New-app form ──────────────────────────────────────── */

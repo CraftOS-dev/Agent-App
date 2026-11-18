@@ -1,10 +1,13 @@
 /**
- * agent-app <dir> scaffold --blueprint <id|path> [--name "..."] [--port N] [--auth-mode none|multi-user]
+ * agent-app <dir> scaffold --blueprint <id|path> [--name "..."] [--port N] [--auth-mode none|multi-user] [--checkpoints ui|chat]
  *
  * Scaffold a new Agent App: vendor the blueprint, assign a fresh identity, stamp
  * versions, write the ownership canon, provision the agent credential, and
  * start the app's git repository with the scaffold as its first commit.
  * Credentials are runtime artifacts — never copied from a blueprint.
+ *
+ * `--checkpoints ui` records that a harness's build panel shows this build's
+ * checkpoints (`agent-app <dir> checkpoint`); without it they go to chat.
  *
  * `<dir>` is the app being created, so it is the target here rather than an
  * existing app — same first-positional slot as every other command (spec 5.1).
@@ -14,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { writeSystemHashes } from "../lib/canon.js";
 import { flag, hasFlag } from "../lib/args.js";
+import { writeCheckpoints } from "../lib/checkpoint.js";
 import { mintAgentToken, stripCredentials } from "../lib/credential.js";
 import { writeFileAtomic } from "../lib/home.js";
 import { linkLocalPackages } from "../lib/localPackages.js";
@@ -70,6 +74,11 @@ export async function run(args: string[], app: string): Promise<number> {
     }
   }
 
+  const checkpoints = flag(args, "checkpoints") ?? process.env.AGENT_APP_CHECKPOINTS?.trim() ?? "chat";
+  if (checkpoints !== "ui" && checkpoints !== "chat") {
+    throw new UsageError(`--checkpoints is "ui" or "chat" (got "${checkpoints}")`);
+  }
+
   const name = flag(args, "name") ?? basename(dir);
   // Every app is built on a blueprint (`blueprint-base` is the one with no
   // stack). Without one there is nothing to build on, so the choice is asked
@@ -99,6 +108,7 @@ export async function run(args: string[], app: string): Promise<number> {
     vendorPaths(tk, dir, allTemplateFiles(tk));
     ensureIgnoreRules(dir, tk.manifest.lifecycle?.dataDir);
     recordProjectToolkit(dir, tk);
+    if (checkpoints === "ui") writeCheckpoints(dir, { version: 1, mode: "ui", current: null, history: [] });
     const systemPaths = tk.manifest.systemPaths;
     const adapterVersion = adapterVersionOf(tk);
     log.step(`scaffolded from blueprint "${tk.manifest.id}"`);

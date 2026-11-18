@@ -10,15 +10,27 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "folder"],
+        "required": ["id", "name"],
+        "oneOf": [{ "required": ["folder"] }, { "required": ["source"] }],
         "properties": {
           "id": { "type": "string", "minLength": 1, "description": "what `agent-app install <id>` names" },
           "name": { "type": "string" },
           "description": { "type": "string" },
           "folder": { "type": "string", "minLength": 1, "description": "the app's folder in the repository: a relative path with no `..`, `.` or empty segment" },
+          "source": {
+            "type": "object",
+            "required": ["type", "url", "commit"],
+            "properties": {
+              "type": { "const": "github" },
+              "url": { "type": "string", "description": "https://github.com/<owner>/<repo>, without a branch or file path" },
+              "commit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$", "description": "the full commit SHA approved by the catalogue maintainer" },
+              "path": { "type": "string", "minLength": 1, "default": ".", "description": "repository root (.) or an app folder, with no .., empty or embedded . segment" },
+              "branch": { "type": "string", "description": "optional maintainer information; never used for installation" }
+            }
+          },
           "tags": { "type": "array", "items": { "type": "string" } },
           "version": { "type": "string" },
-          "preview": { "type": "string", "description": "image URL; defaults to <folder>/thumbnail.png on the same ref" },
+          "preview": { "type": "string", "description": "image URL; defaults to thumbnail.png in the app folder, at the approved commit for an external source" },
           "toolkit": { "type": "string", "description": "requirement: the toolkit the app is built on; compatible when it is installed here" },
           "agentAppVersion": {
             "type": ["string", "number"],

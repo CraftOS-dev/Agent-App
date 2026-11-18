@@ -17,6 +17,7 @@ import { downloadToFile } from "./download.js";
 import { homePath } from "./home.js";
 import {
   archiveUrl,
+  commitArchiveUrl,
   loadCatalogue,
   marketplaceLocation,
   parseGithubShorthand,
@@ -45,6 +46,9 @@ export interface Provenance {
   version?: string;
   sha256?: string;
   commit?: string;
+  /** External app source; location/ref continue to identify its catalogue. */
+  repository?: string;
+  path?: string;
 }
 
 /** A `--from` source, parsed. */
@@ -207,16 +211,15 @@ function zipPackageRoot(index: ZipEntry[]): string[] {
   return tops.length === 1 && !filesAtRoot ? [tops[0]!] : [];
 }
 
-/** The one folder every entry of a GitHub branch archive sits in (`<repo>-<ref>/`). */
+/** The one folder every entry of a GitHub archive sits in. */
 function archiveRoot(index: ZipEntry[], what: string): string {
   const tops = new Set(index.filter((e) => e.segments.length > 0).map((e) => e.segments[0]!));
-  if (tops.size !== 1) throw new PackageRefusedError(`${what} is not a GitHub branch archive (it has ${tops.size} top-level folders)`);
+  if (tops.size !== 1) throw new PackageRefusedError(`${what} is not a GitHub archive (it has ${tops.size} top-level folders)`);
   return [...tops][0]!;
 }
 
-/** Download a branch archive and take `<root>/<path…>/` out of it (§2): only that folder, matched by whole segments. */
-async function fromBranchArchive(repo: GithubRepo, path: string[], staging: string, dest: string): Promise<{ sha256: string; skipped: string[] }> {
-  const url = archiveUrl(repo);
+/** Download an archive and take `<root>/<path…>/` out of it (§2): only that folder, matched by whole segments. */
+async function fromGithubArchive(url: string, path: string[], staging: string, dest: string): Promise<{ sha256: string; skipped: string[] }> {
   const archive = join(staging, "archive.zip");
   const { sha256 } = await downloadToFile(url, archive, ARCHIVE_LIMITS);
   const index = readZipIndex(archive);
@@ -290,9 +293,19 @@ export async function acquire(request: Request, staging: string): Promise<Acquir
       catalogueId: entry.id,
       ...(entry.version !== undefined ? { version: entry.version } : {}),
     };
+    if (entry.source !== undefined) {
+      const source = entry.source;
+      const path = source.path ?? ".";
+      const { sha256, skipped } = await fromGithubArchive(commitArchiveUrl(source), path === "." ? [] : path.split("/"), staging, dest);
+      return {
+        root: dest,
+        provenance: { ...provenance, repository: source.url, commit: source.commit, path, sha256 },
+        entry, marketplace: m, skipped, warnings,
+      };
+    }
     const folder = entry.folder.split("/");
     if (m.kind === "github") {
-      const { sha256, skipped } = await fromBranchArchive(m, folder, staging, dest);
+      const { sha256, skipped } = await fromGithubArchive(archiveUrl(m), folder, staging, dest);
       return { root: dest, provenance: { ...provenance, sha256 }, entry, marketplace: m, skipped, warnings };
     }
     const src = join(m.dir, ...folder);
@@ -330,7 +343,7 @@ export async function acquire(request: Request, staging: string): Promise<Acquir
       return { root: dest, provenance: { kind: "zip", location: source.file, sha256 }, entry: null, marketplace: null, skipped, warnings };
     }
     case "github": {
-      const { sha256, skipped } = await fromBranchArchive(source, source.path, staging, dest);
+      const { sha256, skipped } = await fromGithubArchive(archiveUrl(source), source.path, staging, dest);
       const location = `github:${source.owner}/${source.repo}${source.path.length > 0 ? `/${source.path.join("/")}` : ""}`;
       return { root: dest, provenance: { kind: "github", location, ref: source.ref, sha256 }, entry: null, marketplace: null, skipped, warnings };
     }

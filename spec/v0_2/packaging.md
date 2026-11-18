@@ -33,7 +33,7 @@ Binary files (a NUL byte, or not UTF-8) are never touched, and neither are the t
 
 ## 2. Catalogue (the marketplace)
 
-A marketplace is a GitHub repository whose root holds `catalogue.json` (schema `catalogue.schema.json`), plus one folder per app:
+A marketplace is a GitHub repository whose root holds `catalogue.json` (schema `catalogue.schema.json`). An app can live in a folder in that repository or in an external repository at a commit approved by the catalogue maintainer:
 
 ```json
 { "version": "1.0.0",
@@ -44,6 +44,31 @@ A marketplace is a GitHub repository whose root holds `catalogue.json` (schema `
 ```
 
 A catalogue without an `apps` list is refused. An entry that does not match the schema is dropped with a warning, so one bad listing never hides the rest.
+
+The `catalogue` command adds a `publisher` display name to each output entry. Apps stored in the marketplace (`folder`) use `CraftOS`. External apps (`source`) use the public GitHub profile name of the owner in `source.url`, falling back to that owner's username if the name is blank or GitHub is unavailable. A manually listed `publisher` is ignored. Profile lookups are shared by apps with the same owner within a listing and time out after two seconds; they run only when browsing the catalogue, before publisher search. They do not affect the approved commit, compatibility checks, inspection, or installation.
+
+An external entry uses `source` instead of `folder` (the URL and SHA here are illustrative):
+
+```json
+{
+  "id": "dev-studio",
+  "name": "Development Studio",
+  "version": "0.1.0",
+  "source": {
+    "type": "github",
+    "url": "https://github.com/example/development-studio",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "path": "."
+  }
+}
+```
+
+`commit` is a full 40-character Git commit SHA, never a branch, tag or shortened
+SHA. `path` defaults to `.` (repository root); a subfolder such as `apps/studio`
+is also supported. An optional `branch` is maintainer information only. Exactly
+one of `folder` and `source` is required. Existing folder entries keep their
+current behavior. A listed commit means the maintainer has approved it; it uses
+the existing marketplace install checks and `catalogued` trust.
 
 **What an entry may require.** `catalogue` marks each entry `compatible` from what the entry itself lists, without downloading the app:
 - `toolkit`: met when that toolkit is installed here;
@@ -60,8 +85,9 @@ A catalogue without an `apps` list is refused. An entry that does not match the 
 
 **How an app is delivered:**
 - The catalogue is `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/catalogue.json`. It is strict JSON.
-- The app comes from the branch archive of the same repository and ref, `https://github.com/<owner>/<repo>/archive/refs/heads/<ref>.zip`. From that archive the installer takes only `<root>/<folder>/`, matched by whole path segments.
-- An entry with no `preview` has `<folder>/thumbnail.png` on the same ref.
+- A folder entry comes from the branch archive of the same repository and ref, `https://github.com/<owner>/<repo>/archive/refs/heads/<ref>.zip`. From that archive the installer takes only `<root>/<folder>/`, matched by whole path segments.
+- An external entry comes from `https://github.com/<owner>/<repo>/archive/<commit>.zip`, taking only its `source.path`. An unavailable commit fails the install; it never retries a branch, tag, latest version or another repository. Changing an author's branch has no effect; a new revision is selected only when the catalogue's `source.commit` changes.
+- An entry with no `preview` uses `thumbnail.png` in its app folder, at the approved commit for external entries and the marketplace ref for folder entries.
 - Downloads send a `User-Agent`, follow redirects, and are bounded while bytes arrive: 8 MiB and 30 s for a catalogue, 512 MiB and 10 minutes for an archive. A declared size over the cap is refused before the body is read.
 - Limits: 512 MiB for the archive, 512 MiB for the extracted app (counted as it unpacks, not taken from the archive's index).
 - Extraction refuses, before anything is written:
@@ -74,6 +100,7 @@ A catalogue without an `apps` list is refused. An entry that does not match the 
   - any entry that would land outside the target.
 - `node_modules/` and `.git/` are never extracted.
 - The archive's SHA-256 is recorded with the app (§4).
+- External installs additionally record `repository`, `commit` and `path` in the manifest's `source`. Its `kind`, `location`, `ref` and `catalogueId` continue to identify the approving marketplace. Existing installed apps and their data are not changed when the catalogue changes.
 
 ## 3. Sources
 

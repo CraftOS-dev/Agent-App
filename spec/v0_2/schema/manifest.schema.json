@@ -67,7 +67,9 @@
         "catalogueId": { "type": "string" },
         "version": { "type": "string", "description": "the catalogue entry's version" },
         "sha256": { "type": "string", "description": "of the archive the app came from (marketplace, zip, github)" },
-        "commit": { "type": "string", "description": "the commit a git source was cloned at" },
+        "commit": { "type": "string", "description": "the commit a git source was cloned at, or the approved external marketplace revision" },
+        "repository": { "type": "string", "description": "external app repository; location/ref still identify the approving catalogue" },
+        "path": { "type": "string", "description": "app path inside the external repository, or . for its root" },
         "installedAt": { "type": "string" }
       }
     }

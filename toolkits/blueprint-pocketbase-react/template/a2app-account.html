@@ -291,8 +291,8 @@
         const give = form([
           field("Agent name", { name: "agentName", required: true, maxlength: 100, placeholder: "e.g. Claude Code on my laptop" }),
           el("label", null, "It can", el("select", { name: "access" },
-            el("option", { value: "all" }, "Do everything you can do"),
-            el("option", { value: "read" }, "Only read"))),
+            el("option", { value: "read", selected: true }, "Only read"),
+            el("option", { value: "all" }, "Do everything you can do"))),
           el("label", null, "For", el("select", { name: "days" },
             el("option", { value: "7" }, "7 days"),
             el("option", { value: "30", selected: true }, "30 days"),
@@ -417,6 +417,9 @@
         const minutesAgo = Math.max(0, Math.round((Date.now() - Date.parse(ask.requestedAt)) / 60000));
         const error = el("p", { class: "error", role: "alert" });
         const readOnly = el("input", { type: "checkbox", name: "readOnly" });
+        // Read-only unless the person chooses more: an agent that only reads
+        // cannot change anything by mistake.
+        readOnly.checked = true;
         show(
           header("Approve an agent"),
           el("section", null,
@@ -430,7 +433,7 @@
             el("p", { class: "small" }, el("strong", null, "Approve only a request your own agent just showed you."),
               " The name above is whatever the requester typed; a link someone sent you is not your agent asking."),
             el("p", { class: "small" }, `It asks to: ${askedAll ? "do everything you can do" : ask.scopes.join(", ")}, for ${days >= 1 ? `${days} day${days === 1 ? "" : "s"}` : `${Math.round(ask.expiresIn / 60)} minutes`}.`),
-            el("label", { class: "row small" }, readOnly, "Only let it read"),
+            el("label", { class: "row small" }, readOnly, "Only let it read (untick to let it make changes too)"),
             el("p", { class: "muted small" }, "It can never do more than you can, and it stops if your account is deactivated."),
             el("div", { class: "row" },
               el("button", {
